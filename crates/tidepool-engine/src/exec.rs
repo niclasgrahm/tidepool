@@ -108,6 +108,16 @@ impl Row for TableRow<'_> {
     }
 }
 
+/// The value of `access` for a row whose related row doesn't exist: as in
+/// a SQL `LEFT JOIN`, every column of the missing row is NULL, and a derived
+/// field is evaluated over those NULLs (`COALESCE(name, 'n/a')` is 'n/a').
+fn missing(access: &Access) -> Scalar {
+    match &access.target {
+        Target::Column(_) => Scalar::Null,
+        Target::Derived(expr) => eval(expr, &Vec::new()),
+    }
+}
+
 impl Reader<'_> {
     /// The value of `access` for an anchor row.
     fn value(&self, anchor: &TableSnapshot, at: RowRef, access: &Access) -> Scalar {
@@ -117,7 +127,7 @@ impl Reader<'_> {
             let segment = &table.segments[row.segment as usize];
             let Raw::Code(code) = segment.data.columns[hop.fk_column].get(row.offset as usize)
             else {
-                return Scalar::Null;
+                return missing(access);
             };
             let Some(next) = self
                 .indexes
@@ -126,10 +136,10 @@ impl Reader<'_> {
                 .copied()
                 .flatten()
             else {
-                return Scalar::Null;
+                return missing(access);
             };
             let Some(next_table) = self.snapshot.table(hop.to) else {
-                return Scalar::Null;
+                return missing(access);
             };
             table = next_table;
             row = next;

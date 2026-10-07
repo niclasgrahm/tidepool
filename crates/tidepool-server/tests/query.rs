@@ -174,3 +174,27 @@ async fn answers_follow_writes_to_related_tables() {
     let reply = post(&state, "/v1/query", &by_region).await;
     assert_eq!(reply.json()["rows"], json!([["south", 3]]));
 }
+
+#[tokio::test]
+async fn derived_fields_group_like_columns() {
+    let state = loaded().await;
+    // `coast` is derived from `region`: north and south aren't coastal
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["order_count"], "dimensions": [{"field": "customers.coast"}]}),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.json()["rows"], json!([["north", 2], ["south", 1]]));
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({
+            "metrics": ["order_count"],
+            "filters": [{"field": "customers.coast", "in": ["south"]}],
+        }),
+    )
+    .await;
+    assert_eq!(reply.json()["rows"], json!([[1]]));
+}

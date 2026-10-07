@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: derived metrics depend on each other in a loop: avg_order_value → margin → avg_order_value
-  --> model.ossie.yaml:55:17
+  --> model.ossie.yaml:60:17
    |
-55 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / margin" }] }
+60 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / margin" }] }
    |                 ^
 
 1 error, 0 warnings

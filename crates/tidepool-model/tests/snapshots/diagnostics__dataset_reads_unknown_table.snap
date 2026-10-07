@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: dataset `products` reads table `product`, which doesn't exist
-  --> model.ossie.yaml:23:13
+  --> model.ossie.yaml:28:13
    |
-23 |     source: product
+28 |     source: product
    |             ^^^^^^^
    = help: did you mean `products`?
 

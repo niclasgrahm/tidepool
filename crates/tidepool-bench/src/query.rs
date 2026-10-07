@@ -144,11 +144,21 @@ pub fn measure(snapshot: &Snapshot, runs: usize, only: Option<&str>) {
     };
     for metrics in sets {
         println!("  metrics: {}", metrics.join(", "));
-        measure_metrics(snapshot, &metrics, runs);
+        measure_metrics(snapshot, &metrics, "region", runs);
+    }
+    if only.is_none() {
+        // a derived field over a dictionary column groups like a stored one
+        println!("  metrics: revenue, order_count, paid_revenue (by a derived field)");
+        measure_metrics(
+            snapshot,
+            &["revenue", "order_count", "paid_revenue"],
+            "coast",
+            runs,
+        );
     }
 }
 
-fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], runs: usize) {
+fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], by: &str, runs: usize) {
     let model = &snapshot.model;
     let metric = |name: &str| {
         model
@@ -160,7 +170,7 @@ fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], runs: usize) {
     let query = Query {
         dimensions: vec![
             Dim {
-                field: field(model, "customers", "region"),
+                field: field(model, "customers", by),
                 grain: None,
             },
             Dim {
@@ -178,7 +188,7 @@ fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], runs: usize) {
         .run(snapshot, &query)
         .unwrap_or_else(|e| panic!("{e}"));
     println!(
-        "    cold: 2 dims × 3 metrics over all orders    {:>8.1} ms  ({} groups)",
+        "    cold: {by} × category, all orders     {:>8.1} ms  ({} groups)",
         started.elapsed().as_secs_f64() * 1000.0,
         result.rows.len()
     );

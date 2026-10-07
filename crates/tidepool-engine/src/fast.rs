@@ -38,6 +38,7 @@ use tidepool_store::store::{ColumnLayout, SegmentView, Snapshot, TableSnapshot};
 use tidepool_store::value::{Storage, Value};
 
 use crate::cache::{Caches, JoinColumn, Narrow};
+use crate::derived::DerivedDict;
 use crate::exec::scalar;
 use crate::plan::{AnchorPlan, Target};
 use crate::query::Condition;
@@ -64,9 +65,29 @@ struct Read<'s> {
     gathered: Option<Arc<Map>>,
     /// With caches, the gathered codes materialized per anchor segment.
     joined: Option<Vec<Arc<JoinColumn>>>,
+    /// The value's type (a derived field's, which its column's isn't).
+    ty: Type,
+    /// A derived field's dictionary: codes read are base codes, mapped
+    /// through it (already done in `gathered` maps).
+    derived: Option<Arc<DerivedDict>>,
     /// The column the value finally comes from.
     layout: ColumnLayout,
     dict: Option<&'s DictSnapshot>,
+}
+
+impl Read<'_> {
+    /// The value of a code this read produces.
+    fn code_value(&self, code: u32) -> Scalar {
+        match &self.derived {
+            Some(derived) => derived
+                .values
+                .as_slice()
+                .get(code as usize)
+                .cloned()
+                .unwrap_or(Scalar::Null),
+            None => dict_value(&self.layout, self.dict, code),
+        }
+    }
 }
 
 fn kind_of(layout: &ColumnLayout) -> Option<Kind> {
@@ -162,7 +183,7 @@ fn raw_ceil(value: &Scalar, column_type: ColumnType) -> Option<(i64, bool)> {
 }
 
 /// The value of every code of a dictionary, decoded.
-fn dict_value(layout: &ColumnLayout, dict: Option<&DictSnapshot>, code: u32) -> Scalar {
+pub(crate) fn dict_value(layout: &ColumnLayout, dict: Option<&DictSnapshot>, code: u32) -> Scalar {
     let Some(dict) = dict else {
         return Scalar::Null;
     };
@@ -183,7 +204,10 @@ fn dict_value(layout: &ColumnLayout, dict: Option<&DictSnapshot>, code: u32) -> 
 
 /// One value per code of `read`'s final dictionary: for building tests.
 fn code_space(read: &Read) -> usize {
-    read.dict.map_or(1, |d| d.len() as usize + 1)
+    match &read.derived {
+        Some(derived) => derived.values.len(),
+        None => read.dict.map_or(1, |d| d.len() as usize + 1),
+    }
 }
 
 /// Can this anchor plan run the fast way? Prepare it if so.
@@ -199,14 +223,37 @@ pub(crate) fn prepare<'s>(
     }
     let mut reads = Vec::new();
     for access in &plan.accesses {
-        let Target::Column(target_column) = access.target else {
-            return None;
+        // a column, or a derived field over one dictionary column
+        let (target_column, expr) = match &access.target {
+            Target::Column(column) => (*column, None),
+            Target::Derived(expr) => {
+                let mut slots = expr.slots();
+                slots.dedup();
+                let [slot] = slots.as_slice() else {
+                    return None;
+                };
+                (*slot as usize, Some((expr, *slot)))
+            }
         };
         let target_table = access.path.last().map_or(plan.table, |h| h.to);
         let target = snapshot.table(target_table)?;
         let layout = target.layouts.get(target_column)?.clone();
         let kind = kind_of(&layout)?;
         let dict = layout.dict.and_then(|d| snapshot.dicts.get(&d));
+        let derived = match expr {
+            None => None,
+            Some((expr, slot)) => {
+                let (Kind::Codes, Some(id), Some(base)) = (kind, layout.dict, dict) else {
+                    return None;
+                };
+                Some(match caches {
+                    Some(caches) => caches.derived(id, expr, slot, &layout, base),
+                    None => Arc::new(DerivedDict::empty().extend(expr, slot, &layout, base)),
+                })
+            }
+        };
+        // a derived field's values, for keying caches built from them
+        let variant = expr.map(|(e, _)| format!("{e:?}")).unwrap_or_default();
         let (column, gathered) = match access.path.first() {
             None => (target_column, None),
             Some(first) => {
@@ -225,7 +272,16 @@ pub(crate) fn prepare<'s>(
                             Some(&values),
                         )?;
                     }
-                    Some(Map::narrow(values))
+                    // base codes → derived codes (a missing row's 0 too)
+                    let mut missing = 0;
+                    if let (Some(derived), Values::Codes(codes)) = (&derived, &mut values) {
+                        let to = |code: u32| derived.map.get(code as usize).copied().unwrap_or(0);
+                        for c in codes.iter_mut() {
+                            *c = to(*c);
+                        }
+                        missing = to(0);
+                    }
+                    Some(Map::narrow(values, missing))
                 };
                 let map = match caches {
                     Some(caches) => {
@@ -235,7 +291,7 @@ pub(crate) fn prepare<'s>(
                             .map(|hop| snapshot.tables.get(&hop.to))
                             .collect::<Option<Vec<_>>>()?;
                         let hops = access.path.iter().map(|h| h.fk_column).collect();
-                        caches.map(&tables, hops, target_column, build)?
+                        caches.map(&tables, hops, target_column, &variant, build)?
                     }
                     None => Arc::new(build()?),
                 };
@@ -259,6 +315,8 @@ pub(crate) fn prepare<'s>(
         reads.push(Read {
             column,
             kind,
+            ty: access.ty,
+            derived,
             gathered,
             joined,
             layout,
@@ -274,13 +332,7 @@ pub(crate) fn prepare<'s>(
             let test = match read.kind {
                 Kind::Codes => Test::Codes(
                     (0..code_space(read))
-                        .map(|c| {
-                            condition.matches(&dict_value(
-                                &read.layout,
-                                read.dict,
-                                u32::try_from(c).unwrap_or(0),
-                            ))
-                        })
+                        .map(|c| condition.matches(&read.code_value(u32::try_from(c).unwrap_or(0))))
                         .collect(),
                 ),
                 Kind::Ints => match condition {
@@ -361,8 +413,7 @@ pub(crate) fn prepare<'s>(
                 }
                 let table = (0..code_space(read))
                     .map(|c| {
-                        let value =
-                            dict_value(&read.layout, read.dict, u32::try_from(c).unwrap_or(0));
+                        let value = read.code_value(u32::try_from(c).unwrap_or(0));
                         eval(filter, &OneSlot { slot: *slot, value }) == Scalar::Bool(true)
                     })
                     .collect();
@@ -381,10 +432,7 @@ pub(crate) fn prepare<'s>(
     let dims: Vec<(usize, Option<Part>)> = plan.dims.clone();
     for (access, part) in &dims {
         let read = &reads[*access];
-        let temporal = matches!(
-            read.layout.column_type,
-            ColumnType::Date | ColumnType::Timestamp | ColumnType::TimestampTz
-        );
+        let temporal = matches!(read.ty, Type::Date | Type::Timestamp | Type::TimestampTz);
         if part.is_some() && !temporal {
             return None;
         }
@@ -451,75 +499,100 @@ fn decode(column: &ColumnData, kind: Kind, rows: Range<usize>) -> Values {
 /// Values by a referenced key, for following a relationship. Codes are
 /// stored as narrow as they fit: these maps are read at random, so the
 /// smaller they are, the more of them stays in cache.
-pub(crate) enum Map {
+pub(crate) struct Map {
+    data: MapData,
+    /// The code of a key with no row: past the end of the map (a cached map
+    /// predates keys added since), or a key whose row doesn't exist. Code 0
+    /// (NULL), except for a derived field that is non-NULL over NULLs.
+    missing: u32,
+}
+
+enum MapData {
     Codes8(Vec<u8>),
     Codes16(Vec<u16>),
     Values(Values),
 }
 
 impl Map {
+    /// The code for key `code` (a code map's).
+    fn code(&self, code: usize) -> u32 {
+        match &self.data {
+            MapData::Codes8(m) => m.get(code).map_or(self.missing, |c| u32::from(*c)),
+            MapData::Codes16(m) => m.get(code).map_or(self.missing, |c| u32::from(*c)),
+            MapData::Values(Values::Codes(m)) => m.get(code).copied().unwrap_or(self.missing),
+            MapData::Values(_) => 0,
+        }
+    }
+
     fn is_codes(&self) -> bool {
         matches!(
-            self,
-            Self::Codes8(_) | Self::Codes16(_) | Self::Values(Values::Codes(_))
+            self.data,
+            MapData::Codes8(_) | MapData::Codes16(_) | MapData::Values(Values::Codes(_))
         )
     }
 
     /// One morsel of a join column: `rows` of the foreign key, followed.
     fn narrow_rows(&self, column: &ColumnData, rows: Range<usize>) -> Narrow {
-        match self {
-            Self::Codes8(m) => {
+        match &self.data {
+            MapData::Codes8(m) => {
                 let mut out = Vec::new();
-                column.map_codes(rows, m, 0u8, &mut out);
+                // `missing` is one of the map's codes, so it fits too
+                column.map_codes(rows, m, u8::try_from(self.missing).unwrap_or(0), &mut out);
                 Narrow::U8(out.into())
             }
-            Self::Codes16(m) => {
+            MapData::Codes16(m) => {
                 let mut out = Vec::new();
-                column.map_codes(rows, m, 0u16, &mut out);
+                column.map_codes(rows, m, u16::try_from(self.missing).unwrap_or(0), &mut out);
                 Narrow::U16(out.into())
             }
-            Self::Values(Values::Codes(m)) => {
+            MapData::Values(Values::Codes(m)) => {
                 let mut out = Vec::new();
-                column.map_codes(rows, m, 0u32, &mut out);
+                column.map_codes(rows, m, self.missing, &mut out);
                 Narrow::U32(out.into())
             }
-            Self::Values(_) => Narrow::U32(Box::new([])),
+            MapData::Values(_) => Narrow::U32(Box::new([])),
         }
     }
 
-    fn narrow(values: Values) -> Self {
-        match values {
+    /// `values` by key, `missing` for keys past the end.
+    fn narrow(values: Values, missing: u32) -> Self {
+        let data = match values {
             Values::Codes(codes) => {
-                let max = codes.iter().max().copied().unwrap_or(0);
-                if let Ok(codes) = codes
-                    .iter()
-                    .map(|c| u8::try_from(*c))
-                    .collect::<Result<Vec<_>, _>>()
-                {
-                    Self::Codes8(codes)
+                let max = codes.iter().max().copied().unwrap_or(0).max(missing);
+                if u8::try_from(max).is_ok() {
+                    MapData::Codes8(
+                        codes
+                            .iter()
+                            .map(|c| u8::try_from(*c).unwrap_or(0))
+                            .collect(),
+                    )
                 } else if u16::try_from(max).is_ok() {
-                    Self::Codes16(
+                    MapData::Codes16(
                         codes
                             .iter()
                             .map(|c| u16::try_from(*c).unwrap_or(0))
                             .collect(),
                     )
                 } else {
-                    Self::Values(Values::Codes(codes))
+                    MapData::Values(Values::Codes(codes))
                 }
             }
-            other => Self::Values(other),
-        }
+            other => MapData::Values(other),
+        };
+        Self { data, missing }
     }
 }
 
 /// Decode `rows` of a foreign-key column through `map` into `out`:
 /// following the relationship.
 fn follow_into(column: &ColumnData, map: &Map, rows: Range<usize>, out: &mut Values) {
-    match (map, out) {
-        (Map::Codes8(m), Values::Codes(v)) => column.map_codes(rows, m, 0u32, v),
-        (Map::Codes16(m), Values::Codes(v)) => column.map_codes(rows, m, 0u32, v),
-        (Map::Values(values), out) => through_into(column, values, rows, out),
+    match (&map.data, out) {
+        (MapData::Codes8(m), Values::Codes(v)) => column.map_codes(rows, m, map.missing, v),
+        (MapData::Codes16(m), Values::Codes(v)) => column.map_codes(rows, m, map.missing, v),
+        (MapData::Values(Values::Codes(m)), Values::Codes(v)) => {
+            column.map_codes(rows, m, map.missing, v);
+        }
+        (MapData::Values(values), out) => through_into(column, values, rows, out),
         _ => {}
     }
 }
@@ -648,31 +721,35 @@ fn sparse_into(
         (None, Values::Codes(o)) => column.gather_codes(start, sel, len, o),
         (None, Values::Ints(v, n)) => column.gather_i64(start, sel, len, v, n),
         (None, Values::Floats(v, n)) => column.gather_f64(start, sel, len, v, n),
-        (Some(Map::Codes8(m)), Values::Codes(o)) => {
+        (Some(map), Values::Codes(o)) => {
             o.resize(len, 0);
-            column.gather_map_codes(start, sel, m, 0u32, o);
+            match &map.data {
+                MapData::Codes8(m) => column.gather_map_codes(start, sel, m, map.missing, o),
+                MapData::Codes16(m) => column.gather_map_codes(start, sel, m, map.missing, o),
+                MapData::Values(Values::Codes(m)) => {
+                    column.gather_map_codes(start, sel, m, map.missing, o);
+                }
+                MapData::Values(_) => {}
+            }
         }
-        (Some(Map::Codes16(m)), Values::Codes(o)) => {
-            o.resize(len, 0);
-            column.gather_map_codes(start, sel, m, 0u32, o);
-        }
-        (Some(Map::Values(Values::Codes(m))), Values::Codes(o)) => {
-            o.resize(len, 0);
-            column.gather_map_codes(start, sel, m, 0, o);
-        }
-        (Some(Map::Values(Values::Ints(m, nulls))), Values::Ints(v, n)) => {
+        (Some(map), Values::Ints(v, n)) => {
+            let MapData::Values(Values::Ints(m, nulls)) = &map.data else {
+                return;
+            };
             v.resize(len, 0);
             n.resize(len, true);
             column.gather_map_codes(start, sel, m, 0, v);
             column.gather_map_codes(start, sel, nulls, true, n);
         }
-        (Some(Map::Values(Values::Floats(m, nulls))), Values::Floats(v, n)) => {
+        (Some(map), Values::Floats(v, n)) => {
+            let MapData::Values(Values::Floats(m, nulls)) = &map.data else {
+                return;
+            };
             v.resize(len, 0.0);
             n.resize(len, true);
             column.gather_map_codes(start, sel, m, 0.0, v);
             column.gather_map_codes(start, sel, nulls, true, n);
         }
-        _ => {}
     }
 }
 
@@ -1019,7 +1096,7 @@ fn keep(current: &mut Option<Cell>, cell: Cell, ranks: Option<&[u32]>, min: bool
 fn cell_scalar(read: &Read, cell: Cell) -> Scalar {
     match cell {
         Cell::Null => Scalar::Null,
-        Cell::Code(code) => dict_value(&read.layout, read.dict, code),
+        Cell::Code(code) => read.code_value(code),
         Cell::Int(v) => scalar(Value::from_i64(read.layout.column_type, v)),
         Cell::Float(f) => Scalar::Float(f),
     }
@@ -1044,8 +1121,32 @@ struct Bitset {
     /// One per bucket: whoever holds it owns that slice of `words`, so
     /// setting bits there needs no atomic read-modify-write.
     locks: Vec<std::sync::Mutex<()>>,
+    /// Dimensions the counted code determines, folded out of the group.
+    folded: Option<Folded>,
+    /// When small enough to copy per thread: one private bitset per worker,
+    /// set with plain stores and `OR`ed into `words` before counting. Threads
+    /// writing the same small bitset would fight over its cache lines.
+    private: Option<Vec<std::sync::Mutex<Vec<u64>>>>,
 }
 
+/// Bytes all private bitsets of one distinct count may take together.
+const PRIVATE_BYTES: usize = 64 << 20;
+
+/// When a dimension is reached through the very key being counted (region
+/// through `customer_id`, for `COUNT(DISTINCT customer_id)`), a code can
+/// only ever fall in one value of that dimension. The bitset then leaves
+/// those dimensions out of its group index, which makes it many times
+/// smaller (it fits in cache where the full one didn't), and puts them back
+/// when counting: each set bit's code says which group it belongs to.
+struct Folded {
+    /// Dense group id → id without the determined dimensions.
+    reduce: Vec<u32>,
+    /// Reduced id → dense group id, determined dimensions' parts at 0.
+    expand: Vec<usize>,
+    /// Per determined dimension: its stride in the dense id, and the
+    /// relationship map giving its code from the counted code.
+    determined: Vec<(usize, Arc<Map>)>,
+}
 /// Bit positions a task has yet to set, by bucket.
 #[derive(Default)]
 struct Pending {
@@ -1059,7 +1160,8 @@ const BUCKETS: usize = 64;
 const PENDING: usize = 1 << 17;
 
 impl Bitset {
-    fn new(groups: usize, space: usize) -> Self {
+    fn new(groups: usize, space: usize, folded: Option<Folded>) -> Self {
+        let groups = folded.as_ref().map_or(groups, |f| f.expand.len());
         let bits = groups * space;
         // at least 6: a word (64 bits) always lies in one bucket
         let shift = (usize::BITS - bits.leading_zeros())
@@ -1074,10 +1176,102 @@ impl Bitset {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             locks: (0..=BUCKETS).map(|_| std::sync::Mutex::new(())).collect(),
+            folded,
+            private: {
+                let threads = rayon::current_num_threads();
+                // debug builds (tests) take both ways on small data
+                let fits = if cfg!(debug_assertions) {
+                    space.is_multiple_of(2)
+                } else {
+                    threads * bits.div_ceil(64) * 8 <= PRIVATE_BYTES
+                };
+                fits.then(|| {
+                    (0..threads)
+                        .map(|_| std::sync::Mutex::new(Vec::new()))
+                        .collect()
+                })
+            },
         }
     }
 
+    /// OR every private bitset into `words`.
+    fn gather(&self) {
+        let Some(private) = &self.private else { return };
+        let private: Vec<std::sync::MutexGuard<'_, Vec<u64>>> = private
+            .iter()
+            .map(|p| p.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .filter(|p| !p.is_empty())
+            .collect();
+        self.words
+            .par_chunks(1 << 12)
+            .enumerate()
+            .for_each(|(chunk, words)| {
+                for (i, word) in words.iter().enumerate() {
+                    let at = (chunk << 12) + i;
+                    word.store(private.iter().fold(0, |w, p| w | p[at]), Ordering::Relaxed);
+                }
+            });
+    }
+
+    /// The distinct count of every dense group.
+    fn counts(&self, groups: usize) -> Vec<i64> {
+        self.gather();
+        let Some(folded) = &self.folded else {
+            return (0..groups).into_par_iter().map(|g| self.count(g)).collect();
+        };
+        // every set bit, sent to its full group
+        self.words
+            .par_chunks(1 << 12)
+            .enumerate()
+            .map(|(chunk, words)| {
+                let mut counts = vec![0i64; groups];
+                for (i, word) in words.iter().enumerate() {
+                    let mut bits = word.load(Ordering::Relaxed);
+                    while bits != 0 {
+                        let bit = ((chunk << 12) + i) * 64 + bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let (reduced, code) = (bit / self.space, bit % self.space);
+                        let group = folded.expand[reduced]
+                            + folded
+                                .determined
+                                .iter()
+                                .map(|(stride, map)| stride * map.code(code) as usize)
+                                .sum::<usize>();
+                        if let Some(n) = counts.get_mut(group) {
+                            *n += 1;
+                        }
+                    }
+                }
+                counts
+            })
+            .reduce(
+                || vec![0i64; groups],
+                |mut a, b| {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            )
+    }
+
     fn insert(&self, rows: &[u32], groups: &[u32], codes: &[u32], pending: &mut Pending) {
+        if let Some(private) = &self.private {
+            let mine = &private[rayon::current_thread_index().unwrap_or(0) % private.len()];
+            // only this thread takes its lock: it is never contended
+            let mut bits = mine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if bits.is_empty() {
+                bits.resize(self.words.len(), 0);
+            }
+            for (r, g) in rows.iter().zip(groups) {
+                let code = codes[*r as usize];
+                let g = self.folded.as_ref().map_or(*g, |f| f.reduce[*g as usize]);
+                let bit = g as usize * self.space + code as usize;
+                // a NULL (code 0) sets nothing
+                bits[bit / 64] |= u64::from(code != 0) << (bit % 64);
+            }
+            return;
+        }
         if pending.buckets.is_empty() {
             pending.buckets = (0..=BUCKETS).map(|_| Vec::new()).collect();
         }
@@ -1086,9 +1280,10 @@ impl Bitset {
             if code == 0 {
                 continue;
             }
+            let g = self.folded.as_ref().map_or(*g, |f| f.reduce[*g as usize]);
             // < BITSET_LIMIT, so it fits
             #[allow(clippy::cast_possible_truncation)]
-            let bit = (*g as usize * self.space + code as usize) as u32;
+            let bit = (g as usize * self.space + code as usize) as u32;
             pending.buckets[(bit >> self.shift) as usize].push(bit);
         }
         pending.count += rows.len();
@@ -1195,8 +1390,36 @@ impl Prepared<'_> {
     /// Decode read `read` for `rows` of a segment into `out`: every row, or
     /// only the rows in `sel` (relative to `rows.start`) when they are few.
     /// Other rows then hold arbitrary values, and nothing reads them.
+    /// [`Prepared::load_codes`], then a derived field's base codes mapped
+    /// to its own (related fields' maps are derived already).
     #[allow(clippy::too_many_arguments)]
     fn load(
+        &self,
+        view: &SegmentView,
+        segment: usize,
+        read: usize,
+        rows: Range<usize>,
+        sel: &[u32],
+        out: &mut Values,
+    ) {
+        self.load_codes(view, segment, read, rows.clone(), sel, out);
+        let read = &self.reads[read];
+        if let (None, Some(derived), Values::Codes(codes)) = (&read.gathered, &read.derived, out) {
+            let to = |code: u32| derived.map.get(code as usize).copied().unwrap_or(0);
+            if sel.len() * SPARSE < rows.len() {
+                for r in sel {
+                    codes[*r as usize] = to(codes[*r as usize]);
+                }
+            } else {
+                for c in codes.iter_mut() {
+                    *c = to(*c);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_codes(
         &self,
         view: &SegmentView,
         segment: usize,
@@ -1403,15 +1626,13 @@ impl Prepared<'_> {
                 (Cell::Null, _) => None,
                 (Cell::Code(c), None) => Some(i64::from(c)),
                 // a dictionary-coded date or timestamp: truncate its value
-                (Cell::Code(c), Some(part)) => {
-                    match dict_value(layout, self.reads[*read].dict, c) {
-                        Scalar::Date(d) => Some(truncate(*part, i64::from(d), memo)),
-                        Scalar::Timestamp(m) | Scalar::TimestampTz(m) => {
-                            Some(truncate(*part, days(m), memo))
-                        }
-                        _ => None,
+                (Cell::Code(c), Some(part)) => match self.reads[*read].code_value(c) {
+                    Scalar::Date(d) => Some(truncate(*part, i64::from(d), memo)),
+                    Scalar::Timestamp(m) | Scalar::TimestampTz(m) => {
+                        Some(truncate(*part, days(m), memo))
                     }
-                }
+                    _ => None,
+                },
                 (Cell::Int(v), None) => Some(v),
                 (Cell::Int(v), Some(part)) => {
                     let d = if layout.column_type == ColumnType::Date {
@@ -1473,9 +1694,7 @@ impl Prepared<'_> {
         let read = &self.reads[*read];
         match (grain, read.kind) {
             (Some(_), _) => Scalar::Date(i32::try_from(part).unwrap_or(0)),
-            (None, Kind::Codes) => {
-                dict_value(&read.layout, read.dict, u32::try_from(part).unwrap_or(0))
-            }
+            (None, Kind::Codes) => read.code_value(u32::try_from(part).unwrap_or(0)),
             (None, Kind::Ints) => scalar(Value::from_i64(read.layout.column_type, part)),
             (None, Kind::Floats) => Scalar::Float(f64::from_ne_bytes(part.to_ne_bytes())),
         }
@@ -1491,10 +1710,73 @@ impl Prepared<'_> {
                 let read = &self.reads[agg.arg?];
                 let ok = agg.func == AggFunc::Count && agg.distinct && read.kind == Kind::Codes;
                 let space = code_space(read);
-                (ok && groups.checked_mul(space)? <= BITSET_LIMIT)
-                    .then(|| Bitset::new(groups, space))
+                let folded = self.folded(agg.arg?);
+                let rows = folded.as_ref().map_or(groups, |f| f.expand.len());
+                (ok && rows.checked_mul(space)? <= BITSET_LIMIT)
+                    .then(|| Bitset::new(groups, space, folded))
             })
             .collect()
+    }
+
+    /// The dimensions a distinct count over read `arg` determines (see
+    /// [`Folded`]), if any.
+    fn folded(&self, arg: usize) -> Option<Folded> {
+        let spaces = self.dense.as_ref()?;
+        let counted = &self.reads[arg];
+        if counted.gathered.is_some() {
+            return None;
+        }
+        // stride of dimension i in `id = id * space + code`
+        let strides: Vec<usize> = (0..spaces.len())
+            .map(|i| spaces[i + 1..].iter().product())
+            .collect();
+        let determined: Vec<Option<Arc<Map>>> = self
+            .dims
+            .iter()
+            .map(|(read, _)| {
+                let read = &self.reads[*read];
+                read.gathered
+                    .as_ref()
+                    .filter(|map| read.column == counted.column && map.is_codes())
+                    .cloned()
+            })
+            .collect();
+        if determined.iter().all(Option::is_none) {
+            return None;
+        }
+        let kept: Vec<usize> = (0..spaces.len())
+            .filter(|i| determined[*i].is_none())
+            .collect();
+        let groups: usize = spaces.iter().product();
+        let reduce = (0..groups)
+            .map(|g| {
+                let id = kept
+                    .iter()
+                    .fold(0, |id, i| id * spaces[*i] + g / strides[*i] % spaces[*i]);
+                u32::try_from(id).unwrap_or(u32::MAX)
+            })
+            .collect();
+        let reduced: usize = kept.iter().map(|i| spaces[*i]).product();
+        let expand = (0..reduced)
+            .map(|r| {
+                let mut rest = r;
+                let mut full = 0;
+                for i in kept.iter().rev() {
+                    full += rest % spaces[*i] * strides[*i];
+                    rest /= spaces[*i];
+                }
+                full
+            })
+            .collect();
+        Some(Folded {
+            reduce,
+            expand,
+            determined: determined
+                .into_iter()
+                .zip(strides)
+                .filter_map(|(map, stride)| map.map(|m| (stride, m)))
+                .collect(),
+        })
     }
 
     /// Value ranks for MIN/MAX over dictionary codes, per aggregate.
@@ -1509,9 +1791,19 @@ impl Prepared<'_> {
                 if read.kind != Kind::Codes {
                     return None;
                 }
-                let sorted = read
-                    .dict?
-                    .sorted_codes(read.layout.column_type == ColumnType::Float64);
+                let sorted = match &read.derived {
+                    Some(derived) => {
+                        let mut codes: Vec<u32> =
+                            (1..u32::try_from(derived.values.len()).unwrap_or(u32::MAX)).collect();
+                        codes.sort_by(|a, b| {
+                            derived.values[*a as usize].sort_cmp(&derived.values[*b as usize])
+                        });
+                        codes
+                    }
+                    None => read
+                        .dict?
+                        .sorted_codes(read.layout.column_type == ColumnType::Float64),
+                };
                 let mut ranks = vec![0u32; sorted.iter().max().map_or(0, |m| *m as usize) + 1];
                 for (rank, code) in sorted.iter().enumerate() {
                     ranks[*code as usize] = u32::try_from(rank + 1).unwrap_or(u32::MAX);
@@ -1568,10 +1860,7 @@ impl Prepared<'_> {
         let groups = partial.seen.len();
         let counts: Vec<Option<Vec<i64>>> = shared
             .iter()
-            .map(|bits| {
-                bits.as_ref()
-                    .map(|bits| (0..groups).into_par_iter().map(|g| bits.count(g)).collect())
-            })
+            .map(|bits| bits.as_ref().map(|bits| bits.counts(groups)))
             .collect();
         let mut out = Vec::new();
         for group in 0..groups {

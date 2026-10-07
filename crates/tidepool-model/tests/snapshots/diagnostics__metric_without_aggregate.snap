@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `revenue` doesn't aggregate anything
-  --> model.ossie.yaml:44:63
+  --> model.ossie.yaml:49:63
    |
-44 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "orders.amount" }] }
+49 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "orders.amount" }] }
    |                                                               ^^^^^^^^^^^^^^^
    = help: a metric summarises rows, e.g. SUM(orders.amount); to combine metrics, add {"kind": "derived"}
 

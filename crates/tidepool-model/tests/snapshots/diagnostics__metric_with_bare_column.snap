@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `customer_count` uses `orders.quantity` outside an aggregate
-  --> model.ossie.yaml:53:63
+  --> model.ossie.yaml:58:63
    |
-53 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id) + orders.quantity" }] }
+58 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id) + orders.quantity" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: every column in a metric must be inside SUM(…), COUNT(…) and so on
 

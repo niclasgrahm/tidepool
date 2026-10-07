@@ -99,20 +99,25 @@ impl Packed {
     /// straddles two words, and a word is unpacked by shifting alone.
     pub fn unpack<T>(&self, rows: Range<usize>, out: &mut [T], convert: impl Fn(u64) -> T) {
         let width = usize::from(self.width);
-        if width > 0 && 64 % width == 0 && (rows.start * width).is_multiple_of(64) {
-            let mask = if width == 64 {
-                u64::MAX
-            } else {
-                (1u64 << width) - 1
-            };
-            let first = rows.start * width / 64;
-            for (chunk, word) in out.chunks_mut(64 / width).zip(&self.words[first..]) {
-                let mut word = *word;
-                for slot in chunk {
-                    *slot = convert(word & mask);
-                    // `width` < 64 here unless there is one value per word
-                    word = word.checked_shr(u32::from(self.width)).unwrap_or(0);
-                }
+        // whole blocks of 64 values (exactly `width` words) from a block
+        // boundary: unpacked by a loop specialized for the width
+        if rows.start.is_multiple_of(64) && (1..=32).contains(&width) {
+            let blocks = rows.len() / 64;
+            let first = rows.start / 64 * width;
+            let (head, tail) = out.split_at_mut(blocks * 64);
+            let words = &self.words[first..];
+            macro_rules! fixed {
+                ($($w:literal)*) => {
+                    match width {
+                        $($w => unpack_blocks::<$w, T>(words, head, &convert),)*
+                        _ => {}
+                    }
+                };
+            }
+            fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32);
+            let rest = rows.start + blocks * 64..rows.end;
+            for (slot, v) in tail.iter_mut().zip(self.iter(rest)) {
+                *slot = convert(v);
             }
             return;
         }
@@ -123,6 +128,25 @@ impl Packed {
 
     fn bytes(&self) -> usize {
         self.words.len() * 8
+    }
+}
+
+/// Unpack `out.len() / 64` blocks of 64 `W`-bit values from `words`
+/// (block `b` is words `b*W .. (b+1)*W`). With `W` a constant, every shift
+/// and index in a block is too, so the loop unrolls into straight code.
+fn unpack_blocks<const W: usize, T>(words: &[u64], out: &mut [T], convert: &impl Fn(u64) -> T) {
+    let mask = (1u64 << W) - 1;
+    for (block, chunk) in out.chunks_exact_mut(64).enumerate() {
+        // one spare word: a value may end in the next block's first word
+        // only when it doesn't (64 values fill exactly W words), but the
+        // read below is simpler with it, and `pack` always leaves one
+        let base = &words[block * W..=block * W + W];
+        for (i, slot) in chunk.iter_mut().enumerate() {
+            let bit = i * W;
+            let (word, shift) = (bit / 64, bit % 64);
+            let value = (base[word] >> shift) | ((base[word + 1] << 1) << (63 - shift));
+            *slot = convert(value & mask);
+        }
     }
 }
 

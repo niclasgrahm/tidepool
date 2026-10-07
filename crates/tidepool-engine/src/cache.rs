@@ -19,7 +19,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
-use tidepool_store::store::{SegmentData, TableSnapshot};
+use tidepool_expr::Expr;
+use tidepool_store::dict::DictSnapshot;
+use tidepool_store::store::{ColumnLayout, DictId, SegmentData, TableSnapshot};
+
+use crate::derived::DerivedDict;
 
 use crate::fast::{MORSEL, Map};
 use crate::query::ResultSet;
@@ -79,6 +83,8 @@ pub(crate) struct MapKey {
     pub tables: Vec<usize>,
     pub hops: Vec<usize>,
     pub column: usize,
+    /// The derived field the values are mapped through, if any.
+    pub variant: String,
 }
 
 struct MapEntry {
@@ -96,6 +102,9 @@ struct JoinEntry {
 struct Inner {
     maps: HashMap<MapKey, MapEntry>,
     joins: HashMap<(usize, usize), JoinEntry>,
+    /// Derived dictionaries per (base dictionary, expression). Codes never
+    /// change, so an entry stays valid; it is extended as its base grows.
+    derived: HashMap<(DictId, String), Arc<DerivedDict>>,
     /// (epoch, query) → answer, oldest first; only the newest epoch's.
     results: VecDeque<((u64, String), ResultSet)>,
 }
@@ -136,12 +145,14 @@ impl Caches {
         tables: &[&Arc<TableSnapshot>],
         hops: Vec<usize>,
         column: usize,
+        variant: &str,
         build: impl FnOnce() -> Option<Map>,
     ) -> Option<Arc<Map>> {
         let key = MapKey {
             tables: tables.iter().map(|t| address(t)).collect(),
             hops,
             column,
+            variant: variant.to_string(),
         };
         if let Some(entry) = self.lock().maps.get(&key)
             && entry
@@ -162,6 +173,38 @@ impl Caches {
             },
         );
         Some(map)
+    }
+
+    /// The derived dictionary of `expr` over `dict`, covering every code.
+    pub(crate) fn derived(
+        &self,
+        id: DictId,
+        expr: &Expr,
+        slot: u32,
+        layout: &ColumnLayout,
+        dict: &DictSnapshot,
+    ) -> Arc<DerivedDict> {
+        let key = (id, format!("{expr:?}"));
+        let known = self.lock().derived.get(&key).cloned();
+        if let Some(known) = &known
+            && known.covers(dict)
+        {
+            return Arc::clone(known);
+        }
+        // extended outside the lock; the newest one wins
+        let next = Arc::new(match known {
+            Some(known) => known.extend(expr, slot, layout, dict),
+            None => DerivedDict::empty().extend(expr, slot, layout, dict),
+        });
+        let mut inner = self.lock();
+        let keep = inner
+            .derived
+            .get(&key)
+            .is_none_or(|k| k.map.len() < next.map.len());
+        if keep {
+            inner.derived.insert(key, Arc::clone(&next));
+        }
+        next
     }
 
     /// The join column of `segment` through `map`, empty until scanned.

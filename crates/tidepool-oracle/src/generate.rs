@@ -406,6 +406,22 @@ pub fn schema(rng: &mut Rng) -> Schema {
             sql_expr: "UPPER(d0.name)".into(),
             temporal: false,
         },
+        // non-NULL for a NULL input: a missing related row must still be
+        // NULL, a present one with no name 'nobody'
+        DerivedField {
+            table: "d0".into(),
+            name: "named".into(),
+            model_expr: "COALESCE(name, 'nobody')".into(),
+            sql_expr: "COALESCE(d0.name, 'nobody')".into(),
+            temporal: false,
+        },
+        DerivedField {
+            table: "f0".into(),
+            name: "status_or_none".into(),
+            model_expr: "COALESCE(status, 'none')".into(),
+            sql_expr: "COALESCE(f0.status, 'none')".into(),
+            temporal: false,
+        },
     ];
 
     let table_ext = |t: &str| Some(format!(r#"{{"table": "{t}"}}"#));

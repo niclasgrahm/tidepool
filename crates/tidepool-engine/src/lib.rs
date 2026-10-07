@@ -6,6 +6,7 @@
 //! green.
 
 mod cache;
+mod derived;
 mod exec;
 mod fast;
 mod plan;

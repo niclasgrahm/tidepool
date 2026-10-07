@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: invalid `TIDEPOOL` extension: key must be a string at line 1 column 2
-  --> model.ossie.yaml:63:15
+  --> model.ossie.yaml:68:15
    |
-63 |         data: '{ignore_selection: [customers.region]}'
+68 |         data: '{ignore_selection: [customers.region]}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 1 error, 0 warnings

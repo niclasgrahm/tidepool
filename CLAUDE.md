@@ -205,15 +205,27 @@ that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
 - **Two executors, same answers.** `exec.rs` is the general path: decodes
   every value into a `Scalar` and evaluates expressions; slow, always right.
   `fast.rs` takes any anchor plan whose values are plain columns
-  (dictionary codes, i64, f64) and whose aggregates are simple; it works on
-  64K-row morsels in parallel with selection vectors, follows relationships
+  (dictionary codes, i64, f64) or derived fields over one dictionary column,
+  and whose aggregates are simple. It works on 16K-row morsels in parallel
+  with branch-free selection vectors (about half the rows pass a typical
+  selection, the worst case for a predicted branch), follows relationships
   through arrays indexed by foreign-key code (`scatter`/`follow`), tests
-  dictionary conditions once per code, uses dense group ids when every
-  dimension is a code, and counts distinct codes in one shared bitset.
-  `prepare` returning `None` means "use the general path"; never make the
-  fast path answer something it can't do exactly.
+  dictionary conditions once per code, and uses dense group ids when every
+  dimension is a code. `COUNT(DISTINCT code)` sets bits in a group × code
+  bitset: per thread when small, shared and bucketed by range when not, and
+  with any dimension the counted key itself determines folded out
+  (`Folded`). `prepare` returning `None` means "use the general path";
+  never make the fast path answer something it can't do exactly.
+- **Derived dictionaries** (`derived.rs`): a derived field over one
+  dictionary column is evaluated once per dictionary value; its results get
+  codes of their own, so it reads, groups and filters like a stored column.
+  They only grow, as their base dictionaries do.
 - **Semantics** follow DuckDB, except dividing by zero is NULL. No
-  dimensions means exactly one row, as in SQL.
+  dimensions means exactly one row, as in SQL. A related row that doesn't
+  exist reads as all NULLs, as in a `LEFT JOIN`: a derived field over it is
+  still evaluated (`COALESCE(name, 'n/a')` is 'n/a'). A relationship map
+  therefore carries the code of a missing row (`Map::missing`), which isn't
+  always NULL.
 - **Caches** (`cache.rs`) live in an `Engine`, which the server keeps for
   its lifetime; the free `run` is uncached. Entries are keyed by the
   *identity* of immutable store data (an unchanged table keeps its

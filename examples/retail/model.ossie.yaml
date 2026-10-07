@@ -19,6 +19,11 @@ datasets:
     fields:
       - name: region
         expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
+      - name: coast                      # derived over one dictionary column: evaluated per
+        expression:                      # region, not per row (a derived dictionary, plan §4.4)
+          dialects:
+            - dialect: ANSI_SQL
+              expression: "CASE WHEN region IN ('east', 'west') THEN 'coastal' ELSE COALESCE(region, 'unknown') END"
   - name: products
     source: products
     primary_key: [product_id]

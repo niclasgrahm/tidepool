@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `customer_count` reads customers, products, and no one of them reaches the others
-  --> model.ossie.yaml:53:63
+  --> model.ossie.yaml:58:63
    |
-53 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customers.customer_id) + COUNT(products.product_id)" }] }
+58 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customers.customer_id) + COUNT(products.product_id)" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: a metric aggregates one table's rows; split it into one metric per table and combine them with a derived metric
 

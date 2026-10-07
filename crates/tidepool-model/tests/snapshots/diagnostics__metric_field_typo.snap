@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `customer_count` refers to unknown field `orders.customr_id`
-  --> model.ossie.yaml:53:63
+  --> model.ossie.yaml:58:63
    |
-53 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customr_id)" }] }
+58 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customr_id)" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: did you mean `orders.customer_id`?
 
