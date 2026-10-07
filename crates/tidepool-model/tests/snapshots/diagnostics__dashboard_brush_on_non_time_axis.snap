@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `trend`: only line charts over a time field can be brushed
+  --> dashboards/sales.yaml:25:5
+   |
+25 |     on_brush: select_range
+   |     ^^^^^^^^
+
+1 error, 0 warnings

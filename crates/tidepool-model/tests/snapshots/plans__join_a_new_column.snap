@@ -1,0 +1,10 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/products.yaml\", \"  category:   { type: string }\",\n\"  category:   { type: string }\\n  supplier:   { type: string, nullable: true }\"),\nAdd(\"tables/suppliers.yaml\",\n\"name: suppliers\\nmode: upsert\\nprimary_key: [supplier_id]\\ncolumns:\\n  supplier_id: { type: string }\\n\"),\nReplace(\"model.ossie.yaml\", \"\\nrelationships:\\n\",\n\"  - name: suppliers\\n    source: suppliers\\n\\nrelationships:\\n\"),\nReplace(\"model.ossie.yaml\", \"\\nmetrics:\\n\",\n\"  - name: product_supplier\\n    from: products\\n    to: suppliers\\n    from_columns: [supplier]\\n    to_columns: [supplier_id]\\n\\nmetrics:\\n\")])"
+---
+4 changes (4 safe, 0 rebuild, 0 destructive)
+
+  + column       products.supplier  string                safe
+  + table        suppliers  upsert, 1 column              safe
+  + relationship product_supplier (products → suppliers)  safe
+  + dataset      suppliers                                safe

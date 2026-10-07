@@ -18,7 +18,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D5 | One-directional filtering (v1) | Selections flow from the one-side to the many-side of a relationship (dimension → fact). Bidirectional "possible values" is a planned later addition; the selection engine is designed so it can be added. |
 | D6 | Ingest mode declared per table | `append` (default for facts, cheapest) or `upsert` (delete the old version + append the new one; default for dimensions). |
 | D7 | Config as code, with live apply | Config files are the source of truth. Every change, whether from files, the UI, the API or an agent, goes through one validate → plan → apply pipeline and is written back to the files. |
-| D8 | Semantic layer in Apache Ossie | Pinned to spec **0.1.1**. Tidepool-specific semantics live in `custom_extensions`. Internally everything compiles to our own Model IR. |
+| D8 | Semantic layer in Apache Ossie | Written in the **0.2** shape (flat at the document root, as on Ossie's main branch); 0.1.1's wrapped `semantic_model:` shape is accepted and unwrapped. Expressions are read in `OSSIE_SQL_2026` (Ossie's SQL:2003 subset, its default dialect from 0.2), falling back to `ANSI_SQL`. Tidepool-specific semantics live in `custom_extensions` with `vendor_name: TIDEPOOL` and JSON `data`, as the spec defines. Internally everything compiles to our own Model IR. (Decided in M1, 2026-10-07; the earlier "pin 0.1.1" assumed a format 0.1.1 doesn't have.) |
 | D9 | Expressions are SQL | Row and aggregate expressions use SQL syntax (parsed with sqlparser-rs). Metric modifiers are structured YAML, not a new language. |
 | D10 | Frontend is **Leptos (client-side rendered, built with trunk)**, embedded in the binary | Decided by the M0 spike (2026-10-07, `spikes/leptos-charts/README.md`): the whole ECharts wrapper is 120 lines; searching 50k rows takes 4–5 ms; a selection click re-renders everything in 5–14 ms. One stack with Kayak, and the UI uses `tidepool-protocol` types directly. Client-side only rather than Kayak's SSR + hydrate: a logged-in dashboard app gains nothing from server rendering, and a static `dist/` keeps embedding trivial. |
 | D11 | Every update batch ("epoch") is consistent | Every result the server sends is tagged with an epoch. A client never shows a mix of results from different epochs on one screen. |
@@ -81,6 +81,8 @@ The data directory is separate and is the server's internal state (see §4.7). R
 
 ### 3.2 `tidepool.yaml`
 
+As of M1 the server config accepts `listen`, `data_dir`, `epoch_interval`, `memory_budget` and `durability`; `auth`, `config_writeback` and `agents` are added with the milestones that implement them (M7, M8), since unknown keys are rejected.
+
 ```yaml
 listen: 0.0.0.0:7070
 data_dir: ./data                 # overridable with --data
@@ -114,7 +116,7 @@ columns:
   status:      { type: string }
   ordered_at:  { type: timestamptz }
   quantity:    { type: int32 }
-  amount:      { type: decimal(14,2) }
+  amount:      { type: "decimal(14,2)" }
   note:        { type: string, nullable: true, encoding: plain }
 ```
 
@@ -143,10 +145,10 @@ Columns are non-nullable unless `nullable: true` is set. Ingest rejects rows tha
 
 ### 3.4 Semantic model (`model.ossie.yaml`)
 
-The structure follows the Ossie core spec (`datasets`, `fields`, `relationships`, `metrics`, `custom_extensions`). The exact extension envelope must be checked against spec 0.1.1 in M1. The shape below assumes `custom_extensions: [{vendor_name, data}]`.
+The structure follows the Ossie core spec, 0.2 shape (D8). Every column of a dataset's table is implicitly a field of the dataset under its own name; declaring a field adds a label, a description, a time role, or a derived expression. The file below is `examples/retail/model.ossie.yaml`.
 
 ```yaml
-version: "0.1.1"
+version: "0.2.0"
 name: retail
 datasets:
   - name: orders
@@ -195,28 +197,28 @@ metrics:
   - name: order_count
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
     custom_extensions:
-      - vendor_name: tidepool
+      - vendor_name: TIDEPOOL
         data: '{"table": "orders"}'      # anchor table for COUNT(*)
   - name: customer_count
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id)" }] }
   - name: avg_order_value
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_count" }] }
     custom_extensions:
-      - vendor_name: tidepool
+      - vendor_name: TIDEPOOL
         data: '{"kind": "derived"}'      # expression over other metrics, computed after aggregation
   - name: revenue_all_regions
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
     custom_extensions:
-      - vendor_name: tidepool
+      - vendor_name: TIDEPOOL
         data: '{"ignore_selection": ["customers.region"]}'
   - name: revenue_prev_year
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
     custom_extensions:
-      - vendor_name: tidepool
+      - vendor_name: TIDEPOOL
         data: '{"time_offset": "-1y", "time_field": "orders.ordered_at"}'
 
 custom_extensions:
-  - vendor_name: tidepool
+  - vendor_name: TIDEPOOL
     data: '{"filter_direction": "one_to_many"}'
 ```
 
@@ -229,11 +231,11 @@ custom_extensions:
 | metric | `ignore_selection: [field…]` | evaluate as if these fields had no selection (`"*"` = all) |
 | metric | `time_offset`, `time_field` | evaluate with the time selection shifted (M8) |
 | metric | `format` | display hint: `currency:EUR`, `percent`, `int`, … |
-| field | `grain` | for time fields: allowed grains (`day`, `week`, `month`, `quarter`, `year`) |
+| field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
 | model | `filter_direction` | `one_to_many` (v1 only value) |
 
-Only the `ANSI_SQL` dialect is read. Other dialects in the file are kept but ignored, so a model can be shared with other Ossie tools.
+Only `OSSIE_SQL_2026` and `ANSI_SQL` are read (in that order of preference). Other dialects in the file are kept but ignored, so a model can be shared with other Ossie tools. A YAML gotcha the validator explains: in a `{ … }` flow mapping a comma ends the value, so write `type: "decimal(14,2)"` quoted.
 
 ### 3.5 Dashboard file
 
@@ -290,7 +292,7 @@ tidepool/
 ├── crates/
 │   ├── tidepool-config/          # [Apache-2.0] serde types for all YAML files (serde_norway), parsing, JSON Schema, error spans (miette)
 │   ├── tidepool-model/           # Model IR, compiler (config → IR), validation, diff/plan, catalog (stable IDs)
-│   ├── tidepool-expr/            # SQL expression parsing (sqlparser), type checking, expression IR, vectorized kernels
+│   ├── tidepool-expr/            # SQL expressions: syntax + reference analysis (M1), type checking, IR, vectorized kernels (M3)
 │   ├── tidepool-store/           # types, dictionaries, segments, tail, PK index, delete bitmaps, epochs/snapshots, WAL, persistence
 │   ├── tidepool-engine/          # selection engine, aggregate states, executor, caches, subscription manager
 │   ├── tidepool-protocol/        # [Apache-2.0] wire types (shared with the wasm frontend), the endpoint table, Arrow frame encoding
@@ -304,7 +306,7 @@ tidepool/
 └── docs/
 ```
 
-Dependencies flow strictly one way: `config → model → expr → store → engine → server → tidepool`. `protocol` depends only on `config` types.
+Dependencies flow strictly one way: `config → expr → model → store → engine → server → tidepool`. `expr` comes before `model` because the model compiler resolves names in expressions; type checking (M3) takes the schema through a trait the model implements. `protocol` depends only on serde/schemars.
 
 ### 4.2 Runtime overview
 
@@ -855,8 +857,11 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** `just build` produces one binary that serves a hello-world UI; `just ci` green; D10 decided.
 
 ### M1: Config and model compiler (2–3 wks)
+
+**Status: done 2026-10-07.** 44 malformed-config golden cases (each yields exactly one error, at the offending token, with no cascades) and 19 plan scenarios; `tidepool validate`, `tidepool plan`, `GET /v1/schemas/{kind}`. Ossie format settled as D8.
+
 - Serde types for `tidepool.yaml`, tables, Ossie subset + extensions, dashboards. YAML parsing with spans.
-- **Before starting:** verify the Ossie 0.1.1 extension envelope against the spec. YAML parsing uses `serde_norway` (as in Kayak).
+- **Before starting:** verify the Ossie extension envelope against the spec. YAML parsing uses `serde_norway` (as in Kayak).
 - Model IR, full validation (§4.3), key domain assignment.
 - Catalog with stable IDs. Diff → Plan with change classes.
 - JSON Schemas.
@@ -961,7 +966,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 2. **Viewer identity:** Kayak's auth stack (D14) gives us named users via Basic/JWT. Should sessions and selection history be tied to the user (resume on another device) or only to the browser in v0.1?
 3. **Time zones:** dashboard-level time zone for grains (`day` in which zone)? Proposal: a `timezone` setting in `tidepool.yaml`, overridable per dashboard.
 4. **Late-arriving data with `event_time` far in the past:** accept always (affects zone maps only), or reject outside a window?
-5. **Ossie upgrade:** do we move to 0.2 as soon as it's stable? It may add some of our extension concepts natively.
+5. **Ossie upgrade:** we write the 0.2 shape already (D8). When 0.2 is released, check whether it adds any of our extension concepts (derived metrics, filters, time grains) natively, and read those too.
 6. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
 
 ---

@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\", \"  note:\",\n\"  channel:     { type: string }\\n  note:\")])"
+---
+1 change (0 safe, 0 rebuild, 1 destructive)
+
+  + column       orders.channel  string  destructive  (existing rows have no value for it; add it as nullable to keep them)

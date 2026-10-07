@@ -16,12 +16,17 @@ name = "tidepool"
 path = "src/main.rs"
 
 [dependencies]
+tidepool-config.workspace = true
+tidepool-model.workspace = true
 tidepool-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 default = []

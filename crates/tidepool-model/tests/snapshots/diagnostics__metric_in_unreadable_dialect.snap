@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `customer_count` has no expression in a dialect Tidepool reads
+  --> model.ossie.yaml:53:17
+   |
+53 |     expression: { dialects: [{ dialect: SNOWFLAKE, expression: "COUNT(DISTINCT orders.customer_id)" }] }
+   |                 ^
+   = help: add one in OSSIE_SQL_2026 or ANSI_SQL (found: SNOWFLAKE)
+
+1 error, 0 warnings

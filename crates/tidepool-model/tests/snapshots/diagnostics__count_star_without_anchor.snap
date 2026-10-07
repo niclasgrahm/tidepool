@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `order_count` doesn't say which table's rows it counts
+  --> model.ossie.yaml:48:63
+   |
+48 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+   |                                                               ^^^^^^^^^^
+   = help: add a TIDEPOOL extension naming the dataset: {"table": "orders"}
+
+1 error, 0 warnings

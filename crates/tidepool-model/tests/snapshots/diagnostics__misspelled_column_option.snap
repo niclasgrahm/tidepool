@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: columns.segment: unknown field `nulable`, expected one of `type`, `nullable`, `encoding`, `renamed_from`
+ --> tables/customers.yaml:8:32
+  |
+8 |   segment:     { type: string, nulable: true }
+  |                                ^
+
+1 error, 0 warnings

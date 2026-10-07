@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: columns.status: unknown column type `varchar`; expected one of bool, int32, int64, float64, decimal(p,s), string, date, timestamp, timestamptz
+ --> tables/orders.yaml:9:16
+  |
+9 |   status:      { type: varchar }
+  |                ^
+
+1 error, 0 warnings

@@ -1,0 +1,10 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\",\n\"  note:        { type: string, nullable: true, encoding: plain }\",\n\"  comment:     { type: string, nullable: true, encoding: plain }\")])"
+---
+2 changes (1 safe, 0 rebuild, 1 destructive)
+
+  + column       orders.comment  string  safe
+  - column       orders.note             destructive  (its data is deleted)
+
+warning: `orders.note` was removed and `orders.comment` added with the same type: if this is a rename, add `renamed_from: note` to the column to keep its data

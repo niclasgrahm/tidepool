@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\", \"quantity:    { type: int32 }\",\n\"quantity:    { type: int64 }\")])"
+---
+1 change (0 safe, 1 rebuild, 0 destructive)
+
+  ~ column       orders.quantity  int32 → int64  rebuild

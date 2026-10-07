@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde_json::Value;
+use tidepool_protocol::api_docs::ApiError;
 use tidepool_protocol::{ProbeState, ProbeStatus, ServerInfo};
 
 use crate::AppState;
@@ -52,4 +53,21 @@ pub async fn info() -> Json<ServerInfo> {
 /// `GET /v1/openapi.json`
 pub async fn openapi() -> Json<Value> {
     Json(crate::openapi::document())
+}
+
+/// `GET /v1/schemas/{kind}`
+pub async fn schema(Path(kind): Path<String>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    tidepool_config::schema::schema(&kind)
+        .map(Json)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!(
+                        "no schema `{kind}`; kinds: {}",
+                        tidepool_config::schema::KINDS.join(", ")
+                    ),
+                }),
+            )
+        })
 }

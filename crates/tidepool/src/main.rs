@@ -1,11 +1,13 @@
 //! The `tidepool` binary: the CLI over everything else in the workspace.
 //!
-//! Only argument parsing, logging setup and wiring live here. Subcommands that
-//! do real work (`validate`, `plan`, `init`) arrive with the milestones that
-//! give them something to do.
+//! Only argument parsing, logging setup and wiring live here; `check` holds
+//! the config subcommands.
+
+mod check;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -36,30 +38,56 @@ enum Command {
         #[arg(long)]
         ui_dir: Option<PathBuf>,
     },
+    /// Check a config directory: every file, and how they fit together.
+    Validate {
+        /// The config directory.
+        #[arg(long, default_value = ".")]
+        config: PathBuf,
+    },
+    /// Show what changes from one config to another, and what each change costs.
+    Plan {
+        /// The config directory with the changes.
+        #[arg(long, default_value = ".")]
+        config: PathBuf,
+        /// The config directory to compare against. Without it, the plan is
+        /// against an empty project.
+        #[arg(long)]
+        base: Option<PathBuf>,
+    },
+}
+
+fn main() -> ExitCode {
+    match Cli::parse().command {
+        Command::Validate { config } => check::validate(&config),
+        Command::Plan { config, base } => check::plan(&config, base.as_deref()),
+        Command::Serve { listen, ui_dir } => match run_server(listen, ui_dir) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run_server(listen: SocketAddr, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    match Cli::parse().command {
-        Command::Serve { listen, ui_dir } => {
-            let ui: Option<Arc<dyn Assets>> = match ui_dir {
-                Some(dir) => {
-                    anyhow::ensure!(
-                        dir.join("index.html").is_file(),
-                        "--ui-dir {} has no index.html; build the frontend first",
-                        dir.display()
-                    );
-                    Some(Arc::new(DirAssets::new(dir)))
-                }
-                None => ui::embedded(),
-            };
-            serve(listen, Arc::new(AppState::new(ui))).await
+    let ui: Option<Arc<dyn Assets>> = match ui_dir {
+        Some(dir) => {
+            anyhow::ensure!(
+                dir.join("index.html").is_file(),
+                "--ui-dir {} has no index.html; build the frontend first",
+                dir.display()
+            );
+            Some(Arc::new(DirAssets::new(dir)))
         }
-    }
+        None => ui::embedded(),
+    };
+    serve(listen, Arc::new(AppState::new(ui))).await
 }

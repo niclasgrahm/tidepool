@@ -9,5 +9,5 @@ columns:
   status:      { type: string }
   ordered_at:  { type: timestamptz }
   quantity:    { type: int32 }
-  amount:      { type: decimal(14,2) }
+  amount:      { type: "decimal(14,2)" }
   note:        { type: string, nullable: true, encoding: plain }

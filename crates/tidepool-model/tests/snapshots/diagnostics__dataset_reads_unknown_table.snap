@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: dataset `products` reads table `product`, which doesn't exist
+  --> model.ossie.yaml:23:13
+   |
+23 |     source: product
+   |             ^^^^^^^
+   = help: did you mean `products`?
+
+1 error, 0 warnings

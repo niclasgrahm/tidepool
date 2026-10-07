@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"model.ossie.yaml\", \"\\\"COUNT(DISTINCT orders.customer_id)\\\"\",\n\"\\\"COUNT(DISTINCT orders.order_id)\\\"\")])"
+---
+1 change (1 safe, 0 rebuild, 0 destructive)
+
+  ~ metric       customer_count  expression  safe

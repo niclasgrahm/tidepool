@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `orders` reaches `suppliers` two ways (order_supplier and order_product → product_supplier), and nothing tells them apart
+  --> model.ossie.yaml:42:11
+   |
+42 |   - name: product_supplier
+   |           ^^^^^^^^^^^^^^^^
+   = help: give the relationships distinct roles in a TIDEPOOL extension: {"role": "…"}
+
+1 error, 0 warnings

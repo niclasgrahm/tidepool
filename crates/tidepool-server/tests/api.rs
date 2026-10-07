@@ -86,27 +86,23 @@ fn http_method(method: Method) -> HttpMethod {
     }
 }
 
-/// Replace `{placeholders}` with a value so the path can be requested.
-fn concrete(path: &str) -> String {
-    path.split('/')
-        .map(|segment| {
-            if segment.starts_with('{') {
-                "x"
-            } else {
-                segment
-            }
+/// The path with every `{placeholder}` replaced by its documented example.
+fn concrete(endpoint: &tidepool_protocol::api_docs::ApiDoc) -> String {
+    endpoint
+        .params
+        .iter()
+        .fold(endpoint.path.to_string(), |path, param| {
+            path.replace(&format!("{{{}}}", param.name), param.example)
         })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[tokio::test]
 async fn every_documented_endpoint_is_routed_at_its_documented_method() {
     for endpoint in endpoints() {
-        let path = concrete(endpoint.path);
+        let path = concrete(&endpoint);
         let reply = call(ready_state(), http_method(endpoint.method), &path).await;
         assert!(
-            reply.status != StatusCode::NOT_FOUND && reply.status != StatusCode::METHOD_NOT_ALLOWED,
+            reply.status.is_success(),
             "{} {} came back {}",
             endpoint.method.label(),
             path,
@@ -331,4 +327,25 @@ async fn the_ui_answers_only_reads() {
     let dir = ui_dir();
     let reply = call(state_with_ui(&dir), HttpMethod::POST, "/").await;
     assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn every_config_kind_has_a_schema_and_others_are_404() {
+    for kind in tidepool_config::schema::KINDS {
+        let reply = call(
+            ready_state(),
+            HttpMethod::GET,
+            &format!("/v1/schemas/{kind}"),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{kind}");
+        assert!(reply.json().is_object(), "{kind}");
+    }
+    let reply = call(ready_state(), HttpMethod::GET, "/v1/schemas/nope").await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert!(
+        reply.json()["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("kinds: server, table"))
+    );
 }

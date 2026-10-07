@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: invalid `TIDEPOOL` extension: unknown field `ignore_selecton`, expected one of `kind`, `table`, `ignore_selection`, `time_offset`, `time_field`, `format` at line 1 column 18
+  --> model.ossie.yaml:63:15
+   |
+63 |         data: '{"ignore_selecton": ["customers.region"]}'
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

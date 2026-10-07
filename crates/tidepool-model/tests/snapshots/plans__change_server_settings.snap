@@ -1,0 +1,8 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tidepool.yaml\", \"epoch_interval: 200ms\",\n\"epoch_interval: 500ms\\nlisten: 0.0.0.0:7070\"),\nReplace(\"tidepool.yaml\", \"listen: 127.0.0.1:7070\\n\", \"\")])"
+---
+2 changes (2 safe, 0 rebuild, 0 destructive)
+
+  ~ setting      listen  127.0.0.1:7070 → 0.0.0.0:7070  safe  (takes effect on restart)
+  ~ setting      epoch_interval  200ms → 500ms          safe

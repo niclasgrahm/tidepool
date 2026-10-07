@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\", \"retention: 730d\", \"retention: 365d\")])"
+---
+1 change (1 safe, 0 rebuild, 0 destructive)
+
+  ~ table        orders  retention 730d → 365d  safe

@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: primary key column `produkt_id` is not a column of `products`
+ --> tables/products.yaml:3:15
+  |
+3 | primary_key: [produkt_id]
+  |               ^^^^^^^^^^
+  = help: did you mean `product_id`?
+
+1 error, 0 warnings

@@ -1,0 +1,9 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+warning: `tables/archive/old.yaml` is not a Tidepool config file, so it is ignored
+ --> tables/archive/old.yaml
+  = help: config files are tidepool.yaml, model.ossie.yaml, tables/<table>.yaml and dashboards/<id>.yaml
+
+0 errors, 1 warning

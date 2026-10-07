@@ -67,6 +67,7 @@ fn operation(endpoint: &ApiDoc) -> Value {
                 "in": "path",
                 "required": true,
                 "description": param.description,
+                "example": param.example,
                 "schema": { "type": "string" },
             })
         })
@@ -76,6 +77,7 @@ fn operation(endpoint: &ApiDoc) -> Value {
                 "in": "query",
                 "required": false,
                 "description": param.description,
+                "example": param.example,
                 "schema": { "type": "string" },
             })
         }))

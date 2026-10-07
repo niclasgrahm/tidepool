@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: relationship `order_product` joins `orders.product_id`, which is `encoding: plain`
+  --> model.ossie.yaml:38:20
+   |
+38 |     from_columns: [product_id]
+   |                    ^^^^^^^^^^
+   = help: relationship keys are dictionary-encoded; remove `encoding: plain` from the column
+
+1 error, 0 warnings

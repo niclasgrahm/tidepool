@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: relationship `order_customer` points to unknown dataset `customer`
+  --> model.ossie.yaml:32:9
+   |
+32 |     to: customer
+   |         ^^^^^^^^
+   = help: did you mean `customers`?
+
+1 error, 0 warnings

@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/customers.yaml\",\n\"segment:     { type: string, nullable: true }\",\n\"segment:     { type: string }\")])"
+---
+1 change (0 safe, 0 rebuild, 1 destructive)
+
+  ~ column       customers.segment  no longer nullable  destructive  (existing NULLs would be invalid)

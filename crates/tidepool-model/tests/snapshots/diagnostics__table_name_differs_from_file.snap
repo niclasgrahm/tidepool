@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: table `order` is defined in `tables/orders.yaml`; its file must be named `tables/order.yaml`
+ --> tables/orders.yaml:1:7
+  |
+1 | name: order
+  |       ^^^^^
+
+1 error, 0 warnings

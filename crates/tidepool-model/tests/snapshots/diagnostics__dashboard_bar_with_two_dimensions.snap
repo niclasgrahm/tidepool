@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `by_region`: bar and line charts have exactly one dimension
+  --> dashboards/sales.yaml:16:5
+   |
+16 |     dimensions: [customers.region, customers.segment]
+   |     ^^^^^^^^^^
+
+1 error, 0 warnings

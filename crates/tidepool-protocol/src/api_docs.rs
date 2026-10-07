@@ -78,14 +78,16 @@ pub enum Operation {
     Ready,
     GetInfo,
     GetOpenApi,
+    GetSchema,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 4] = [
+pub const OPERATIONS: [Operation; 5] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
     Operation::GetOpenApi,
+    Operation::GetSchema,
 ];
 
 impl Operation {
@@ -97,6 +99,7 @@ impl Operation {
             Self::Ready => "ready",
             Self::GetInfo => "getInfo",
             Self::GetOpenApi => "getOpenApi",
+            Self::GetSchema => "getSchema",
         }
     }
 }
@@ -215,6 +218,9 @@ impl Body {
 pub struct ParamDoc {
     pub name: &'static str,
     pub description: &'static str,
+    /// A value that works: shown in the spec, and used by tests that call
+    /// every endpoint.
+    pub example: &'static str,
 }
 
 /// A request body.
@@ -349,6 +355,38 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 description: "The OpenAPI document.",
                 body: Body::AnyJson,
             }],
+        },
+        ApiDoc {
+            path: "/v1/schemas/{kind}",
+            method: Method::Get,
+            operation: Operation::GetSchema,
+            summary: "The JSON Schema of a config file",
+            description: "For editors (yaml-language-server), the config editor and agents writing \
+                          config. Kinds: `server` (tidepool.yaml), `table` (tables/*.yaml), \
+                          `model` (model.ossie.yaml), `dashboard` (dashboards/*.yaml), and the \
+                          JSON inside TIDEPOOL extensions: `metric-extension`, \
+                          `field-extension`, `relationship-extension`, `model-extension`.",
+            tag: Tag::Reference,
+            access: Access::Public,
+            params: vec![ParamDoc {
+                name: "kind",
+                description: "Which kind of config file.",
+                example: "table",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The schema.",
+                    body: Body::AnyJson,
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such kind.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
         },
     ]
 }

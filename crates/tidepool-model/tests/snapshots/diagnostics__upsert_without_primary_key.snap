@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: upsert table `customers` has no primary_key
+ --> tables/customers.yaml:2:7
+  |
+2 | mode: upsert
+  |       ^^^^^^
+  = help: upsert replaces rows by key; name the key columns in `primary_key`
+
+1 error, 0 warnings

@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\", \"\\\"decimal(14,2)\\\"\", \"\\\"decimal(10,2)\\\"\")])"
+---
+1 change (0 safe, 0 rebuild, 1 destructive)
+
+  ~ column       orders.amount  decimal(14,2) → decimal(10,2)  destructive  (not every existing value fits the new type)

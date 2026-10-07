@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: filter: dataset `products` has no field `categry`; did you mean `category`?
+ --> dashboards/sales.yaml:5:12
+  |
+5 |   - field: products.categry
+  |            ^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

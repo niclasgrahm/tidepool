@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: mapping values are not allowed in this context
+ --> tables/orders.yaml:1:13
+  |
+1 | name: orders: broken
+  |             ^
+
+1 error, 0 warnings

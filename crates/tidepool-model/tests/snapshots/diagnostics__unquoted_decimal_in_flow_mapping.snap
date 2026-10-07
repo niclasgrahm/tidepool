@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: columns.amount: `decimal(14` is cut off at the comma: inside a { … } mapping, quote the type, e.g. type: "decimal(14,2)"
+  --> tables/orders.yaml:12:16
+   |
+12 |   amount:      { type: decimal(14,2) }
+   |                ^
+
+1 error, 0 warnings

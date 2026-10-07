@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: field `orders.order_year` refers to unknown column `orderd_at`
+  --> model.ossie.yaml:12:67
+   |
+12 |         expression: { dialects: [{ dialect: ANSI_SQL, expression: "EXTRACT(YEAR FROM orderd_at)" }] }
+   |                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: did you mean `ordered_at`?
+
+1 error, 0 warnings

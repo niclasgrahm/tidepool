@@ -12,3 +12,10 @@ publish = false
 workspace = true
 
 [dependencies]
+tidepool-config.workspace = true
+tidepool-expr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta = "1.49"

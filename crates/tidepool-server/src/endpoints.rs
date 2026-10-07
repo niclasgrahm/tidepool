@@ -40,6 +40,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::Ready => route_of(method, handlers::ready),
         Operation::GetInfo => route_of(method, handlers::info),
         Operation::GetOpenApi => route_of(method, handlers::openapi),
+        Operation::GetSchema => route_of(method, handlers::schema),
     }
 }
 

@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: event_time column `status` is string, not a date or timestamp
+ --> tables/orders.yaml:3:13
+  |
+3 | event_time: status
+  |             ^^^^^^
+
+1 error, 0 warnings

@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `by_region` uses unknown metric `revnue`
+  --> dashboards/sales.yaml:17:15
+   |
+17 |     metrics: [revnue]
+   |               ^^^^^^
+   = help: did you mean `revenue`?
+
+1 error, 0 warnings

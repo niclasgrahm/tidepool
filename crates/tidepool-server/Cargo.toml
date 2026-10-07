@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+tidepool-config.workspace = true
 tidepool-protocol.workspace = true
 anyhow.workspace = true
 axum.workspace = true

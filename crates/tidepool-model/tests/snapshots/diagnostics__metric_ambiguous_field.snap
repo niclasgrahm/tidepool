@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `customer_count` refers to `customer_id`, which is in more than one dataset
+  --> model.ossie.yaml:53:63
+   |
+53 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customer_id)" }] }
+   |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: write orders.customer_id or customers.customer_id
+
+1 error, 0 warnings
