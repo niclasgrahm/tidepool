@@ -21,7 +21,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ProbeStatus, ServerInfo};
+use crate::{IngestError, IngestResponse, Preview, ProbeStatus, ServerInfo, TableInfo};
 
 /// The error body every failing request comes back with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -79,15 +79,25 @@ pub enum Operation {
     GetInfo,
     GetOpenApi,
     GetSchema,
+    IngestRows,
+    DeleteRows,
+    ListTables,
+    GetTable,
+    PreviewTable,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 5] = [
+pub const OPERATIONS: [Operation; 10] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
     Operation::GetOpenApi,
     Operation::GetSchema,
+    Operation::IngestRows,
+    Operation::DeleteRows,
+    Operation::ListTables,
+    Operation::GetTable,
+    Operation::PreviewTable,
 ];
 
 impl Operation {
@@ -100,6 +110,11 @@ impl Operation {
             Self::GetInfo => "getInfo",
             Self::GetOpenApi => "getOpenApi",
             Self::GetSchema => "getSchema",
+            Self::IngestRows => "ingestRows",
+            Self::DeleteRows => "deleteRows",
+            Self::ListTables => "listTables",
+            Self::GetTable => "getTable",
+            Self::PreviewTable => "previewTable",
         }
     }
 }
@@ -109,17 +124,19 @@ impl Operation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tag {
+    Tables,
     Server,
     Reference,
 }
 
 /// Every tag, in the order pages list them.
-pub const TAGS: [Tag; 2] = [Tag::Server, Tag::Reference];
+pub const TAGS: [Tag; 3] = [Tag::Tables, Tag::Server, Tag::Reference];
 
 impl Tag {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Tables => "tables",
             Self::Server => "server",
             Self::Reference => "reference",
         }
@@ -129,6 +146,10 @@ impl Tag {
     #[must_use]
     pub fn description(self) -> &'static str {
         match self {
+            Self::Tables => {
+                "The data: writing rows into tables, and looking at what they hold. \
+                 Tables are declared in `tables/*.yaml`; every table gets these endpoints."
+            }
             Self::Server => {
                 "The process itself: probes for orchestrators, and what server this is."
             }
@@ -191,6 +212,10 @@ pub enum Body {
     /// A JSON document that no schema here describes usefully (the OpenAPI
     /// document itself).
     AnyJson,
+    /// Rows for a table, in any of the ingest formats: a JSON array of row
+    /// objects, newline-delimited JSON, or an Arrow IPC stream. The OpenAPI
+    /// document spells out each table's row shape.
+    Rows,
 }
 
 impl Body {
@@ -199,16 +224,19 @@ impl Body {
     pub fn schema_name(self) -> Option<&'static str> {
         match self {
             Self::Json(name) | Self::JsonArray(name) => Some(name),
-            Self::None | Self::AnyJson => None,
+            Self::None | Self::AnyJson | Self::Rows => None,
         }
     }
 
-    /// The media type, or `None` for no body.
+    /// The media type, or `None` for no body. For [`Body::Rows`], the
+    /// default of the three it accepts.
     #[must_use]
     pub fn content_type(self) -> Option<&'static str> {
         match self {
             Self::None => None,
-            Self::Json(_) | Self::JsonArray(_) | Self::AnyJson => Some("application/json"),
+            Self::Json(_) | Self::JsonArray(_) | Self::AnyJson | Self::Rows => {
+                Some("application/json")
+            }
         }
     }
 }
@@ -271,9 +299,206 @@ impl ApiDoc {
 }
 
 /// Every endpoint the server serves.
+///
+/// Long by nature (one entry per endpoint, prose included), as in Kayak.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn endpoints() -> Vec<ApiDoc> {
     vec![
+        ApiDoc {
+            path: "/v1/tables/{table}/rows",
+            method: Method::Post,
+            operation: Operation::IngestRows,
+            summary: "Write rows into a table",
+            description: "The body is the rows, in one of three formats, chosen by `Content-Type`: \
+                          `application/json` (an array of row objects), `application/x-ndjson` \
+                          (one row object per line) or `application/vnd.apache.arrow.stream` \
+                          (an Arrow IPC stream, matched to columns by field name).\n\n\
+                          Values are checked against the table's column types and never coerced. \
+                          A batch is all or nothing: one bad value rejects it with every problem \
+                          listed by row and column, and nothing is written. On an upsert table a \
+                          row whose key exists replaces the old row.\n\n\
+                          Rows become visible to queries at the next epoch (within \
+                          `epoch_interval`); `?wait=visible` answers only once they are. An \
+                          `Idempotency-Key` header makes retries safe: a key seen in the last 24 \
+                          hours gets the first response again and writes nothing. A `503` means \
+                          the server is busy; retry after `Retry-After` seconds.",
+            tag: Tag::Tables,
+            access: Access::Ingest,
+            params: vec![ParamDoc {
+                name: "table",
+                description: "The table, by name.",
+                example: "orders",
+            }],
+            query: vec![ParamDoc {
+                name: "wait",
+                description: "`visible`: answer once the rows are visible to queries.",
+                example: "visible",
+            }],
+            request: Some(RequestDoc {
+                description: "The rows.",
+                body: Body::Rows,
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Written.",
+                    body: Body::Json("IngestResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The body didn't decode, or a value doesn't fit its column. Nothing was written.",
+                    body: Body::Json("IngestError"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "A request with the same `Idempotency-Key` is still being processed.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 415,
+                    description: "A `Content-Type` that isn't one of the three formats.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 503,
+                    description: "Busy: the write queue is full. Retry after `Retry-After` seconds.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/tables/{table}/rows",
+            method: Method::Delete,
+            operation: Operation::DeleteRows,
+            summary: "Delete rows from an upsert table, by key",
+            description: "The body lists keys, in the same formats as writing: each row holds the \
+                          table's primary key columns and nothing else. Keys that match no row are \
+                          counted in `missing`, not treated as errors. Only upsert tables have \
+                          keys, so only they can be deleted from this way.",
+            tag: Tag::Tables,
+            access: Access::Ingest,
+            params: vec![ParamDoc {
+                name: "table",
+                description: "The table, by name.",
+                example: "customers",
+            }],
+            query: vec![ParamDoc {
+                name: "wait",
+                description: "`visible`: answer once the deletes are visible to queries.",
+                example: "visible",
+            }],
+            request: Some(RequestDoc {
+                description: "The keys of the rows to delete.",
+                body: Body::Rows,
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Deleted.",
+                    body: Body::Json("IngestResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The body didn't decode, or the table isn't an upsert table.",
+                    body: Body::Json("IngestError"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 503,
+                    description: "Busy: retry after `Retry-After` seconds.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/tables",
+            method: Method::Get,
+            operation: Operation::ListTables,
+            summary: "Every table, with its columns and how much it holds",
+            description: "The tables declared in `tables/*.yaml`, with live row counts, write \
+                          rates and memory, as of the latest epoch.",
+            tag: Tag::Tables,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The tables, in name order.",
+                body: Body::JsonArray("TableInfo"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/tables/{table}",
+            method: Method::Get,
+            operation: Operation::GetTable,
+            summary: "One table",
+            description: "The same as one entry of `GET /v1/tables`.",
+            tag: Tag::Tables,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "table",
+                description: "The table, by name.",
+                example: "orders",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The table.",
+                    body: Body::Json("TableInfo"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/tables/{table}/preview",
+            method: Method::Get,
+            operation: Operation::PreviewTable,
+            summary: "The newest rows of a table",
+            description: "Newest first, decoded: decimals, dates and timestamps as strings, so \
+                          nothing is lost on the way through JSON.",
+            tag: Tag::Tables,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "table",
+                description: "The table, by name.",
+                example: "orders",
+            }],
+            query: vec![ParamDoc {
+                name: "limit",
+                description: "How many rows, at most 1000. Default 100.",
+                example: "10",
+            }],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The rows.",
+                    body: Body::Json("Preview"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
         ApiDoc {
             path: "/healthz",
             method: Method::Get,
@@ -401,6 +626,10 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("ApiError", of(schema_for!(ApiError)));
     schemas.insert("ProbeStatus", of(schema_for!(ProbeStatus)));
     schemas.insert("ServerInfo", of(schema_for!(ServerInfo)));
+    schemas.insert("IngestResponse", of(schema_for!(IngestResponse)));
+    schemas.insert("IngestError", of(schema_for!(IngestError)));
+    schemas.insert("TableInfo", of(schema_for!(TableInfo)));
+    schemas.insert("Preview", of(schema_for!(Preview)));
     schemas
 }
 

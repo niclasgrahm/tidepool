@@ -158,6 +158,14 @@ case!(
     )]
 );
 case!(
+    primary_key_on_plain_column,
+    [Replace(
+        "tables/customers.yaml",
+        "customer_id: { type: string }",
+        "customer_id: { type: string, encoding: plain }"
+    )]
+);
+case!(
     event_time_is_not_temporal,
     [Replace(
         "tables/orders.yaml",

@@ -1,3 +1,20 @@
-//! The column store: dictionaries, sealed segments and the tail, the primary-key
-//! index and delete bitmaps, epochs and snapshots, the WAL and persistence.
-//! In memory in M2, durable in M5.
+//! The column store: values, dictionaries, segments, the primary-key index,
+//! epochs and snapshots, and the decoders that turn ingest bodies into
+//! batches. In memory in M2; durable (WAL, segment files) in M5.
+//!
+//! The shape of it: one writer thread owns a [`store::Store`] and applies
+//! batches in order; every epoch it publishes an immutable
+//! [`store::Snapshot`], which is all readers ever see. There is no shared
+//! mutable state between them, and no `unsafe`.
+
+mod arrow;
+pub mod batch;
+pub mod column;
+pub mod dict;
+pub mod store;
+pub mod value;
+pub mod writer;
+
+pub use batch::{Batch, Rejected, RowError, Shape};
+pub use store::{Applied, Op, Snapshot, Store, TableSnapshot};
+pub use writer::{Busy, Receipt, WriterConfig, WriterHandle, spawn};

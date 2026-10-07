@@ -8,11 +8,25 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use tidepool_server::{AppState, router, ui};
+use tidepool_config::ConfigSet;
+use tidepool_model::{Catalog, compile};
+use tidepool_server::{AppState, Tokens, router, ui};
+use tidepool_store::WriterConfig;
 use tower::ServiceExt;
 
 async fn get(path: &str) -> (StatusCode, Option<String>, String) {
-    let state = Arc::new(AppState::new(ui::embedded()));
+    let (Some(empty), _) = compile(&ConfigSet::default(), &Catalog::default()) else {
+        panic!("the empty project should compile");
+    };
+    let state = match AppState::new(
+        Arc::new(empty.model),
+        WriterConfig::default(),
+        ui::embedded(),
+        Tokens::default(),
+    ) {
+        Ok(state) => Arc::new(state),
+        Err(err) => panic!("starting the writer: {err}"),
+    };
     state.set_ready();
     let request = match Request::builder().uri(path).body(Body::empty()) {
         Ok(request) => request,

@@ -1,81 +1,15 @@
 //! The HTTP surface, driven in process through `tower::ServiceExt::oneshot`.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Method as HttpMethod, Request, StatusCode, header};
-use http_body_util::BodyExt;
+use axum::http::{Method as HttpMethod, StatusCode};
+use common::{call, ready_state, request, send, state};
 use serde_json::Value;
 use tidepool_protocol::api_docs::{Access, Method, endpoints};
-use tidepool_server::{AppState, DirAssets, router};
-use tower::ServiceExt;
-
-struct Reply {
-    status: StatusCode,
-    content_type: Option<String>,
-    cache_control: Option<String>,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        match serde_json::from_slice(&self.body) {
-            Ok(value) => value,
-            Err(err) => panic!(
-                "body should be JSON ({err}): {}",
-                String::from_utf8_lossy(&self.body)
-            ),
-        }
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-}
-
-fn ready_state() -> Arc<AppState> {
-    let state = Arc::new(AppState::new(None));
-    state.set_ready();
-    state
-}
-
-async fn call(state: Arc<AppState>, method: HttpMethod, path: &str) -> Reply {
-    let request = match Request::builder()
-        .method(method)
-        .uri(path)
-        .body(Body::empty())
-    {
-        Ok(request) => request,
-        Err(err) => panic!("building a request for {path}: {err}"),
-    };
-    let response = match router(state).oneshot(request).await {
-        Ok(response) => response,
-        Err(err) => panic!("the router is infallible: {err}"),
-    };
-    let header = |name| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from)
-    };
-    let (status, content_type, cache_control) = (
-        response.status(),
-        header(header::CONTENT_TYPE),
-        header(header::CACHE_CONTROL),
-    );
-    let body = match response.into_body().collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
-        Err(err) => panic!("reading the body of {path}: {err}"),
-    };
-    Reply {
-        status,
-        content_type,
-        cache_control,
-        body,
-    }
-}
+use tidepool_server::{AppState, DirAssets, Tokens};
 
 fn http_method(method: Method) -> HttpMethod {
     match method {
@@ -102,18 +36,26 @@ async fn every_documented_endpoint_is_routed_at_its_documented_method() {
         let path = concrete(&endpoint);
         let reply = call(ready_state(), http_method(endpoint.method), &path).await;
         assert!(
-            reply.status.is_success(),
+            reply.status != StatusCode::NOT_FOUND && reply.status != StatusCode::METHOD_NOT_ALLOWED,
             "{} {} came back {}",
             endpoint.method.label(),
             path,
             reply.status
         );
 
-        // and only at that method: a different one is a 405, not a fallthrough to the UI
-        let other = if endpoint.method == Method::Delete {
-            HttpMethod::PUT
-        } else {
-            HttpMethod::DELETE
+        // and only at its methods: an undocumented one is a 405, not a
+        // fallthrough to the UI
+        let documented: Vec<Method> = endpoints()
+            .iter()
+            .filter(|e| e.path == endpoint.path)
+            .map(|e| e.method)
+            .collect();
+        let Some(other) = [Method::Put, Method::Delete, Method::Post, Method::Get]
+            .into_iter()
+            .find(|m| !documented.contains(m))
+            .map(http_method)
+        else {
+            continue;
         };
         let reply = call(ready_state(), other.clone(), &path).await;
         assert_eq!(
@@ -125,18 +67,76 @@ async fn every_documented_endpoint_is_routed_at_its_documented_method() {
 }
 
 #[tokio::test]
-async fn every_endpoint_is_public_until_authentication_exists() {
-    // Access is declared per endpoint but nothing enforces it yet (M8). This
-    // test is the reminder: the first protected endpoint has to come with the
-    // middleware that protects it.
+async fn every_protected_endpoint_wants_its_token() {
+    let tokens = Tokens {
+        ingest: Some("ingest-secret".into()),
+        read: Some("read-secret".into()),
+        admin: Some("admin-secret".into()),
+    };
+    let server = state(common::retail(), tokens.clone(), None);
     for endpoint in endpoints() {
+        let Some(token) = tokens.required(endpoint.access) else {
+            continue;
+        };
+        let path = concrete(&endpoint);
+        let method = http_method(endpoint.method);
+        let without = call(Arc::clone(&server), method.clone(), &path).await;
         assert_eq!(
-            endpoint.access,
-            Access::Public,
-            "{} is protected, but nothing checks it",
-            endpoint.path
+            without.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} without a token"
+        );
+        assert!(
+            without
+                .header("www-authenticate")
+                .is_some_and(|h| h.starts_with("Bearer"))
+        );
+
+        let wrong = send(
+            Arc::clone(&server),
+            request(
+                method.clone(),
+                &path,
+                &[("authorization", "Bearer nope")],
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(
+            wrong.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} with a wrong token"
+        );
+
+        let right = send(
+            Arc::clone(&server),
+            request(
+                method.clone(),
+                &path,
+                &[("authorization", &format!("Bearer {token}"))],
+                "",
+            ),
+        )
+        .await;
+        assert_ne!(
+            right.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} with its token"
         );
     }
+    // and a token for one level doesn't open another
+    let reply = send(
+        Arc::clone(&server),
+        request(
+            HttpMethod::GET,
+            "/v1/tables",
+            &[("authorization", "Bearer ingest-secret")],
+            "",
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(Access::Read.label(), "read");
 }
 
 #[tokio::test]
@@ -148,7 +148,11 @@ async fn health_answers_ok() {
 
 #[tokio::test]
 async fn ready_is_503_until_the_server_says_so() {
-    let state = Arc::new(AppState::new(None));
+    let config = tidepool_store::WriterConfig::default();
+    let state = match AppState::new(common::empty(), config, None, Tokens::default()) {
+        Ok(state) => Arc::new(state),
+        Err(err) => panic!("starting the writer: {err}"),
+    };
     let reply = call(Arc::clone(&state), HttpMethod::GET, "/readyz").await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.json()["status"], "starting");
@@ -171,7 +175,8 @@ async fn info_names_the_server_and_its_versions() {
 
 #[tokio::test]
 async fn the_spec_lists_exactly_the_documented_endpoints() {
-    let spec = call(ready_state(), HttpMethod::GET, "/v1/openapi.json")
+    let empty = state(common::empty(), Tokens::default(), None);
+    let spec = call(empty, HttpMethod::GET, "/v1/openapi.json")
         .await
         .json();
     assert_eq!(spec["openapi"], "3.1.0");
@@ -272,7 +277,11 @@ fn ui_dir() -> tempfile::TempDir {
 }
 
 fn state_with_ui(dir: &tempfile::TempDir) -> Arc<AppState> {
-    let state = Arc::new(AppState::new(Some(Arc::new(DirAssets::new(dir.path())))));
+    let state = state(
+        common::retail(),
+        Tokens::default(),
+        Some(Arc::new(DirAssets::new(dir.path()))),
+    );
     state.set_ready();
     state
 }
@@ -284,10 +293,10 @@ async fn the_ui_is_served_from_its_root() {
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.text(), "<html>the app</html>");
     assert_eq!(
-        reply.content_type.as_deref(),
+        reply.header("content-type").as_deref(),
         Some("text/html; charset=utf-8")
     );
-    assert_eq!(reply.cache_control.as_deref(), Some("no-cache"));
+    assert_eq!(reply.header("cache-control").as_deref(), Some("no-cache"));
 }
 
 #[tokio::test]
@@ -296,10 +305,14 @@ async fn hashed_assets_are_cached_forever() {
     let reply = call(state_with_ui(&dir), HttpMethod::GET, "/assets/app-1234.js").await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(
-        reply.content_type.as_deref(),
+        reply.header("content-type").as_deref(),
         Some("text/javascript; charset=utf-8")
     );
-    assert!(reply.cache_control.is_some_and(|c| c.contains("immutable")));
+    assert!(
+        reply
+            .header("cache-control")
+            .is_some_and(|c| c.contains("immutable"))
+    );
 }
 
 #[tokio::test]

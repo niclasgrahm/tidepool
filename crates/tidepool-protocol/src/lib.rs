@@ -41,3 +41,80 @@ pub enum ProbeState {
     /// Up, but not ready yet (still starting, or recovering).
     Starting,
 }
+
+/// What a successful write answers (`POST`/`DELETE /v1/tables/{table}/rows`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IngestResponse {
+    /// Rows written.
+    pub written: u64,
+    /// Existing rows replaced (upserts) or deleted.
+    pub replaced: u64,
+    /// Keys that matched no row (deletes only).
+    pub missing: u64,
+    /// The epoch from which the change is visible to queries. With
+    /// `?wait=visible` it already is when the response arrives.
+    pub epoch: u64,
+}
+
+/// A rejected write: nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IngestError {
+    /// One line: the problem, or how many there are.
+    pub error: String,
+    /// The problems, by row and column (at most 100).
+    pub errors: Vec<RowError>,
+    /// Problems beyond the ones listed.
+    pub more: u64,
+}
+
+/// One problem with a write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RowError {
+    /// The row's position in the batch, from 0; absent for problems with the
+    /// body as a whole (or, for Arrow, a whole column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    pub message: String,
+}
+
+/// A table, as listed by `GET /v1/tables`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TableInfo {
+    pub name: String,
+    /// `append` or `upsert`.
+    pub mode: String,
+    pub primary_key: Vec<String>,
+    pub columns: Vec<ColumnInfo>,
+    /// Rows currently stored (not counting deleted ones).
+    pub rows: u64,
+    /// Rows written since the server started.
+    pub written_total: u64,
+    /// Write rate over the last ten seconds.
+    pub rows_per_second: f64,
+    /// Approximate memory held by the table's segments.
+    pub bytes: u64,
+    /// The epoch these numbers are from.
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ColumnInfo {
+    pub name: String,
+    /// The column type as written in the table file, e.g. `decimal(14,2)`.
+    #[serde(rename = "type")]
+    pub column_type: String,
+    pub nullable: bool,
+    /// `dict` or `plain`.
+    pub encoding: String,
+}
+
+/// The newest rows of a table (`GET /v1/tables/{table}/preview`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Preview {
+    pub columns: Vec<String>,
+    /// Newest first; values as JSON (decimals, dates and timestamps as strings).
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub epoch: u64,
+}

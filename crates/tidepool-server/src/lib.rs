@@ -4,9 +4,12 @@
 //! A library rather than code in the binary so integration tests can drive
 //! [`router`] in process through `tower::ServiceExt::oneshot`, with no socket.
 
+pub mod auth;
 mod endpoints;
 mod handlers;
+mod idempotency;
 pub mod openapi;
+mod tables;
 pub mod ui;
 
 use std::net::SocketAddr;
@@ -16,24 +19,55 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context;
 use axum::Router;
 
+pub use auth::Tokens;
 pub use endpoints::api_router;
 pub use ui::{Assets, DirAssets};
 
-/// Everything a handler can reach. Grows a model, a store and sessions in the
-/// milestones that add them.
+use tidepool_model::Model;
+use tidepool_store::{WriterConfig, WriterHandle};
+
+/// Everything a handler can reach.
 pub struct AppState {
     ready: AtomicBool,
     ui: Option<Arc<dyn Assets>>,
+    pub(crate) writer: WriterHandle,
+    pub(crate) tokens: Tokens,
+    pub(crate) keys: idempotency::Keys,
 }
 
 impl AppState {
-    /// A server that is not ready yet and serves the given UI, if any.
+    /// A server for `model`, not ready yet, serving the given UI if any. Starts
+    /// the writer thread, which stops when the state is dropped.
+    ///
+    /// # Errors
+    /// The writer thread can't be started.
+    pub fn new(
+        model: Arc<Model>,
+        writer: WriterConfig,
+        ui: Option<Arc<dyn Assets>>,
+        tokens: Tokens,
+    ) -> std::io::Result<Self> {
+        let (writer, _thread) = tidepool_store::spawn(model, writer)?;
+        Ok(Self::with_writer(writer, ui, tokens))
+    }
+
+    /// A server around an existing writer handle (tests use one whose queue is
+    /// never drained, to see what happens when the writer is busy).
     #[must_use]
-    pub fn new(ui: Option<Arc<dyn Assets>>) -> Self {
+    pub fn with_writer(writer: WriterHandle, ui: Option<Arc<dyn Assets>>, tokens: Tokens) -> Self {
         Self {
             ready: AtomicBool::new(false),
             ui,
+            writer,
+            tokens,
+            keys: idempotency::Keys::default(),
         }
+    }
+
+    /// The writer: for tests and tools that need to publish or read snapshots.
+    #[must_use]
+    pub fn writer(&self) -> &WriterHandle {
+        &self.writer
     }
 
     /// Whether `GET /readyz` answers 200.
@@ -69,11 +103,11 @@ pub async fn serve(listen: SocketAddr, state: Arc<AppState>) -> anyhow::Result<(
         .await
         .with_context(|| format!("binding {listen}"))?;
     let local = listener.local_addr().context("reading the bound address")?;
-    if !local.ip().is_loopback() {
-        // Nothing is authenticated until M8, so a server reachable from other
-        // machines is open to anyone who can reach the port.
+    let open = state.tokens.open_levels();
+    if !local.ip().is_loopback() && !open.is_empty() {
         tracing::warn!(
-            "listening on {local} without authentication: anyone who can reach this port can use the API"
+            "listening on {local} with no token for: {} (set TIDEPOOL_<LEVEL>_TOKEN); anyone who can reach this port can use those endpoints",
+            open.join(", ")
         );
     }
     state.set_ready();

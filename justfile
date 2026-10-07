@@ -48,20 +48,20 @@ test-embed:
   cargo clippy -p tidepool-server --features embed-assets --all-targets -- -D warnings
   cargo test -p tidepool-server --features embed-assets --test embed
 
-# a debug server on :{{port}}, serving the UI from frontend/dist
+# a debug server on :{{port}} with the retail example, serving the UI from frontend/dist
 run: frontend
-  cargo run -p tidepool -- serve --listen 127.0.0.1:{{port}} --ui-dir frontend/dist
+  cargo run -p tidepool -- serve --config examples/retail --listen 127.0.0.1:{{port}} --ui-dir frontend/dist
 
 # server on :{{port}} plus trunk on :7080 with hot reload (open http://127.0.0.1:7080)
 dev:
   #!/usr/bin/env sh
   # trunk serves the UI and proxies /v1 to the server (frontend/Trunk.toml);
   # killing the recipe takes the server down with it.
-  cargo run -p tidepool -- serve --listen 127.0.0.1:{{port}} &
+  cargo run -p tidepool -- serve --config examples/retail --listen 127.0.0.1:{{port}} &
   server=$!
   trap 'kill $server 2>/dev/null' EXIT INT TERM
   cd frontend && trunk serve
 
-# the load and latency harness; deliberately not part of `ci`
-bench:
-  cargo run --release -p tidepool-bench
+# ingest throughput, per format (release build); deliberately not part of `ci`
+bench *args:
+  cargo run --release -p tidepool-bench -- ingest {{args}}

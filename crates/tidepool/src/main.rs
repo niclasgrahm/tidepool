@@ -11,7 +11,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tidepool_server::{AppState, Assets, DirAssets, serve, ui};
+use tidepool_server::{AppState, Assets, DirAssets, Tokens, serve, ui};
+use tidepool_store::WriterConfig;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -29,10 +30,14 @@ struct Cli {
 enum Command {
     /// Run the server.
     Serve {
-        /// Address to listen on. Loopback by default: nothing is authenticated
-        /// yet, so exposing the port is a decision to make explicitly.
-        #[arg(long, default_value = "127.0.0.1:7070")]
-        listen: SocketAddr,
+        /// The config directory: tables, model and dashboards. Without it the
+        /// server runs with no tables.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Address to listen on; overrides `listen` in tidepool.yaml. Loopback
+        /// by default, so exposing the port is a decision made explicitly.
+        #[arg(long)]
+        listen: Option<SocketAddr>,
         /// Serve the UI from this directory instead of the one compiled into
         /// the binary. For development, against a frontend being rebuilt.
         #[arg(long)]
@@ -60,7 +65,11 @@ fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Validate { config } => check::validate(&config),
         Command::Plan { config, base } => check::plan(&config, base.as_deref()),
-        Command::Serve { listen, ui_dir } => match run_server(listen, ui_dir) {
+        Command::Serve {
+            config,
+            listen,
+            ui_dir,
+        } => match run_server(config.as_deref(), listen, ui_dir) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err:#}");
@@ -71,7 +80,11 @@ fn main() -> ExitCode {
 }
 
 #[tokio::main]
-async fn run_server(listen: SocketAddr, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
+async fn run_server(
+    config: Option<&std::path::Path>,
+    listen: Option<SocketAddr>,
+    ui_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -89,5 +102,31 @@ async fn run_server(listen: SocketAddr, ui_dir: Option<PathBuf>) -> anyhow::Resu
         }
         None => ui::embedded(),
     };
-    serve(listen, Arc::new(AppState::new(ui))).await
+    let compiled = match config {
+        Some(dir) => check::load(dir, &tidepool_model::Catalog::default())
+            .ok_or_else(|| anyhow::anyhow!("the config in {} has errors", dir.display()))?,
+        None => match tidepool_model::compile(
+            &tidepool_config::ConfigSet::default(),
+            &tidepool_model::Catalog::default(),
+        ) {
+            (Some(compiled), _) => compiled,
+            (None, _) => anyhow::bail!("the empty project didn't compile"),
+        },
+    };
+    let model = Arc::new(compiled.model);
+    let listen = listen
+        .or(model.server.listen)
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7070)));
+    let writer = WriterConfig {
+        epoch_interval: model.server.epoch_interval.0,
+        ..WriterConfig::default()
+    };
+    tracing::info!(
+        "{} tables, {} metrics, {} dashboards",
+        model.tables.len(),
+        model.metrics.len(),
+        model.dashboards.len()
+    );
+    let state = AppState::new(model, writer, ui, Tokens::from_env())?;
+    serve(listen, Arc::new(state)).await
 }

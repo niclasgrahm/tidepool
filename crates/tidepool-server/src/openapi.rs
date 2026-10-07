@@ -1,19 +1,37 @@
-//! The OpenAPI 3.1 document, generated from the endpoint table.
+//! The OpenAPI 3.1 document, generated from the endpoint table and the
+//! running model.
 //!
 //! Ported from Kayak's `openapi.rs`. The schemas come from schemars, whose
 //! documents keep shared definitions under a local `$defs`; OpenAPI wants them
 //! under `components/schemas`, so they are hoisted there and every `$ref`
 //! rewritten to match.
+//!
+//! The one part that depends on the model is writing rows: each table gets
+//! its own `/v1/tables/<name>/rows` path, with the exact row shape its columns
+//! define, in place of the generic `{table}` one. A generated client then has
+//! a typed method per table.
 
 use serde_json::{Map, Value, json};
-use tidepool_protocol::api_docs::{ApiDoc, Body, TAGS, endpoints, schemas};
+use tidepool_config::table::TableMode;
+use tidepool_config::types::ColumnType;
+use tidepool_model::Model;
+use tidepool_model::ir::Table;
+use tidepool_protocol::api_docs::{ApiDoc, Body, Operation, TAGS, endpoints, schemas};
 
 const COMPONENTS: &str = "#/components/schemas/";
 const DEFS: &str = "#/$defs/";
+const ROWS_PATH: &str = "/v1/tables/{table}/rows";
 
 /// The whole document, as served at `GET /v1/openapi.json`.
 #[must_use]
-pub fn document() -> Value {
+pub fn document(model: &Model) -> Value {
+    let mut components = components();
+    for table in &model.tables {
+        components.insert(row_schema_name(table), row_schema(table, false));
+        if table.mode == TableMode::Upsert {
+            components.insert(key_schema_name(table), row_schema(table, true));
+        }
+    }
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -25,8 +43,20 @@ pub fn document() -> Value {
                  update continuously.",
         },
         "tags": tags(),
-        "paths": paths(),
-        "components": { "schemas": components() },
+        "paths": paths(model),
+        "components": {
+            "schemas": components,
+            "securitySchemes": {
+                "bearer": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description":
+                        "A token per access level, set with TIDEPOOL_INGEST_TOKEN, \
+                         TIDEPOOL_READ_TOKEN and TIDEPOOL_ADMIN_TOKEN. A level without a \
+                         token is open.",
+                },
+            },
+        },
     })
 }
 
@@ -38,29 +68,56 @@ fn tags() -> Value {
     )
 }
 
-fn paths() -> Value {
+fn paths(model: &Model) -> Value {
     let mut paths = Map::new();
-    for endpoint in endpoints() {
+    let mut insert = |path: String, method: &str, operation: Value| {
         let item = paths
-            .entry(endpoint.path.to_string())
+            .entry(path)
             .or_insert_with(|| Value::Object(Map::new()));
         if let Some(item) = item.as_object_mut() {
-            item.insert(endpoint.method.key().to_string(), operation(&endpoint));
+            item.insert(method.to_string(), operation);
+        }
+    };
+    for endpoint in endpoints() {
+        let per_table = endpoint.path == ROWS_PATH && !model.tables.is_empty();
+        if !per_table {
+            insert(
+                endpoint.path.to_string(),
+                endpoint.method.key(),
+                operation(&endpoint, None),
+            );
+            continue;
+        }
+        for table in &model.tables {
+            if endpoint.operation == Operation::DeleteRows && table.mode != TableMode::Upsert {
+                continue;
+            }
+            insert(
+                format!("/v1/tables/{}/rows", table.name),
+                endpoint.method.key(),
+                operation(&endpoint, Some(table)),
+            );
         }
     }
     Value::Object(paths)
 }
 
-fn operation(endpoint: &ApiDoc) -> Value {
+/// One operation; `table` makes it the per-table form of a rows endpoint.
+fn operation(endpoint: &ApiDoc, table: Option<&Table>) -> Value {
     let mut operation = Map::new();
-    operation.insert("operationId".into(), json!(endpoint.operation_id()));
+    let id = match table {
+        Some(table) => format!("{}_{}", endpoint.operation_id(), table.name),
+        None => endpoint.operation_id().to_string(),
+    };
+    operation.insert("operationId".into(), json!(id));
     operation.insert("summary".into(), json!(endpoint.summary));
     operation.insert("description".into(), json!(endpoint.description));
     operation.insert("tags".into(), json!([endpoint.tag.label()]));
 
-    let parameters: Vec<Value> = endpoint
+    let path_params = endpoint
         .params
         .iter()
+        .filter(|_| table.is_none())
         .map(|param| {
             json!({
                 "name": param.name,
@@ -70,7 +127,8 @@ fn operation(endpoint: &ApiDoc) -> Value {
                 "example": param.example,
                 "schema": { "type": "string" },
             })
-        })
+        });
+    let parameters: Vec<Value> = path_params
         .chain(endpoint.query.iter().map(|param| {
             json!({
                 "name": param.name,
@@ -81,18 +139,40 @@ fn operation(endpoint: &ApiDoc) -> Value {
                 "schema": { "type": "string" },
             })
         }))
+        .chain(
+            (endpoint.request.is_some_and(|r| r.body == Body::Rows)).then(|| {
+                json!({
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": false,
+                    "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+                    "schema": { "type": "string" },
+                })
+            }),
+        )
         .collect();
     if !parameters.is_empty() {
         operation.insert("parameters".into(), Value::Array(parameters));
     }
 
     if let Some(request) = endpoint.request {
+        let content = match (request.body, table) {
+            (Body::Rows, Some(table)) => {
+                rows_content(&if endpoint.operation == Operation::DeleteRows {
+                    key_schema_name(table)
+                } else {
+                    row_schema_name(table)
+                })
+            }
+            (Body::Rows, None) => rows_content(""),
+            (body, _) => content(body).unwrap_or(Value::Null),
+        };
         operation.insert(
             "requestBody".into(),
             json!({
                 "required": true,
                 "description": request.description,
-                "content": content(request.body),
+                "content": content,
             }),
         );
     }
@@ -105,6 +185,15 @@ fn operation(endpoint: &ApiDoc) -> Value {
             body.insert("content".into(), content);
         }
         responses.insert(response.status.to_string(), Value::Object(body));
+    }
+    if endpoint.access.is_protected() {
+        responses.entry("401".to_string()).or_insert_with(|| {
+            json!({
+                "description": "No token, or the wrong one, for this endpoint's access level.",
+                "content": content(Body::Json("ApiError")),
+            })
+        });
+        operation.insert("security".into(), json!([{ "bearer": [] }]));
     }
     operation.insert("responses".into(), Value::Object(responses));
     operation.insert("x-tidepool-access".into(), json!(endpoint.access.label()));
@@ -122,8 +211,104 @@ fn content(body: Body) -> Option<Value> {
             "items": { "$ref": format!("{COMPONENTS}{name}") },
         }),
         Body::AnyJson => json!({ "type": "object" }),
+        Body::Rows => return Some(rows_content("")),
     };
     Some(json!({ content_type: { "schema": schema } }))
+}
+
+/// The three ingest formats, with rows of the named schema (or any object).
+fn rows_content(row_schema: &str) -> Value {
+    let row = if row_schema.is_empty() {
+        json!({ "type": "object" })
+    } else {
+        json!({ "$ref": format!("{COMPONENTS}{row_schema}") })
+    };
+    json!({
+        "application/json": { "schema": { "type": "array", "items": row } },
+        "application/x-ndjson": {
+            "schema": row,
+            "description": "One row object per line.",
+        },
+        "application/vnd.apache.arrow.stream": {
+            "schema": { "type": "string", "format": "binary" },
+            "description": "An Arrow IPC stream; fields are matched to columns by name.",
+        },
+    })
+}
+
+fn row_schema_name(table: &Table) -> String {
+    format!("Row_{}", table.name)
+}
+
+fn key_schema_name(table: &Table) -> String {
+    format!("Key_{}", table.name)
+}
+
+/// The JSON shape of one row of `table` (or of its key, for deletes), as the
+/// ingest decoders accept it.
+fn row_schema(table: &Table, key_only: bool) -> Value {
+    let columns: Vec<&tidepool_model::ir::Column> = table
+        .columns
+        .iter()
+        .filter(|c| !key_only || table.primary_key.contains(&c.id))
+        .collect();
+    let properties: Map<String, Value> = columns
+        .iter()
+        .map(|c| {
+            let mut schema = value_schema(c.column_type);
+            if c.nullable
+                && !key_only
+                && let Some(object) = schema.as_object_mut()
+            {
+                object.insert("nullable".into(), json!(true));
+            }
+            (c.name.clone(), schema)
+        })
+        .collect();
+    let required: Vec<&str> = columns
+        .iter()
+        .filter(|c| key_only || !c.nullable)
+        .map(|c| c.name.as_str())
+        .collect();
+    json!({
+        "type": "object",
+        "description": if key_only {
+            format!("The primary key of a `{}` row.", table.name)
+        } else {
+            format!("A `{}` row.", table.name)
+        },
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+fn value_schema(column_type: ColumnType) -> Value {
+    let described = |schema: Value| {
+        let mut schema = schema;
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("description".into(), json!(column_type.to_string()));
+        }
+        schema
+    };
+    described(match column_type {
+        ColumnType::Bool => json!({ "type": "boolean" }),
+        ColumnType::Int32 => json!({ "type": "integer", "minimum": i32::MIN, "maximum": i32::MAX }),
+        ColumnType::Int64 => json!({ "type": "integer" }),
+        ColumnType::Float64 => json!({ "type": "number" }),
+        ColumnType::Decimal { .. } => json!({
+            "oneOf": [
+                { "type": "string", "pattern": "^[+-]?[0-9]*\\.?[0-9]*$" },
+                { "type": "number" },
+            ],
+        }),
+        ColumnType::String => json!({ "type": "string" }),
+        ColumnType::Date => json!({ "type": "string", "format": "date" }),
+        ColumnType::Timestamp => {
+            json!({ "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$" })
+        }
+        ColumnType::TimestampTz => json!({ "type": "string", "format": "date-time" }),
+    })
 }
 
 /// Every named schema plus every definition they share, all at the top level.

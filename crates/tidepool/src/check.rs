@@ -10,7 +10,7 @@ use tidepool_model::{Catalog, Compiled, Model, compile, plan};
 
 /// Load and compile a config directory, printing diagnostics to stderr.
 /// `None` if it has errors (or can't be read).
-fn load(dir: &Path, previous: &Catalog) -> Option<Compiled> {
+pub fn load(dir: &Path, previous: &Catalog) -> Option<Compiled> {
     let (set, mut diagnostics) = match ConfigSet::load_dir(dir) {
         Ok(loaded) => loaded,
         Err(err) => {

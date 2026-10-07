@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: primary key column `customer_id` is `encoding: plain`
+ --> tables/customers.yaml:3:15
+  |
+3 | primary_key: [customer_id]
+  |               ^^^^^^^^^^^
+  = help: keys are looked up through their dictionary; remove `encoding: plain` from the column
+
+1 error, 0 warnings

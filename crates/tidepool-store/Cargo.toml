@@ -12,3 +12,16 @@ publish = false
 workspace = true
 
 [dependencies]
+tidepool-config.workspace = true
+tidepool-model.workspace = true
+arc-swap = "1.9"
+arrow-array = "60"
+arrow-ipc = "60"
+arrow-schema = "60"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+hashbrown = "0.17"
+roaring = "0.11"
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }

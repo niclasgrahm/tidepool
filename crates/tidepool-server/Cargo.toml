@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 tidepool-config.workspace = true
+tidepool-model.workspace = true
 tidepool-protocol.workspace = true
+tidepool-store.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 rust-embed = { workspace = true, optional = true }
@@ -21,8 +23,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+subtle = "2"
 
 [dev-dependencies]
+arrow-array = "60"
+arrow-ipc = "60"
+arrow-schema = "60"
 http-body-util.workspace = true
 tempfile.workspace = true
 tower.workspace = true

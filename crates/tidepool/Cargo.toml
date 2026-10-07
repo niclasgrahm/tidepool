@@ -19,6 +19,7 @@ path = "src/main.rs"
 tidepool-config.workspace = true
 tidepool-model.workspace = true
 tidepool-server.workspace = true
+tidepool-store.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

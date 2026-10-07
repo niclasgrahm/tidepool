@@ -260,6 +260,11 @@ fn primary_key(cx: &mut Cx, file: &PathBuf, spec: &TableFile, columns: &[Column]
                             .at(file, path)
                             .help("a key must always have a value; remove `nullable: true`"),
                     ),
+                    Some(column) if column.encoding == tidepool_config::table::Encoding::Plain => cx.push(
+                        Diagnostic::error(format!("primary key column `{name}` is `encoding: plain`"))
+                            .at(file, path)
+                            .help("keys are looked up through their dictionary; remove `encoding: plain` from the column"),
+                    ),
                     Some(column) => primary_key.push(column.id),
                 }
             }

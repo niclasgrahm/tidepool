@@ -51,8 +51,8 @@ pub async fn info() -> Json<ServerInfo> {
 }
 
 /// `GET /v1/openapi.json`
-pub async fn openapi() -> Json<Value> {
-    Json(crate::openapi::document())
+pub async fn openapi(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(crate::openapi::document(&state.writer.snapshot().model))
 }
 
 /// `GET /v1/schemas/{kind}`

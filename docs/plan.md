@@ -380,10 +380,23 @@ Errors point to file, line and column (miette + YAML spans).
 
 ```
 Table
- ├── sealed: Vec<Arc<Segment>>      immutable column data; versioned delete bitmap alongside
- ├── tail: TailSegment               fixed-capacity, append-only, concurrently readable up to a watermark
- └── pk_index (upsert tables only):  key → RowRef { segment: SegmentId | Tail, row: u32 }
+ ├── segments: Vec<SegmentView>      immutable: sealed (bit-packed) and chunks (plain), each with a
+ │                                    copy-on-write delete bitmap and a version; consecutive row ids
+ ├── builder                          rows applied since the last epoch; the writer's alone
+ └── pk_index (upsert tables only):  key codes → row id (dense array for a single dict key)
 ```
+
+**As built in M2 (changed from the original design):** there is no shared,
+concurrently-written tail. At each epoch the writer *freezes* its builder into
+an immutable chunk; a snapshot is a list of `Arc`s to immutable chunks and
+sealed segments. No `unsafe`, no loom, and readers can never observe a
+half-written row. Chunks are sealed together once they hold `seal_rows` rows
+or there are more than 64 of them (a slow trickle would otherwise leave many
+tiny chunks). Row ids never change, so the primary-key index survives sealing
+untouched. Dictionaries work the same way: values in fixed 4096-value blocks,
+full blocks shared by `Arc`, only the partial block copied per epoch. Sealing
+runs on the writer thread for now (≈ hundreds of ms per million rows); moving it
+to a background job is a later optimisation.
 
 - **Segment size:** seal at 1,048,576 rows (configurable per table; smaller for dimensions). A segment holds the rows of one table for one contiguous row range.
 - **Sealed segment column formats:**
@@ -393,8 +406,7 @@ Table
   - strings with plain encoding: arena + offsets
   - NULL bitmaps for nullable plain columns
 - **Zone maps per sealed segment:** min/max per numeric/time column, and min/max code plus a small code bitset (when cardinality is small) per dict column. Used to skip whole segments for selections.
-- **Tail:** column buffers preallocated to segment capacity (no reallocation, so stable addresses). The writer appends beyond the published watermark, and readers read only below the watermark of their snapshot. This is the one `unsafe` area in the store. It's covered by `loom` tests and Miri.
-- **Sealing:** when the tail is full, the writer hands it to a background job that compresses it, computes zone maps, writes the segment file (§4.7) and swaps it in. Meanwhile a fresh tail takes new writes.
+- **Sealing:** when the chunks are full (see above), they are concatenated and compressed into one segment with min/max per integer and code column; in M5 the segment is also written to its file (§4.7).
 - **Upsert:** look up the key in `pk_index`.
   - If found, set the delete bit for the old row: in the tail via a tail delete bitmap, in a sealed segment via copy-on-write of that segment's delete bitmap, bumping its `version`.
   - Append the new row and update the index.
@@ -736,7 +748,7 @@ Every applied version is kept under `catalog/versions/`. `GET /v1/config/version
 | UI | `GET /*` → embedded SPA |
 
 **Auth (v1):**
-Port Kayak's auth stack instead of designing a new one:
+Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_READ_TOKEN`, `TIDEPOOL_ADMIN_TOKEN`), enforced by middleware built from each endpoint's declared `Access`; a level without a token is open. M8 then ports Kayak's auth stack instead of designing a new one:
 - **Ingest:** bearer token (`TIDEPOOL_INGEST_TOKEN`), constant-time comparison. This is what Kayak's `tidepool` output sends.
 - **Roles:** `viewer` and `admin` (config apply, MCP write tools), declared per endpoint in the endpoint table.
 - **Humans:** HTTP Basic + session cookie, or **JWT** validated against an identity provider's JWKS.
@@ -869,6 +881,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** the example project validates. Good errors for at least 20 malformed-config test cases. Plan output for a set of change scenarios matches golden files.
 
 ### M2: Store and ingest, in memory (3–4 wks)
+
+**Status: done 2026-10-07.** Measured with `just bench` on an M1 Max (10 cores), 8 clients, 10k-row batches, timed until the last write is visible, all rows verified: **NDJSON ~2.2M rows/s, Arrow ~2.4M rows/s** (targets 100k / 500k); **28 bytes per stored `orders` row** (≈ 2.8 GB for the 100M-row reference). Changes from the plan: frozen chunks instead of a shared tail (no `unsafe`, so no loom; see §4.4); derived dictionaries move to M3, where expressions are evaluated; primary-key columns must be dictionary-encoded (a validation rule); bearer-token auth per access level arrived with the first protected endpoints.
+
 - Types, dictionaries (with sort permutation and derived dictionaries), tail with watermark, sealing (in memory), zone maps.
 - PK index, upsert, delete bitmaps, column-change detection.
 - Writer thread, epochs, snapshots.
@@ -878,6 +893,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 
 ### M3: Query engine (5–6 wks)
 - Expression parser, type checker, kernels; aggregate states; dense and hash grouping.
+- Derived dictionaries (moved from M2: they need expression evaluation).
 - Selection engine (§5.2) with mask and partial caches. Derived metrics. `ignore_selection`.
 - `POST /v1/query`.
 - Oracle framework (static data).
@@ -949,7 +965,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Incremental results silently wrong | medium | severe | oracle + incremental oracle in CI, nightly long runs, production shadow verification (§11) |
-| Tail concurrency bug (unsafe) | medium | severe | one small module, loom + Miri, fuzzing under concurrency |
+| Tail concurrency bug (unsafe) | retired in M2 | — | the store has no `unsafe`: immutable chunks frozen per epoch instead of a shared tail |
 | Dictionary growth from high-cardinality columns | high | memory blow-up | `plain` encoding defaults for numerics, warnings and plan hints, dictionary compaction after v0.1 |
 | Dimension upserts cause frequent full rescans | medium | latency | column-change detection (v1); late binding (post v0.1) |
 | Ossie spec churn (0.1 → 0.2 → 1.0) | high | low–medium | pin a version; all Ossie handling in `tidepool-config`; an internal IR; migrate with a converter |

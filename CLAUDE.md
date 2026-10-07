@@ -30,6 +30,7 @@ just build           # just frontend, then a release binary with the UI embedded
 just test-embed      # tests of the embedded UI; needs `just build` first
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
+just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
 cargo run -p tidepool -- validate --config examples/retail    # check a config directory
 cargo run -p tidepool -- plan --config new/ --base old/       # what changes, and what it costs
 cargo insta review   # accept or reject changed golden snapshots (diagnostics, plans)
@@ -71,12 +72,12 @@ resolves names in expressions.)
 | `tidepool-config` | Apache-2.0 | serde types for every config file, JSON Schemas, diagnostics with `file:line:col` | M1 ✓ |
 | `tidepool-expr` | AGPL | SQL expressions: syntax + reference analysis (M1 ✓); type-check, kernels (M3) | M1/M3 |
 | `tidepool-model` | AGPL | compiled Model IR, cross-file validation, catalog of stable ids, diff → plan | M1 ✓ |
-| `tidepool-store` | AGPL | dictionaries, segments, tail, PK index, epochs, WAL | M2/M5 |
+| `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders | M2 ✓ / M5 (WAL) |
 | `tidepool-engine` | AGPL | selection engine, aggregation, caches, subscriptions | M3/M4 |
 | `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, lifecycle | M0 |
 | `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 |
 | `tidepool` | AGPL | the binary: CLI and wiring | M0 |
-| `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2+ |
+| `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
 | `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M0 shell, M6 |
 
 The licence split is enforced by `crates/tidepool/tests/licensing.rs`; see
@@ -94,9 +95,8 @@ add its `ApiDoc` entry with prose and an `Access`, add any body schema to
 `schemas()`, then the handler. The tests in `tests/api.rs` walk the table, so a
 new entry is covered by them automatically.
 
-`Access` is declared per endpoint but not enforced until authentication lands
-(M8). `every_endpoint_is_public_until_authentication_exists` fails the moment a
-protected endpoint is added without enforcement: that is deliberate.
+`Access` is declared per endpoint and enforced by `auth::authorize` from the
+same entry (see "Ingest over HTTP" below).
 
 Probes live at the root (`/healthz`, `/readyz`); everything else is under `/v1`.
 
@@ -147,6 +147,48 @@ readable, and that every new check must follow:
 safe / rebuild / destructive (plan §8.2). New change kinds get a scenario in
 `tests/plans.rs`; scenarios can edit the base config too (`base: [...]`),
 which is how "joins two tables that already hold data" is tested.
+
+### The store (`tidepool-store`)
+
+One writer thread owns the `Store`; everything else reads immutable
+`Snapshot`s. There is no shared mutable state and no `unsafe`:
+
+- **Writes** go through `WriterHandle::apply` into a bounded queue (64
+  batches). A full queue is `Busy`, which HTTP turns into `503 Retry-After`.
+  Never make the queue unbounded: backpressure is the point.
+- **Epochs**: the writer publishes on its own clock (`epoch_interval`) when
+  something changed: it freezes each table's builder into an immutable chunk,
+  snapshots dictionaries, and swaps in a new `Snapshot` (`ArcSwap`).
+  `?wait=visible` waits for that; it never forces an epoch, so clients can't
+  drive the epoch rate (every epoch will cost work per live dashboard).
+- **Segments** are immutable once published; deletes are a copy-on-write
+  `RoaringBitmap` beside each one, and `version` changes whenever it does.
+  Anything cached about a segment (M4) is keyed by its version.
+- **Row ids never change** (sealing keeps them), so the primary-key index
+  points at rows forever. Primary-key columns are dictionary-encoded, which
+  the model enforces, so a single-column key is a dense array by code.
+- **Upserts track changed columns** per epoch (`TableSnapshot::changed`): a
+  rewrite with identical values changes nothing downstream.
+- **Decoding** (JSON, NDJSON, Arrow) is strict: values are checked, never
+  coerced; a batch is all or nothing; every problem is listed by row and
+  column. Decimals are parsed from their text, never through `f64`.
+
+Store tests run against the retail example's model (`tests/store.rs`); use
+`Store::with_seal_rows` with a small number to exercise sealing.
+
+### Ingest over HTTP (`tidepool-server::tables`)
+
+Rows endpoints exist once in the endpoint table (`/v1/tables/{table}/rows`)
+and dispatch by name at request time, so a table added to the model works
+without touching the router. The OpenAPI document replaces the templated path
+with one typed path per table (`Row_<table>` / `Key_<table>` schemas).
+Decoding runs in `spawn_blocking`. `Idempotency-Key` is per table, in memory
+for 24 h (into the WAL in M5).
+
+Access is enforced from the endpoint table: `auth::authorize` wraps every
+route with its declared `Access`, checking the bearer token configured for
+that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
+`every_protected_endpoint_wants_its_token` walks the table to prove it.
 
 ### UI serving
 
