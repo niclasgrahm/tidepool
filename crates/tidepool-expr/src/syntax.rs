@@ -70,14 +70,16 @@ pub struct Name {
     pub quoted: bool,
 }
 
-impl Name {
-    fn from_ident(ident: &Ident) -> Self {
+impl From<&Ident> for Name {
+    fn from(ident: &Ident) -> Self {
         Self {
             value: ident.value.clone(),
             quoted: ident.quote_style.is_some(),
         }
     }
+}
 
+impl Name {
     /// Whether this name refers to `candidate`.
     #[must_use]
     pub fn matches(&self, candidate: &str) -> bool {
@@ -171,11 +173,11 @@ impl Visitor for Collector {
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
         match expr {
             Expr::Identifier(ident) => self.analysis.references.push(Reference {
-                parts: vec![Name::from_ident(ident)],
+                parts: vec![Name::from(ident)],
                 in_aggregate: self.depth > 0,
             }),
             Expr::CompoundIdentifier(idents) => self.analysis.references.push(Reference {
-                parts: idents.iter().map(Name::from_ident).collect(),
+                parts: idents.iter().map(Name::from).collect(),
                 in_aggregate: self.depth > 0,
             }),
             Expr::Function(function) => {

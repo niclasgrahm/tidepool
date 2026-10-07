@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 tidepool-config.workspace = true
+tidepool-engine.workspace = true
+tidepool-expr.workspace = true
 tidepool-model.workspace = true
 tidepool-protocol.workspace = true
 tidepool-store.workspace = true

@@ -9,6 +9,7 @@ mod endpoints;
 mod handlers;
 mod idempotency;
 pub mod openapi;
+mod query;
 mod tables;
 pub mod ui;
 

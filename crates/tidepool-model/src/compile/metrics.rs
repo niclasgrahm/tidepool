@@ -18,7 +18,9 @@ use tidepool_expr::syntax;
 use super::semantic::{Semantic, expression, extension};
 use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
-use crate::ir::{FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, TableId, TimeOffset};
+use crate::ir::{
+    FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, TableId, TimeOffset, Type,
+};
 
 pub(super) struct Metrics {
     pub metrics: Vec<Metric>,
@@ -97,9 +99,11 @@ pub(super) fn compile(cx: &mut Cx, _tables: &Tables, semantic: &Semantic) -> Met
     }
 
     check_cycles(cx, &file, specs, &out);
+    type_derived(cx, &file, specs, &mut out);
     out
 }
 
+#[allow(clippy::too_many_lines)]
 fn metric(
     cx: &mut Cx,
     file: &Path,
@@ -143,6 +147,21 @@ fn metric(
         derived(cx, &at, text, &analysis, names)?
     } else {
         base(cx, &at, text, &analysis, &ext, semantic, names)?
+    };
+    // a base metric is typed now; a derived one once its inputs are
+    let ty = match &body {
+        MetricBody::Base { .. } => {
+            match tidepool_expr::check_aggregation(&ast, &FieldScope { semantic }) {
+                Ok(aggregation) => aggregation.combine.ty(),
+                Err(message) => {
+                    cx.push(
+                        Diagnostic::error(format!("{what}: {message}")).at(file, at.expr.clone()),
+                    );
+                    return None;
+                }
+            }
+        }
+        MetricBody::Derived { .. } => Type::Null,
     };
 
     let ignore_selection = match ext.ignore_selection.as_slice() {
@@ -197,6 +216,7 @@ fn metric(
     Some(Metric {
         id,
         name: spec.name.clone(),
+        ty,
         description: spec.description.clone(),
         format: ext.format,
         body,
@@ -631,6 +651,112 @@ fn check_cycles(cx: &mut Cx, file: &Path, specs: &[ossie::Metric], metrics: &Met
                     let mut longer = route.clone();
                     longer.push(next);
                     stack.push((next, longer));
+                }
+            }
+        }
+    }
+}
+
+/// Names in a base metric: fields of any dataset, `dataset.field` or a bare
+/// field name that only one dataset has. Slots are positions in a flat list
+/// of every field; only the types matter here.
+struct FieldScope<'a> {
+    semantic: &'a Semantic,
+}
+
+impl tidepool_expr::Scope for FieldScope<'_> {
+    fn resolve(&self, parts: &[syntax::Name]) -> Result<(u32, Type), String> {
+        let mut slot = 0u32;
+        let mut found = None;
+        for dataset in &self.semantic.datasets {
+            for field in &dataset.fields {
+                let hit = match parts {
+                    [name] => name.matches(&field.name),
+                    [d, name] => d.matches(&dataset.name) && name.matches(&field.name),
+                    _ => false,
+                };
+                if hit && found.is_none() {
+                    found = Some((slot, field.ty));
+                }
+                slot += 1;
+            }
+        }
+        found.ok_or_else(|| "unknown field".to_string())
+    }
+}
+
+/// Names in a derived metric: other metrics, with their types.
+struct MetricScope<'a> {
+    metrics: &'a [Metric],
+}
+
+impl tidepool_expr::Scope for MetricScope<'_> {
+    fn resolve(&self, parts: &[syntax::Name]) -> Result<(u32, Type), String> {
+        let [name] = parts else {
+            return Err("a derived metric refers to metrics by name".to_string());
+        };
+        self.metrics
+            .iter()
+            .enumerate()
+            .find(|(_, m)| name.matches(&m.name))
+            .map(|(i, m)| (u32::try_from(i).unwrap_or(u32::MAX), m.ty))
+            .ok_or_else(|| format!("unknown metric `{name}`"))
+    }
+}
+
+/// Type derived metrics once their inputs have types: repeatedly, until no
+/// more can be typed (what's left depends on a loop or a broken metric, both
+/// already reported).
+fn type_derived(cx: &mut Cx, file: &Path, specs: &[ossie::Metric], out: &mut Metrics) {
+    let pending = |m: &Metric| matches!(m.body, MetricBody::Derived { .. }) && m.ty == Type::Null;
+    loop {
+        let ready: Vec<usize> = (0..out.metrics.len())
+            .filter(|i| pending(&out.metrics[*i]))
+            .filter(|i| match &out.metrics[*i].body {
+                MetricBody::Derived { inputs, .. } => inputs.iter().all(|input| {
+                    out.get(*input)
+                        .is_some_and(|m| !pending(m) && m.ty != Type::Null)
+                }),
+                MetricBody::Base { .. } => false,
+            })
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        for index in ready {
+            let metric = &out.metrics[index];
+            let MetricBody::Derived { expression, .. } = &metric.body else {
+                continue;
+            };
+            let at = specs
+                .iter()
+                .position(|s| s.name == metric.name)
+                .map(|i| {
+                    let dialect = specs[i].expression.readable().map_or(0, |(d, _)| d);
+                    YamlPath::root()
+                        .key("metrics")
+                        .index(i)
+                        .key("expression")
+                        .key("dialects")
+                        .index(dialect)
+                        .key("expression")
+                })
+                .unwrap_or_default();
+            let checked = syntax::parse(expression).map_err(|e| e.0).and_then(|ast| {
+                tidepool_expr::check_row(
+                    &ast,
+                    &MetricScope {
+                        metrics: &out.metrics,
+                    },
+                )
+            });
+            match checked {
+                Ok(expr) => out.metrics[index].ty = expr.ty(),
+                Err(message) => {
+                    let name = out.metrics[index].name.clone();
+                    cx.push(Diagnostic::error(format!("metric `{name}`: {message}")).at(file, at));
+                    // typed as float so it isn't retried; the error stops compilation
+                    out.metrics[index].ty = Type::Float;
                 }
             }
         }

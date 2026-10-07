@@ -26,6 +26,12 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Mozilla's root certificates as data. Only reaches the build: DuckDB's
+# build script downloads through ureq, for the test-only oracle crate.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [licenses.private]
 # our crates are `publish = false`; checking them against the list is still
 # what we want, since that is where the split is declared

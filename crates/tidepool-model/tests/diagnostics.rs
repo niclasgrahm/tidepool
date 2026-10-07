@@ -415,6 +415,38 @@ case!(
     )]
 );
 
+case!(
+    metric_sums_a_string,
+    [Replace(
+        "model.ossie.yaml",
+        "\"COUNT(DISTINCT orders.customer_id)\"",
+        "\"SUM(customers.region)\""
+    )]
+);
+case!(
+    field_adds_a_number_to_a_string,
+    [Replace(
+        "model.ossie.yaml",
+        "\"EXTRACT(YEAR FROM ordered_at)\"",
+        "\"status + 1\""
+    )]
+);
+case!(
+    derived_metric_mixes_a_string_metric,
+    [
+        Replace(
+            "model.ossie.yaml",
+            "\"COUNT(DISTINCT orders.customer_id)\"",
+            "\"MAX(orders.status)\""
+        ),
+        Replace(
+            "model.ossie.yaml",
+            "\"revenue / order_count\"",
+            "\"revenue / customer_count\""
+        ),
+    ]
+);
+
 // --- dashboards ------------------------------------------------------------------
 
 case!(

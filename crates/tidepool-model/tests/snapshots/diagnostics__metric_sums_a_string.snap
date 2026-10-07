@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `customer_count`: SUM needs a number, not a string
+  --> model.ossie.yaml:53:63
+   |
+53 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(customers.region)" }] }
+   |                                                               ^^^^^^^^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

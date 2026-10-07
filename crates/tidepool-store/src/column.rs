@@ -9,6 +9,7 @@
 //! can skip a whole segment that can't match.
 
 use crate::value::Storage;
+use std::ops::Range;
 
 /// A packed array of `len` unsigned values of `width` bits each.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +25,8 @@ impl Packed {
         let max = values.clone().max().unwrap_or(0);
         let width = u8::try_from(64 - max.leading_zeros()).unwrap_or(64);
         let len = values.len();
-        let mut words = vec![0u64; (len * usize::from(width)).div_ceil(64)];
+        // one spare word, so unpacking can always read the next word
+        let mut words = vec![0u64; (len * usize::from(width)).div_ceil(64) + 1];
         if width > 0 {
             for (i, value) in values.enumerate() {
                 let bit = i * usize::from(width);
@@ -73,10 +75,64 @@ impl Packed {
         value & mask
     }
 
+    /// The values of `rows`, in order. Much faster than [`Packed::get`]
+    /// per index.
+    #[must_use]
+    pub fn iter(&self, rows: Range<usize>) -> PackedIter<'_> {
+        let width = usize::from(self.width);
+        PackedIter {
+            words: &self.words,
+            bit: rows.start * width,
+            width,
+            mask: if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            },
+            remaining: rows.len(),
+        }
+    }
+
     fn bytes(&self) -> usize {
         self.words.len() * 8
     }
 }
+
+/// Values of a [`Packed`] array in order: see [`Packed::iter`].
+pub struct PackedIter<'a> {
+    words: &'a [u64],
+    bit: usize,
+    width: usize,
+    mask: u64,
+    remaining: usize,
+}
+
+impl Iterator for PackedIter<'_> {
+    type Item = u64;
+
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        if self.width == 0 {
+            return Some(0);
+        }
+        let (word, shift) = (self.bit >> 6, self.bit & 63);
+        // `<< 1 << (63 - shift)`: the next word's bits, without a 64-bit
+        // shift when `shift` is 0 (there is always a spare last word)
+        let value = (self.words[word] >> shift) | ((self.words[word + 1] << 1) << (63 - shift));
+        self.bit += self.width;
+        Some(value & self.mask)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for PackedIter<'_> {}
 
 /// A set of row offsets (NULLs), one bit per row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -198,6 +254,109 @@ impl ColumnData {
                 offsets,
                 nulls: n,
             } => bytes.len() + offsets.len() * 4 + nulls(n),
+        }
+    }
+
+    /// The dictionary codes of `rows` of a code column, into `out` (cleared
+    /// first). Other columns leave `out` empty.
+    pub fn decode_codes(&self, rows: Range<usize>, out: &mut Vec<u32>) {
+        out.clear();
+        match self {
+            Self::Codes(codes) => out.extend_from_slice(&codes[rows]),
+            Self::PackedCodes { packed, .. } => {
+                out.resize(rows.len(), 0);
+                #[allow(clippy::cast_possible_truncation)]
+                for (slot, v) in out.iter_mut().zip(packed.iter(rows)) {
+                    *slot = v as u32;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `map[code]` for the code of every row of `rows` of a code column
+    /// (`missing` past the end of `map`), into `out` (cleared first).
+    /// Following a relationship is decoding its foreign key through a map.
+    pub fn map_codes<T: Copy, U: Copy + From<T>>(
+        &self,
+        rows: Range<usize>,
+        map: &[T],
+        missing: U,
+        out: &mut Vec<U>,
+    ) {
+        out.clear();
+        out.resize(rows.len(), missing);
+        let at = |code: u64| {
+            usize::try_from(code)
+                .ok()
+                .and_then(|c| map.get(c))
+                .map_or(missing, |v| U::from(*v))
+        };
+        match self {
+            Self::Codes(codes) => {
+                for (slot, code) in out.iter_mut().zip(&codes[rows]) {
+                    *slot = at(u64::from(*code));
+                }
+            }
+            Self::PackedCodes { packed, .. } => {
+                for (slot, code) in out.iter_mut().zip(packed.iter(rows)) {
+                    *slot = at(code);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The values of `rows` of a 64-bit integer column into `values`, and
+    /// whether each is NULL into `nulls` (both cleared first). Other columns
+    /// leave them empty.
+    pub fn decode_i64(&self, rows: Range<usize>, values: &mut Vec<i64>, nulls: &mut Vec<bool>) {
+        values.clear();
+        nulls.clear();
+        let null_bits = match self {
+            Self::I64 {
+                values: v,
+                nulls: n,
+            } => {
+                values.extend_from_slice(&v[rows.clone()]);
+                n
+            }
+            Self::PackedI64 {
+                base,
+                packed,
+                nulls: n,
+                ..
+            } => {
+                values.resize(rows.len(), 0);
+                #[allow(clippy::cast_possible_wrap)]
+                for (slot, v) in values.iter_mut().zip(packed.iter(rows.clone())) {
+                    *slot = base.wrapping_add(v as i64);
+                }
+                n
+            }
+            _ => return,
+        };
+        match null_bits {
+            Some(bits) => nulls.extend(rows.map(|i| bits.get(i))),
+            None => nulls.resize(rows.len(), false),
+        }
+    }
+
+    /// The values and NULLs of `rows` of a float column, as
+    /// [`ColumnData::decode_i64`].
+    pub fn decode_f64(&self, rows: Range<usize>, values: &mut Vec<f64>, nulls: &mut Vec<bool>) {
+        values.clear();
+        nulls.clear();
+        if let Self::F64 {
+            values: v,
+            nulls: n,
+        } = self
+        {
+            values.extend_from_slice(&v[rows.clone()]);
+            match n {
+                Some(bits) => nulls.extend(rows.map(|i| bits.get(i))),
+                None => nulls.resize(rows.len(), false),
+            }
         }
     }
 

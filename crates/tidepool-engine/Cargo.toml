@@ -12,3 +12,11 @@ publish = false
 workspace = true
 
 [dependencies]
+tidepool-config.workspace = true
+tidepool-expr.workspace = true
+tidepool-model.workspace = true
+tidepool-store.workspace = true
+hashbrown = "0.17"
+rayon = "1.12"
+serde.workspace = true
+roaring = "0.11"

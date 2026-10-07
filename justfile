@@ -65,3 +65,11 @@ dev:
 # ingest throughput, per format (release build); deliberately not part of `ci`
 bench *args:
   cargo run --release -p tidepool-bench -- ingest {{args}}
+
+# query latency on the reference dataset, release build (args: --orders N --runs N --metrics a,b,c)
+bench-query *args:
+  cargo run --release -p tidepool-bench -- query {{args}}
+
+# the DuckDB oracle at depth, release build (args: number of seeds)
+oracle seeds="400":
+  TIDEPOOL_ORACLE_SEEDS={{seeds}} cargo test --release -p tidepool-oracle

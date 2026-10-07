@@ -31,6 +31,8 @@ just test-embed      # tests of the embedded UI; needs `just build` first
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
+just bench-query     # query latency on the reference dataset (args: --orders N --runs N --metrics a,b,c)
+just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
 cargo run -p tidepool -- validate --config examples/retail    # check a config directory
 cargo run -p tidepool -- plan --config new/ --base old/       # what changes, and what it costs
 cargo insta review   # accept or reject changed golden snapshots (diagnostics, plans)
@@ -189,6 +191,44 @@ Access is enforced from the endpoint table: `auth::authorize` wraps every
 route with its declared `Access`, checking the bearer token configured for
 that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
 `every_protected_endpoint_wants_its_token` walks the table to prove it.
+
+### The query engine (`tidepool-engine`)
+
+`run(snapshot, query)` is the whole surface: plan, execute, combine, sort.
+
+- **Planning** (`plan.rs`): every value a query reads is an *access*: a
+  relationship path from the anchor table plus a column or derived
+  expression. Selection is one-directional: a metric is filtered by the
+  selected fields its anchor reaches through many→one paths; the others are
+  ignored for it. One `AnchorPlan` per (anchor table, selection set), so
+  metrics with `ignore_selection` get their own scan.
+- **Two executors, same answers.** `exec.rs` is the general path: decodes
+  every value into a `Scalar` and evaluates expressions; slow, always right.
+  `fast.rs` takes any anchor plan whose values are plain columns
+  (dictionary codes, i64, f64) and whose aggregates are simple; it works on
+  64K-row morsels in parallel with selection vectors, follows relationships
+  through arrays indexed by foreign-key code (`scatter`/`follow`), tests
+  dictionary conditions once per code, uses dense group ids when every
+  dimension is a code, and counts distinct codes in one shared bitset.
+  `prepare` returning `None` means "use the general path"; never make the
+  fast path answer something it can't do exactly.
+- **Semantics** follow DuckDB, except dividing by zero is NULL. No
+  dimensions means exactly one row, as in SQL.
+
+Over HTTP, `POST /v1/query` (`tidepool-server::query`) resolves the semantic
+layer's names (`dataset.field`, metric names, with did-you-mean errors),
+converts JSON filter values by the field's type, and runs the query in
+`spawn_blocking`.
+
+### The oracle (`tidepool-oracle`)
+
+Random schemas, data (written in random batches with upserts, deletes and
+epochs) and queries from a seed; every query runs on **both** executors
+(`run` and `run_general`) and is compared with DuckDB. A failure names the
+seed and the query: `TIDEPOOL_ORACLE_SEED=<n> cargo test -p tidepool-oracle`
+reproduces it. Debug builds use 13-row morsels so small data still splits
+segments. When you add a query feature, extend the generator so the oracle
+covers it, and check it would catch a planted bug in the new code.
 
 ### UI serving
 

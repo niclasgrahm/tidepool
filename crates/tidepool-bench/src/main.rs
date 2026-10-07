@@ -11,6 +11,8 @@
 //!
 //! The targets these are measured against are in docs/plan.md §2.3.
 
+mod query;
+
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +48,18 @@ enum Command {
         /// Concurrent clients.
         #[arg(long, default_value_t = 8)]
         clients: usize,
+    },
+    /// Query latency on the reference dataset.
+    Query {
+        /// Orders to build.
+        #[arg(long, default_value_t = 10_000_000)]
+        orders: u64,
+        /// Selection changes to time.
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+        /// Only this metric set (comma-separated) instead of the standard two.
+        #[arg(long)]
+        metrics: Option<String>,
     },
 }
 
@@ -248,6 +262,16 @@ async fn over_http(
 #[tokio::main]
 async fn main() {
     match Cli::parse().command {
+        Command::Query {
+            orders,
+            runs,
+            metrics,
+        } => {
+            let model = model();
+            println!("query: reference dataset, {orders} orders\n");
+            let snapshot = query::build(&model, orders);
+            query::measure(&snapshot, runs, metrics.as_deref());
+        }
         Command::Ingest {
             rows,
             batch,

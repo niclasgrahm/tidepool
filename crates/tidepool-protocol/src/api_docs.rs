@@ -21,7 +21,10 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{IngestError, IngestResponse, Preview, ProbeStatus, ServerInfo, TableInfo};
+use crate::{
+    IngestError, IngestResponse, Preview, ProbeStatus, QueryRequest, QueryResult, ServerInfo,
+    TableInfo,
+};
 
 /// The error body every failing request comes back with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -84,10 +87,11 @@ pub enum Operation {
     ListTables,
     GetTable,
     PreviewTable,
+    Query,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 10] = [
+pub const OPERATIONS: [Operation; 11] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -98,6 +102,7 @@ pub const OPERATIONS: [Operation; 10] = [
     Operation::ListTables,
     Operation::GetTable,
     Operation::PreviewTable,
+    Operation::Query,
 ];
 
 impl Operation {
@@ -115,6 +120,7 @@ impl Operation {
             Self::ListTables => "listTables",
             Self::GetTable => "getTable",
             Self::PreviewTable => "previewTable",
+            Self::Query => "query",
         }
     }
 }
@@ -125,18 +131,20 @@ impl Operation {
 #[serde(rename_all = "snake_case")]
 pub enum Tag {
     Tables,
+    Queries,
     Server,
     Reference,
 }
 
 /// Every tag, in the order pages list them.
-pub const TAGS: [Tag; 3] = [Tag::Tables, Tag::Server, Tag::Reference];
+pub const TAGS: [Tag; 4] = [Tag::Tables, Tag::Queries, Tag::Server, Tag::Reference];
 
 impl Tag {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Tables => "tables",
+            Self::Queries => "queries",
             Self::Server => "server",
             Self::Reference => "reference",
         }
@@ -149,6 +157,10 @@ impl Tag {
             Self::Tables => {
                 "The data: writing rows into tables, and looking at what they hold. \
                  Tables are declared in `tables/*.yaml`; every table gets these endpoints."
+            }
+            Self::Queries => {
+                "Asking the model: metrics grouped by fields, under a selection. \
+                 Names are the semantic layer's (`model.ossie.yaml`), not tables'."
             }
             Self::Server => {
                 "The process itself: probes for orchestrators, and what server this is."
@@ -500,6 +512,38 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/v1/query",
+            method: Method::Post,
+            operation: Operation::Query,
+            summary: "Run a query",
+            description: "Metrics grouped by dimensions, under a selection, from the newest \
+                          snapshot: the engine dashboards use, without a subscription. \
+                          Filters are one-directional: a metric is filtered by the fields \
+                          its table reaches through relationships, and the rest don't \
+                          apply to it.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "What to compute.",
+                body: Body::Json("QueryRequest"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The answer.",
+                    body: Body::Json("QueryResult"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The query names something the model doesn't have, or \
+                                  asks for something the engine can't do.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/healthz",
             method: Method::Get,
             operation: Operation::Health,
@@ -630,6 +674,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("IngestError", of(schema_for!(IngestError)));
     schemas.insert("TableInfo", of(schema_for!(TableInfo)));
     schemas.insert("Preview", of(schema_for!(Preview)));
+    schemas.insert("QueryRequest", of(schema_for!(QueryRequest)));
+    schemas.insert("QueryResult", of(schema_for!(QueryResult)));
     schemas
 }
 

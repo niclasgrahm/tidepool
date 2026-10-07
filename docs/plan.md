@@ -892,6 +892,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** ingest targets from §2.3 met in the in-memory configuration; `loom` tests pass.
 
 ### M3: Query engine (5–6 wks)
+
+**Status: in progress.** Done: expression parser, type checker and interpreter; planner with one-directional selection, `ignore_selection` and derived metrics; a general executor and a columnar fast path (morsels, selection vectors, relationships as arrays by foreign-key code, dense grouping, shared distinct bitsets), each checked against DuckDB on every oracle query (25,000 queries over 1,000 seeds agree; planted bugs in the fast path are caught); `POST /v1/query`. Measured with `just bench-query` on the M1 Max at 100M orders (2 GB resident), region × category: revenue, order count and paid revenue **cold 231 ms, selection change p50 121 ms / p95 164 ms**; with `COUNT(DISTINCT customer)` in place of paid revenue, cold 459 ms, p95 183 ms. Not yet at the exit targets (< 100 ms). Left: mask and partial caches (§6.5) for repeated and toggled-back selections; more raw scan speed for the cold and fresh-selection targets, which caches can't help; derived dictionaries.
+
 - Expression parser, type checker, kernels; aggregate states; dense and hash grouping.
 - Derived dictionaries (moved from M2: they need expression evaluation).
 - Selection engine (§5.2) with mask and partial caches. Derived metrics. `ignore_selection`.

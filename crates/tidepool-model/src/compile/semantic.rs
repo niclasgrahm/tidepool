@@ -18,7 +18,7 @@ use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
     ColumnId, Dataset, DomainId, Field, FieldSource, KeyDomain, Relationship, RelationshipId,
-    TableId,
+    TableId, Type, type_of,
 };
 
 pub(super) struct Semantic {
@@ -314,7 +314,37 @@ fn datasets(
     }
 }
 
+/// Names in a field expression: the columns of its own table, bare or
+/// qualified by the dataset name. Slots are column positions.
+struct TableScope<'a> {
+    table: &'a crate::ir::Table,
+    dataset: &'a str,
+}
+
+impl tidepool_expr::Scope for TableScope<'_> {
+    fn resolve(&self, parts: &[syntax::Name]) -> Result<(u32, Type), String> {
+        let column = match parts {
+            [column] => column,
+            [dataset, column] if dataset.matches(self.dataset) => column,
+            _ => {
+                return Err(format!(
+                    "a field may only use columns of its own table (`{}`)",
+                    self.table.name
+                ));
+            }
+        };
+        self.table
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, c)| column.matches(&c.name))
+            .map(|(i, c)| (u32::try_from(i).unwrap_or(u32::MAX), type_of(c.column_type)))
+            .ok_or_else(|| format!("unknown column `{column}`"))
+    }
+}
+
 /// One declared field: its expression resolved against the table's columns.
+#[allow(clippy::too_many_lines)]
 fn declared_field(
     cx: &mut Cx,
     file: &Path,
@@ -382,6 +412,26 @@ fn declared_field(
         },
     };
 
+    // the field's type: its column's, or its expression's
+    let ty = match &source {
+        FieldSource::Column(id) => table
+            .column(*id)
+            .map_or(Type::Null, |c| type_of(c.column_type)),
+        FieldSource::Derived { .. } => match tidepool_expr::check_row(
+            &ast,
+            &TableScope {
+                table,
+                dataset: &spec.name,
+            },
+        ) {
+            Ok(expr) => expr.ty(),
+            Err(message) => {
+                cx.push(Diagnostic::error(format!("{what}: {message}")).at(file, expr_path));
+                return None;
+            }
+        },
+    };
+
     let column_is_temporal = match &source {
         FieldSource::Column(id) => table
             .column(*id)
@@ -411,6 +461,7 @@ fn declared_field(
     Some(Field {
         name: field.name.clone(),
         source,
+        ty,
         is_time,
         grains: ext.grain.unwrap_or_default(),
         label: field.label.clone(),
@@ -564,6 +615,7 @@ fn fields(
             declared.remove(&column.name).unwrap_or_else(|| Field {
                 name: column.name.clone(),
                 source: FieldSource::Column(column.id),
+                ty: type_of(column.column_type),
                 is_time: column.column_type.is_temporal(),
                 grains: Vec::new(),
                 label: None,

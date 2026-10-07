@@ -118,3 +118,86 @@ pub struct Preview {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub epoch: u64,
 }
+
+/// A query: metrics grouped by dimensions, under a selection. The same
+/// engine dashboards use, without a subscription.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRequest {
+    /// Metrics by name, as in the model.
+    pub metrics: Vec<String>,
+    /// Fields to group by, in result order.
+    #[serde(default)]
+    pub dimensions: Vec<QueryDimension>,
+    /// The selection: conditions on fields. A metric is filtered by the
+    /// fields its table reaches; the others don't apply to it.
+    #[serde(default)]
+    pub filters: Vec<QueryFilter>,
+    /// Result columns to sort by. Default: the dimensions, ascending.
+    #[serde(default)]
+    pub sort: Vec<QuerySort>,
+    /// At most this many rows.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// A field to group by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDimension {
+    /// `dataset.field`.
+    pub field: String,
+    /// For time fields: `day`, `week`, `month`, `quarter` or `year`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<String>,
+}
+
+/// A condition on a field: `in`, or a half-open range `from <= value < to`
+/// (either end may be left out). Values are written as in ingested rows:
+/// decimals, dates and timestamps as strings or numbers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryFilter {
+    /// `dataset.field`.
+    pub field: String,
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<serde_json::Value>,
+}
+
+/// A result column to sort by, by its name in [`QueryResult::columns`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuerySort {
+    pub column: String,
+    #[serde(default)]
+    pub desc: bool,
+}
+
+/// A query's answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct QueryResult {
+    /// Dimensions first, then metrics, in request order.
+    pub columns: Vec<QueryColumn>,
+    /// Values as JSON: decimals, dates and timestamps as strings, so nothing
+    /// is lost on the way through.
+    pub rows: Vec<Vec<serde_json::Value>>,
+    /// The data epoch the answer was computed from.
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QueryColumn {
+    /// `dataset.field` (with `:grain`) for dimensions, the metric's name for
+    /// metrics.
+    pub name: String,
+    /// `bool`, `int`, `float`, `decimal(s)`, `string`, `date`, `timestamp`
+    /// or `timestamptz`.
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// `dimension` or `metric`.
+    pub role: String,
+}

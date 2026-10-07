@@ -13,6 +13,22 @@ use tidepool_config::ossie::TimeGrain;
 use tidepool_config::server::ServerConfig;
 use tidepool_config::table::{Encoding, TableMode};
 use tidepool_config::types::{ColumnType, HumanDuration};
+pub use tidepool_expr::Type;
+
+/// The expression type of a column type.
+#[must_use]
+pub fn type_of(column_type: ColumnType) -> Type {
+    match column_type {
+        ColumnType::Bool => Type::Bool,
+        ColumnType::Int32 | ColumnType::Int64 => Type::Int,
+        ColumnType::Float64 => Type::Float,
+        ColumnType::Decimal { scale, .. } => Type::Decimal(scale),
+        ColumnType::String => Type::String,
+        ColumnType::Date => Type::Date,
+        ColumnType::Timestamp => Type::Timestamp,
+        ColumnType::TimestampTz => Type::TimestampTz,
+    }
+}
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {
@@ -145,6 +161,8 @@ impl Dataset {
 pub struct Field {
     pub name: String,
     pub source: FieldSource,
+    /// The field's value type (a column's, or a derived expression's).
+    pub ty: Type,
     pub is_time: bool,
     /// Grains a visual may group this field by; empty means all, for time fields.
     pub grains: Vec<TimeGrain>,
@@ -193,6 +211,8 @@ pub struct KeyDomain {
 pub struct Metric {
     pub id: MetricId,
     pub name: String,
+    /// The metric's value type.
+    pub ty: Type,
     pub description: Option<String>,
     pub format: Option<String>,
     pub body: MetricBody,

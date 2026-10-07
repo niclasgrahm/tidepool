@@ -12,3 +12,10 @@ publish = false
 workspace = true
 
 [dependencies]
+tidepool-config.workspace = true
+tidepool-engine.workspace = true
+tidepool-expr.workspace = true
+tidepool-model.workspace = true
+tidepool-store.workspace = true
+duckdb = { version = "1.10506", features = ["bundled"] }
+serde_json.workspace = true
