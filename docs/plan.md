@@ -647,7 +647,7 @@ result(view, selection, epoch) =
 
 ## 7. Client protocol (WebSocket `/v1/ws`)
 
-Binary WS messages with a framed format: `u32 header_len | header (JSON) | payloads (Arrow IPC streams)`. JSON-only messages are allowed when there's no payload. Types are defined in `tidepool-protocol` and used directly by the server and the wasm frontend.
+Binary WS messages with a framed format: `u32 header_len | header (JSON) | payloads (Arrow IPC streams)`. JSON-only messages are allowed when there's no payload. *(M4: every message is JSON for now, tagged by `type`; see `tidepool-protocol::live`. Arrow payloads come back when a result is large enough to matter.)* Types are defined in `tidepool-protocol` and used directly by the server and the wasm frontend.
 
 **Client → server:**
 
@@ -905,6 +905,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
   - 100M-row reference: cold group-by with 2 dimensions and 3 metrics < 100 ms, selection change p95 < 100 ms
 
 ### M4: Live (3–4 wks)
+
+**Status: done 2026-10-07.** Incremental answers: the engine keeps each anchor's aggregate state with a row-id high-water mark and the deleted rows already accounted for, scans only rows appended since, and subtracts rows deleted since (count/sum/avg; MIN/MAX and distinct counts recompute when rows are deleted; a changed related table recomputes, the known cost of §6.5). Distinct counts keep running per-group counts as bits go 0→1. Subscriptions aren't a separate structure: every visual runs through the one shared engine with its selection cut to the fields that can change it, so sessions showing the same thing share one answer per epoch and one incremental state. Sessions with selection history, filter lists with selected/possible/excluded states, one frame per session per epoch carrying only what changed, coalescing (always the newest snapshot), pause/resume. Incremental oracle: live queries checked against DuckDB after every epoch while writes (appends, keyed-fact rewrites and deletes, dimension upserts) are applied to both. Measured on the M1 Max: an epoch of 100k new orders costs 0.6–0.9 ms (1.6–2 ms with `COUNT(DISTINCT customer)`) at 10M and at 100M orders; 50 WebSocket sessions clicking regions while ingesting 100k rows/s see new data p50 128–180 ms / p95 220–228 ms after the ingest ack (1M and 10M orders loaded; 200 ms epochs). A thin dashboard page (M6's first slice) shows the retail dashboard live. Changes from the plan: frames are JSON, not Arrow-framed (§7); no separate subscription refcounting or priority queue (the engine's caches give the sharing, and selection changes are answered outside the epoch loop); `compare` metrics (time shifts) aren't shown yet.
+
 - Incremental tail partials, invalidation rules, result cache.
 - Subscription manager with dedupe, priorities and coalescing.
 - WebSocket protocol, sessions, selection history, filter windows, epoch frames.

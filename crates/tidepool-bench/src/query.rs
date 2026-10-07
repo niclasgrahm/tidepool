@@ -42,8 +42,31 @@ fn batch(
     }
 }
 
-/// The reference dataset, with `orders` orders.
-pub fn build(model: &Arc<Model>, orders: u64) -> Snapshot {
+const CUSTOMERS: u64 = 1_000_000;
+const PRODUCTS: u64 = 100_000;
+
+/// Orders with ids `ids`.
+fn orders_batch(model: &Model, ids: std::ops::Range<u64>) -> Batch {
+    let s = |text: String| Some(Parsed::Str(text));
+    batch(model, "orders", ids, |column, i| {
+        let m = mix(i);
+        match column {
+            "order_id" => s(format!("o{i}")),
+            "customer_id" => s(format!("c{}", m % CUSTOMERS)),
+            "product_id" => s(format!("p{}", (m >> 20) % PRODUCTS)),
+            "status" => s(STATUSES[((m >> 40) % 4) as usize].to_string()),
+            "ordered_at" => Some(Parsed::I64(
+                1_767_225_600_000_000 + i64::try_from(i % 31_536_000).unwrap_or(0) * 1_000_000,
+            )),
+            "quantity" => Some(Parsed::I64(i64::try_from((m >> 44) % 9 + 1).unwrap_or(1))),
+            "amount" => Some(Parsed::I64(i64::try_from((m >> 24) % 50_000).unwrap_or(0))),
+            _ => None,
+        }
+    })
+}
+
+/// The reference dataset, with `orders` orders, and the store holding it.
+pub fn build(model: &Arc<Model>, orders: u64) -> (Store, Snapshot) {
     let mut store = Store::new(Arc::clone(model));
     let id = |name: &str| {
         model
@@ -52,8 +75,7 @@ pub fn build(model: &Arc<Model>, orders: u64) -> Snapshot {
     };
     let s = |text: String| Some(Parsed::Str(text));
 
-    let customers = 1_000_000u64;
-    let products = 100_000u64;
+    let (customers, products) = (CUSTOMERS, PRODUCTS);
     let started = Instant::now();
     let b = batch(model, "customers", 0..customers, |column, i| match column {
         "customer_id" => s(format!("c{i}")),
@@ -79,22 +101,7 @@ pub fn build(model: &Arc<Model>, orders: u64) -> Snapshot {
     let mut start = 0;
     while start < orders {
         let end = (start + chunk).min(orders);
-        let b = batch(model, "orders", start..end, |column, i| {
-            let m = mix(i);
-            match column {
-                "order_id" => s(format!("o{i}")),
-                "customer_id" => s(format!("c{}", m % customers)),
-                "product_id" => s(format!("p{}", (m >> 20) % products)),
-                "status" => s(STATUSES[((m >> 40) % 4) as usize].to_string()),
-                "ordered_at" => Some(Parsed::I64(
-                    1_767_225_600_000_000 + i64::try_from(i % 31_536_000).unwrap_or(0) * 1_000_000,
-                )),
-                "quantity" => Some(Parsed::I64(i64::try_from((m >> 44) % 9 + 1).unwrap_or(1))),
-                "amount" => Some(Parsed::I64(i64::try_from((m >> 24) % 50_000).unwrap_or(0))),
-                _ => None,
-            }
-        });
-        store.apply(id("orders"), Op::Write, &b);
+        store.apply(id("orders"), Op::Write, &orders_batch(model, start..end));
         last = store.publish().or(last);
         start = end;
     }
@@ -109,7 +116,72 @@ pub fn build(model: &Arc<Model>, orders: u64) -> Snapshot {
         "  built {orders} orders in {:.1}s",
         started.elapsed().as_secs_f64()
     );
-    snapshot
+    (store, snapshot)
+}
+
+/// Per-epoch cost of keeping the reference query live: each epoch appends
+/// `rows` orders, and the engine brings its kept answer up to date. Should
+/// depend on `rows`, not on how many orders there already are.
+pub fn measure_epochs(store: &mut Store, snapshot: Snapshot, epochs: usize, rows: u64) {
+    let model = Arc::clone(&snapshot.model);
+    let metric = |name: &str| {
+        model
+            .metrics
+            .iter()
+            .find(|m| m.name == name)
+            .map_or_else(|| panic!("no metric {name}"), |m| m.id)
+    };
+    let orders_id = model
+        .table_named("orders")
+        .map_or_else(|| panic!("no orders"), |t| t.id);
+    let mut next = snapshot.table(orders_id).map_or(0, |t| t.live_rows);
+    let mut current = snapshot;
+    for metrics in [
+        ["revenue", "order_count", "customer_count"],
+        ["revenue", "order_count", "paid_revenue"],
+    ] {
+        let query = Query {
+            dimensions: vec![
+                Dim {
+                    field: field(&model, "customers", "region"),
+                    grain: None,
+                },
+                Dim {
+                    field: field(&model, "products", "category"),
+                    grain: None,
+                },
+            ],
+            metrics: metrics.iter().map(|m| metric(m)).collect(),
+            ..Query::default()
+        };
+        let engine = Engine::default();
+        let _ = engine
+            .run(&current, &query)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut times = Vec::new();
+        for _ in 0..epochs {
+            store.apply(
+                orders_id,
+                Op::Write,
+                &orders_batch(&model, next..next + rows),
+            );
+            next += rows;
+            if let Some(published) = store.publish() {
+                current = published;
+            }
+            let started = Instant::now();
+            let _ = engine
+                .run(&current, &query)
+                .unwrap_or_else(|e| panic!("{e}"));
+            times.push(started.elapsed());
+        }
+        println!(
+            "  epoch of {rows} new orders ({}):  p50 {:>6.1} ms   p95 {:>6.1} ms",
+            metrics.join(", "),
+            percentile(&mut times, 0.5),
+            percentile(&mut times, 0.95)
+        );
+    }
 }
 
 fn field(model: &Model, dataset: &str, field: &str) -> FieldRef {

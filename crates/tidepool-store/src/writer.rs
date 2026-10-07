@@ -230,6 +230,12 @@ impl WriterHandle {
         (handle, DropGuard(commands))
     }
 
+    /// Notified with every newly published epoch.
+    #[must_use]
+    pub fn epochs(&self) -> watch::Receiver<u64> {
+        self.epochs.clone()
+    }
+
     /// The latest published snapshot.
     #[must_use]
     pub fn snapshot(&self) -> Arc<Snapshot> {

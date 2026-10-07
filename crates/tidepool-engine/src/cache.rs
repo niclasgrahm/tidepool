@@ -25,7 +25,7 @@ use tidepool_store::store::{ColumnLayout, DictId, SegmentData, TableSnapshot};
 
 use crate::derived::DerivedDict;
 
-use crate::fast::{MORSEL, Map};
+use crate::fast::{Incremental, MORSEL, Map};
 use crate::query::ResultSet;
 
 /// Codes of one morsel of a join column, as narrow as the map's.
@@ -105,6 +105,10 @@ struct Inner {
     /// Derived dictionaries per (base dictionary, expression). Codes never
     /// change, so an entry stays valid; it is extended as its base grows.
     derived: HashMap<(DictId, String), Arc<DerivedDict>>,
+    /// Anchor answers kept to be brought up to date, by plan, with the
+    /// tick they were last used at.
+    anchors: HashMap<String, (u64, Incremental)>,
+    tick: u64,
     /// (epoch, query) → answer, oldest first; only the newest epoch's.
     results: VecDeque<((u64, String), ResultSet)>,
 }
@@ -116,6 +120,9 @@ pub(crate) struct Caches {
     /// Join columns are dropped (all of them, for now) past this many bytes.
     join_budget: usize,
 }
+
+/// Anchor answers kept to be brought up to date, at most.
+const ANCHORS: usize = 256;
 
 /// Results kept per epoch.
 const RESULTS: usize = 256;
@@ -266,6 +273,46 @@ impl Caches {
             inner.results.pop_front();
         }
         inner.results.push_back(((epoch, query), result));
+    }
+
+    /// The kept answer for an anchor plan, taken out while it's brought up
+    /// to date (a query running meanwhile computes its own).
+    pub(crate) fn take_anchor(&self, key: &str) -> Option<Incremental> {
+        self.lock().anchors.remove(key).map(|(_, kept)| kept)
+    }
+
+    /// Keep an anchor answer; the least recently used go past the budget.
+    pub(crate) fn keep_anchor(&self, key: String, kept: Incremental) {
+        let mut inner = self.lock();
+        inner.tick += 1;
+        let tick = inner.tick;
+        // a newer one kept meanwhile wins
+        if inner
+            .anchors
+            .get(&key)
+            .is_some_and(|(_, k)| k.epoch() > kept.epoch())
+        {
+            return;
+        }
+        inner.anchors.insert(key, (tick, kept));
+        while inner.anchors.len() > ANCHORS
+            || inner
+                .anchors
+                .values()
+                .map(|(_, k)| k.bytes())
+                .sum::<usize>()
+                > self.join_budget
+        {
+            let Some(oldest) = inner
+                .anchors
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            inner.anchors.remove(&oldest);
+        }
     }
 
     /// Bytes held by join columns, for status pages and tests.

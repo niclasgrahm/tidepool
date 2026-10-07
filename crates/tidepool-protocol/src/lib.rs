@@ -6,6 +6,7 @@
 //! engine, no runtime and no network code, only types and descriptions.
 
 pub mod api_docs;
+pub mod live;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

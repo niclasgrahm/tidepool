@@ -8,6 +8,7 @@ pub mod auth;
 mod endpoints;
 mod handlers;
 mod idempotency;
+mod live;
 pub mod openapi;
 mod query;
 mod tables;
@@ -36,6 +37,8 @@ pub struct AppState {
     pub(crate) keys: idempotency::Keys,
     /// The query engine and its caches, shared by every query.
     pub(crate) engine: Arc<tidepool_engine::Engine>,
+    /// Live sessions on `/v1/ws`.
+    pub(crate) hub: live::Hub,
 }
 
 impl AppState {
@@ -65,6 +68,7 @@ impl AppState {
             tokens,
             keys: idempotency::Keys::default(),
             engine: Arc::new(tidepool_engine::Engine::default()),
+            hub: live::Hub::default(),
         }
     }
 

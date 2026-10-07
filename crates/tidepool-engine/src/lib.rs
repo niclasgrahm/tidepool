@@ -13,6 +13,7 @@ mod plan;
 pub mod query;
 
 use tidepool_expr::Scalar;
+use tidepool_model::ir::FieldRef;
 use tidepool_store::Snapshot;
 
 pub use query::{
@@ -74,11 +75,65 @@ impl Engine {
         Ok(result)
     }
 
+    /// How many rows of `field`'s table have each value of `field`, under
+    /// `selection`, kept up to date like any answer: a filter list's
+    /// possible values.
+    ///
+    /// # Errors
+    /// The field doesn't exist.
+    pub fn values(
+        &self,
+        snapshot: &Snapshot,
+        field: &FieldRef,
+        selection: &Selection,
+    ) -> Result<Vec<(Scalar, i64)>, QueryError> {
+        values_with(snapshot, field, selection, Some(&self.caches))
+    }
+
     /// Bytes held by materialized join columns.
     #[must_use]
     pub fn join_bytes(&self) -> usize {
         self.caches.join_bytes()
     }
+}
+
+/// [`Engine::values`] without caches.
+///
+/// # Errors
+/// The field doesn't exist.
+pub fn values(
+    snapshot: &Snapshot,
+    field: &FieldRef,
+    selection: &Selection,
+) -> Result<Vec<(Scalar, i64)>, QueryError> {
+    values_with(snapshot, field, selection, None)
+}
+
+fn values_with(
+    snapshot: &Snapshot,
+    field: &FieldRef,
+    selection: &Selection,
+    caches: Option<&cache::Caches>,
+) -> Result<Vec<(Scalar, i64)>, QueryError> {
+    let plan = plan::values(&snapshot.model, field, selection)?;
+    let mut rows: Vec<(Scalar, i64)> =
+        exec::execute(&snapshot.model, snapshot, &plan, true, caches)
+            .into_iter()
+            .filter_map(|(mut dims, metrics)| match (dims.pop(), metrics.first()) {
+                (Some(value), Some(Scalar::Int(n))) if *n > 0 => Some((value, *n)),
+                _ => None,
+            })
+            .collect();
+    rows.sort_by(|a, b| a.0.sort_cmp(&b.0));
+    Ok(rows)
+}
+
+/// The part of `query`'s selection that can change its answer.
+///
+/// # Errors
+/// As [`run`].
+pub fn relevant(snapshot: &Snapshot, query: &Query) -> Result<Selection, QueryError> {
+    plan::relevant(&snapshot.model, query)
 }
 
 fn answer(

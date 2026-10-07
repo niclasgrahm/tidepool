@@ -9,5 +9,10 @@ public_url = "/"
 addresses = ["127.0.0.1"]
 port = 7080
 
+# the live socket first: a WebSocket needs its own proxy entry
+[[proxy]]
+backend = "ws://127.0.0.1:7070/v1/ws"
+ws = true
+
 [[proxy]]
 backend = "http://127.0.0.1:7070/v1/"

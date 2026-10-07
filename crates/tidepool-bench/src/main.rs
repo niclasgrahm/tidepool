@@ -11,6 +11,7 @@
 //!
 //! The targets these are measured against are in docs/plan.md §2.3.
 
+mod live;
 mod query;
 
 use std::fmt::Write as _;
@@ -60,6 +61,30 @@ enum Command {
         /// Only this metric set (comma-separated) instead of the standard two.
         #[arg(long)]
         metrics: Option<String>,
+    },
+    /// Feed a running server: the retail dimensions, then orders, until stopped.
+    Feed {
+        /// The server.
+        #[arg(long, default_value = "http://127.0.0.1:7070")]
+        server: String,
+        /// Orders a second.
+        #[arg(long, default_value_t = 2_000)]
+        rate: usize,
+    },
+    /// Freshness with live sessions while ingesting.
+    Live {
+        /// Orders loaded before the sessions start.
+        #[arg(long, default_value_t = 1_000_000)]
+        orders: usize,
+        /// WebSocket sessions on the dashboard.
+        #[arg(long, default_value_t = 50)]
+        sessions: usize,
+        /// Orders ingested per second while they watch.
+        #[arg(long, default_value_t = 100_000)]
+        rate: usize,
+        /// How long to ingest.
+        #[arg(long, default_value_t = 20)]
+        seconds: u64,
     },
 }
 
@@ -269,8 +294,21 @@ async fn main() {
         } => {
             let model = model();
             println!("query: reference dataset, {orders} orders\n");
-            let snapshot = query::build(&model, orders);
+            let (mut store, snapshot) = query::build(&model, orders);
             query::measure(&snapshot, runs, metrics.as_deref());
+            query::measure_epochs(&mut store, snapshot, 20, 100_000);
+        }
+        Command::Feed { server, rate } => live::feed(&server, rate).await,
+        Command::Live {
+            orders,
+            sessions,
+            rate,
+            seconds,
+        } => {
+            println!(
+                "live: {sessions} sessions, {rate} orders/s for {seconds}s on top of {orders}\n"
+            );
+            live::measure(model(), orders, sessions, rate, seconds).await;
         }
         Command::Ingest {
             rows,

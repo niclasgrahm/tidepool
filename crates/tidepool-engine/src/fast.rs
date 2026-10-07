@@ -19,13 +19,13 @@
 //! back to the general path. The oracle runs with the fast path both on and
 //! off, so both stay checked against DuckDB.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use rayon::prelude::*;
-use roaring::RoaringBitmap;
+use roaring::{RoaringBitmap, RoaringTreemap};
 use tidepool_config::types::ColumnType;
 use tidepool_expr::eval::{Row, eval};
 use tidepool_expr::ir::{AggFunc, Expr};
@@ -826,6 +826,52 @@ impl Values {
     }
 }
 
+/// Room to grow: a kept result is rebuilt when a dictionary outgrows it.
+fn padded(space: usize) -> usize {
+    space + space / 4 + 8
+}
+
+/// An anchor's answer as of some epoch, and what it was built from: kept
+/// by the engine to bring the answer up to date with only the rows that
+/// changed (plan §6.5). Row ids never change, so "what was counted" is a
+/// high-water mark plus the rows that were already deleted.
+pub(crate) struct Incremental {
+    epoch: u64,
+    /// Every row below this row id was counted (or skipped as deleted).
+    high: u64,
+    /// Row ids below `high` not (or no longer) counted: deleted.
+    deleted: RoaringTreemap,
+    /// Each segment's delete bitmap as last seen, by (first row id, rows).
+    segments: Vec<(u64, u32, Arc<RoaringBitmap>)>,
+    dense: Option<Vec<usize>>,
+    partial: Partial,
+    shared: Vec<Option<Bitset>>,
+    maps: Vec<Option<Arc<Map>>>,
+    derived: Vec<Option<Arc<DerivedDict>>>,
+}
+
+impl Incremental {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Bytes held, roughly: for the engine's budget.
+    pub(crate) fn bytes(&self) -> usize {
+        let bits: usize = self.shared.iter().flatten().map(Bitset::bytes).sum();
+        bits + self.partial.rows.len() * 8 * (1 + self.partial.states.len())
+    }
+}
+
+/// Which rows of a morsel a scan counts.
+pub(crate) enum Task {
+    /// Live rows from this offset in the segment on: everything (0), or
+    /// what was appended since a result was last brought up to date.
+    Add { from: usize },
+    /// These rows (segment offsets, sorted), deleted since they were
+    /// counted: taken back out.
+    Remove(Vec<u32>),
+}
+
 /// Rows scanned per task. Tiny in debug builds, so tests over small data
 /// still split segments.
 pub(crate) const MORSEL: usize = if cfg!(debug_assertions) { 13 } else { 1 << 14 };
@@ -842,8 +888,10 @@ fn float_part(f: f64) -> i64 {
 #[derive(Clone, Debug)]
 enum State {
     Count(Vec<i64>),
-    SumInt(Vec<i128>, Vec<bool>),
-    SumFloat(Vec<f64>, Vec<bool>),
+    /// Sums and how many non-NULL values each holds (subtracting can
+    /// bring that back to 0, when the sum is NULL again).
+    SumInt(Vec<i128>, Vec<i64>),
+    SumFloat(Vec<f64>, Vec<i64>),
     AvgInt(Vec<i128>, Vec<i64>),
     AvgFloat(Vec<f64>, Vec<i64>),
     Min(Vec<Option<Cell>>),
@@ -873,11 +921,11 @@ impl State {
             Self::Count(v) => v.resize(groups, 0),
             Self::SumInt(s, a) => {
                 s.resize(groups, 0);
-                a.resize(groups, false);
+                a.resize(groups, 0);
             }
             Self::SumFloat(s, a) => {
                 s.resize(groups, 0.0);
-                a.resize(groups, false);
+                a.resize(groups, 0);
             }
             Self::AvgInt(s, c) => {
                 s.resize(groups, 0);
@@ -894,12 +942,16 @@ impl State {
     }
 
     /// Feed the rows `sel` (in groups `groups`) of `values`.
+    /// Feed the rows `sel` (in groups `groups`) of `values`, counted
+    /// `weight` times: 1 to add rows, -1 to take deleted ones back out (only
+    /// for subtractable aggregates, see [`Agg::subtractable`]).
     fn update(
         &mut self,
         sel: &[u32],
         groups: &[u32],
         values: Option<&Values>,
         ranks: Option<&[u32]>,
+        weight: i64,
     ) {
         let rows = sel
             .iter()
@@ -908,43 +960,47 @@ impl State {
         match (self, values) {
             (Self::Count(counts), None) => {
                 for g in groups {
-                    counts[*g as usize] += 1;
+                    counts[*g as usize] += weight;
                 }
             }
             (Self::Count(counts), Some(values)) => {
                 for (r, g) in rows {
-                    counts[g] += i64::from(!values.is_null(r));
+                    counts[g] += i64::from(!values.is_null(r)) * weight;
                 }
             }
             (Self::SumInt(sums, any), Some(Values::Ints(v, n))) => {
                 for (r, g) in rows {
                     if !n[r] {
-                        sums[g] += i128::from(v[r]);
-                        any[g] = true;
+                        sums[g] += i128::from(v[r]) * i128::from(weight);
+                        any[g] += weight;
                     }
                 }
             }
             (Self::SumFloat(sums, any), Some(Values::Floats(v, n))) => {
+                #[allow(clippy::cast_precision_loss)]
+                let w = weight as f64;
                 for (r, g) in rows {
                     if !n[r] {
-                        sums[g] += v[r];
-                        any[g] = true;
+                        sums[g] += v[r] * w;
+                        any[g] += weight;
                     }
                 }
             }
             (Self::AvgInt(sums, counts), Some(Values::Ints(v, n))) => {
                 for (r, g) in rows {
                     if !n[r] {
-                        sums[g] += i128::from(v[r]);
-                        counts[g] += 1;
+                        sums[g] += i128::from(v[r]) * i128::from(weight);
+                        counts[g] += weight;
                     }
                 }
             }
             (Self::AvgFloat(sums, counts), Some(Values::Floats(v, n))) => {
+                #[allow(clippy::cast_precision_loss)]
+                let w = weight as f64;
                 for (r, g) in rows {
                     if !n[r] {
-                        sums[g] += v[r];
-                        counts[g] += 1;
+                        sums[g] += v[r] * w;
+                        counts[g] += weight;
                     }
                 }
             }
@@ -999,11 +1055,11 @@ impl State {
             (Self::Count(a), Self::Count(b)) => a[into] += b[from],
             (Self::SumInt(s, a), Self::SumInt(t, b)) => {
                 s[into] += t[from];
-                a[into] |= b[from];
+                a[into] += b[from];
             }
             (Self::SumFloat(s, a), Self::SumFloat(t, b)) => {
                 s[into] += t[from];
-                a[into] |= b[from];
+                a[into] += b[from];
             }
             (Self::AvgInt(s, c), Self::AvgInt(t, d)) => {
                 s[into] += t[from];
@@ -1043,7 +1099,7 @@ impl State {
         });
         match self {
             Self::Count(v) => Scalar::Int(v[group]),
-            Self::SumInt(_, any) | Self::SumFloat(_, any) if !any[group] => Scalar::Null,
+            Self::SumInt(_, any) | Self::SumFloat(_, any) if any[group] == 0 => Scalar::Null,
             Self::SumInt(s, _) => match agg.ty {
                 Type::Decimal(scale) => Scalar::Decimal(s[group], scale),
                 _ => i64::try_from(s[group]).map_or(Scalar::Float(s[group] as f64), Scalar::Int),
@@ -1109,10 +1165,16 @@ const BITSET_LIMIT: usize = 1 << 28;
 /// `group * space + code`, set by every scanning task. Cheaper than
 /// per-task sets merged afterwards when the code space is moderate.
 ///
-/// The bitset is larger than any cache, and rows hit it at random, so a
-/// task doesn't set bits as it scans: it collects their positions into
-/// [`Pending`] buckets by range and sets them a bucket at a time, each
-/// bucket's slice of the bitset small enough to stay in cache.
+/// Counts per group are kept as bits go from 0 to 1, so reading them costs
+/// nothing, and a result kept across epochs only pays for the bits its new
+/// rows set.
+///
+/// Small bitsets are filled per thread (threads writing one small bitset
+/// would fight over its cache lines), in pages allocated as rows touch
+/// them and merged into `words` when counts are read. Large ones are shared:
+/// a task doesn't set bits as it scans but collects their positions into
+/// [`Pending`] buckets by range, and sets them a bucket at a time, each
+/// bucket's slice small enough to stay in cache.
 struct Bitset {
     space: usize,
     /// Bucket of a bit: `bit >> shift`.
@@ -1123,14 +1185,19 @@ struct Bitset {
     locks: Vec<std::sync::Mutex<()>>,
     /// Dimensions the counted code determines, folded out of the group.
     folded: Option<Folded>,
-    /// When small enough to copy per thread: one private bitset per worker,
-    /// set with plain stores and `OR`ed into `words` before counting. Threads
-    /// writing the same small bitset would fight over its cache lines.
-    private: Option<Vec<std::sync::Mutex<Vec<u64>>>>,
+    /// Per worker thread, for small bitsets: pages of private bits.
+    private: Option<Vec<std::sync::Mutex<Pages>>>,
+    /// Distinct codes per (dense) group so far.
+    counts: Vec<AtomicI64>,
 }
+
+/// One thread's private bits, in pages allocated as rows touch them.
+type Pages = Vec<Option<Box<[u64]>>>;
 
 /// Bytes all private bitsets of one distinct count may take together.
 const PRIVATE_BYTES: usize = 64 << 20;
+/// Words per private page (32 KiB).
+const PAGE: usize = 1 << 12;
 
 /// When a dimension is reached through the very key being counted (region
 /// through `customer_id`, for `COUNT(DISTINCT customer_id)`), a code can
@@ -1147,6 +1214,7 @@ struct Folded {
     /// relationship map giving its code from the counted code.
     determined: Vec<(usize, Arc<Map>)>,
 }
+
 /// Bit positions a task has yet to set, by bucket.
 #[derive(Default)]
 struct Pending {
@@ -1161,8 +1229,8 @@ const PENDING: usize = 1 << 17;
 
 impl Bitset {
     fn new(groups: usize, space: usize, folded: Option<Folded>) -> Self {
-        let groups = folded.as_ref().map_or(groups, |f| f.expand.len());
-        let bits = groups * space;
+        let rows = folded.as_ref().map_or(groups, |f| f.expand.len());
+        let bits = rows * space;
         // at least 6: a word (64 bits) always lies in one bucket
         let shift = (usize::BITS - bits.leading_zeros())
             .saturating_sub(BUCKETS.trailing_zeros())
@@ -1191,84 +1259,127 @@ impl Bitset {
                         .collect()
                 })
             },
+            counts: (0..groups).map(|_| AtomicI64::new(0)).collect(),
         }
     }
 
-    /// OR every private bitset into `words`.
+    fn bytes(&self) -> usize {
+        let private: usize = self
+            .private
+            .iter()
+            .flatten()
+            .map(|p| {
+                p.lock()
+                    .map_or(0, |p| p.iter().flatten().count() * PAGE * 8)
+            })
+            .sum();
+        self.words.len() * 8 + private + self.counts.len() * 8
+    }
+
+    /// The dense group bit `bit` counts for.
+    fn group(&self, bit: usize) -> usize {
+        let (row, code) = (bit / self.space, bit % self.space);
+        match &self.folded {
+            None => row,
+            Some(folded) => {
+                folded.expand[row]
+                    + folded
+                        .determined
+                        .iter()
+                        .map(|(stride, map)| stride * map.code(code) as usize)
+                        .sum::<usize>()
+            }
+        }
+    }
+
+    /// Set `new` in word `at` (which must hold none of them yet) and count
+    /// its bits into `local` (by group). Only one task writes a word at a
+    /// time (bucket locks, or one task per page).
+    fn set(&self, at: usize, new: u64, local: &mut [i64]) {
+        let word = &self.words[at];
+        word.store(word.load(Ordering::Relaxed) | new, Ordering::Relaxed);
+        let mut bits = new;
+        while bits != 0 {
+            let bit = at * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if let Some(n) = local.get_mut(self.group(bit)) {
+                *n += 1;
+            }
+        }
+    }
+
+    /// Add a task's counts to the shared ones: once per task, not per bit,
+    /// or every thread would fight over a handful of counters.
+    fn add(&self, local: &[i64]) {
+        for (n, l) in self.counts.iter().zip(local) {
+            if *l != 0 {
+                n.fetch_add(*l, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Move every private page into `words`, counting what's new.
     fn gather(&self) {
         let Some(private) = &self.private else { return };
-        let private: Vec<std::sync::MutexGuard<'_, Vec<u64>>> = private
-            .iter()
-            .map(|p| p.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-            .filter(|p| !p.is_empty())
-            .collect();
-        self.words
-            .par_chunks(1 << 12)
-            .enumerate()
-            .for_each(|(chunk, words)| {
-                for (i, word) in words.iter().enumerate() {
-                    let at = (chunk << 12) + i;
-                    word.store(private.iter().fold(0, |w, p| w | p[at]), Ordering::Relaxed);
+        // pages by index: one task per index, so no word has two writers
+        let mut pages: HashMap<usize, Vec<Box<[u64]>>> = HashMap::new();
+        for mine in private {
+            let mut mine = mine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (index, page) in mine.iter_mut().enumerate() {
+                if let Some(page) = page.take() {
+                    pages.entry(index).or_default().push(page);
                 }
-            });
+            }
+        }
+        pages.into_par_iter().for_each(|(index, pages)| {
+            let mut local = vec![0i64; self.counts.len()];
+            for i in 0..PAGE {
+                let at = index * PAGE + i;
+                let Some(word) = self.words.get(at) else {
+                    break;
+                };
+                let old = word.load(Ordering::Relaxed);
+                let new = pages.iter().fold(0, |w, p| w | p[i]) & !old;
+                if new != 0 {
+                    self.set(at, new, &mut local);
+                }
+            }
+            self.add(&local);
+        });
     }
 
     /// The distinct count of every dense group.
-    fn counts(&self, groups: usize) -> Vec<i64> {
+    fn counts(&self) -> Vec<i64> {
         self.gather();
-        let Some(folded) = &self.folded else {
-            return (0..groups).into_par_iter().map(|g| self.count(g)).collect();
-        };
-        // every set bit, sent to its full group
-        self.words
-            .par_chunks(1 << 12)
-            .enumerate()
-            .map(|(chunk, words)| {
-                let mut counts = vec![0i64; groups];
-                for (i, word) in words.iter().enumerate() {
-                    let mut bits = word.load(Ordering::Relaxed);
-                    while bits != 0 {
-                        let bit = ((chunk << 12) + i) * 64 + bits.trailing_zeros() as usize;
-                        bits &= bits - 1;
-                        let (reduced, code) = (bit / self.space, bit % self.space);
-                        let group = folded.expand[reduced]
-                            + folded
-                                .determined
-                                .iter()
-                                .map(|(stride, map)| stride * map.code(code) as usize)
-                                .sum::<usize>();
-                        if let Some(n) = counts.get_mut(group) {
-                            *n += 1;
-                        }
-                    }
-                }
-                counts
-            })
-            .reduce(
-                || vec![0i64; groups],
-                |mut a, b| {
-                    a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
-                    a
-                },
-            )
+        self.counts
+            .iter()
+            .map(|n| n.load(Ordering::Relaxed))
+            .collect()
     }
 
     fn insert(&self, rows: &[u32], groups: &[u32], codes: &[u32], pending: &mut Pending) {
         if let Some(private) = &self.private {
             let mine = &private[rayon::current_thread_index().unwrap_or(0) % private.len()];
             // only this thread takes its lock: it is never contended
-            let mut bits = mine
+            let mut pages = mine
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if bits.is_empty() {
-                bits.resize(self.words.len(), 0);
+            if pages.is_empty() {
+                pages.resize_with(self.words.len().div_ceil(PAGE), || None);
             }
             for (r, g) in rows.iter().zip(groups) {
                 let code = codes[*r as usize];
+                if code == 0 {
+                    continue;
+                }
                 let g = self.folded.as_ref().map_or(*g, |f| f.reduce[*g as usize]);
                 let bit = g as usize * self.space + code as usize;
-                // a NULL (code 0) sets nothing
-                bits[bit / 64] |= u64::from(code != 0) << (bit % 64);
+                let (word, offset) = (bit / 64, bit % 64);
+                let page =
+                    pages[word / PAGE].get_or_insert_with(|| vec![0u64; PAGE].into_boxed_slice());
+                page[word % PAGE] |= 1 << offset;
             }
             return;
         }
@@ -1294,6 +1405,7 @@ impl Bitset {
 
     /// Set every pending bit.
     fn flush(&self, pending: &mut Pending) {
+        let mut local = vec![0i64; self.counts.len()];
         for (bucket, lock) in pending.buckets.iter_mut().zip(&self.locks) {
             if bucket.is_empty() {
                 continue;
@@ -1303,31 +1415,16 @@ impl Bitset {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for bit in bucket.drain(..) {
-                let (word, mask) = (&self.words[bit as usize / 64], 1u64 << (bit % 64));
+                let (at, mask) = (bit as usize / 64, 1u64 << (bit % 64));
                 // a bucket's words are only written under its lock, and a
                 // word never straddles two buckets (`shift` >= 6)
-                word.store(word.load(Ordering::Relaxed) | mask, Ordering::Relaxed);
+                if self.words[at].load(Ordering::Relaxed) & mask == 0 {
+                    self.set(at, mask, &mut local);
+                }
             }
         }
+        self.add(&local);
         pending.count = 0;
-    }
-
-    fn count(&self, group: usize) -> i64 {
-        let (start, end) = (group * self.space, (group + 1) * self.space);
-        let mut count = 0u32;
-        let mut bit = start;
-        while bit < end {
-            let (word, offset) = (bit / 64, bit % 64);
-            let take = (64 - offset).min(end - bit);
-            let mask = if take == 64 {
-                u64::MAX
-            } else {
-                ((1u64 << take) - 1) << offset
-            };
-            count += (self.words[word].load(Ordering::Relaxed) & mask).count_ones();
-            bit += take;
-        }
-        i64::from(count)
     }
 }
 
@@ -1336,7 +1433,8 @@ struct Partial {
     /// Group id → key (sparse groups only; dense ids are their own key).
     keys: Vec<Key>,
     lookup: hashbrown::HashMap<Key, u32>,
-    seen: Vec<bool>,
+    /// Rows counted per group (a group with none left isn't output).
+    rows: Vec<i64>,
     states: Vec<State>,
 }
 
@@ -1382,7 +1480,7 @@ impl Prepared<'_> {
         Partial {
             keys: Vec::new(),
             lookup: hashbrown::HashMap::new(),
-            seen: vec![false; groups],
+            rows: vec![0; groups],
             states,
         }
     }
@@ -1455,11 +1553,16 @@ impl Prepared<'_> {
         table: &TableSnapshot,
         segment: usize,
         rows: Range<usize>,
+        task: &Task,
         ranks: &[Option<Vec<u32>>],
         shared: &[Option<Bitset>],
         scratch: &mut Scratch,
     ) {
         let view = &table.segments[segment];
+        let weight = match task {
+            Task::Add { .. } => 1,
+            Task::Remove(_) => -1,
+        };
         // the selection: live rows passing every condition. Columns are
         // decoded as needed: a condition's before it filters, the rest after
         // the conditions, only at the rows left when few are.
@@ -1477,7 +1580,16 @@ impl Prepared<'_> {
         sel.clear();
         let len = u32::try_from(rows.len()).unwrap_or(u32::MAX);
         let start = u32::try_from(rows.start).unwrap_or(u32::MAX);
-        if view.deletes.is_empty() {
+        if let Task::Remove(offsets) = task {
+            // rows deleted since they were counted: deleted now, so the
+            // delete bitmap mustn't drop them
+            sel.extend(
+                offsets
+                    .iter()
+                    .filter(|o| (start..start + len).contains(o))
+                    .map(|o| o - start),
+            );
+        } else if view.deletes.is_empty() {
             sel.extend(0..len);
         } else {
             let mut deleted = view
@@ -1492,6 +1604,12 @@ impl Prepared<'_> {
                     sel.push(row);
                 }
             }
+        }
+        if let Task::Add { from } = task
+            && *from > rows.start
+        {
+            let skip = u32::try_from(from - rows.start).unwrap_or(u32::MAX);
+            sel.retain(|r| *r >= skip);
         }
         for (read, test) in &self.conditions {
             if !loaded[*read] {
@@ -1551,7 +1669,7 @@ impl Prepared<'_> {
                         let id = u32::try_from(partial.keys.len()).unwrap_or(u32::MAX);
                         partial.lookup.insert(key, id);
                         partial.keys.push(key);
-                        partial.seen.push(false);
+                        partial.rows.push(0);
                         for state in &mut partial.states {
                             state.grow(partial.keys.len());
                         }
@@ -1562,7 +1680,7 @@ impl Prepared<'_> {
             }
         }
         for g in groups.iter() {
-            partial.seen[*g as usize] = true;
+            partial.rows[*g as usize] += weight;
         }
 
         if scratch.pending.len() != self.aggs.len() {
@@ -1606,7 +1724,7 @@ impl Prepared<'_> {
                 (Some(bits), Some(Values::Codes(codes))) => {
                     bits.insert(rows, groups, codes, &mut scratch.pending[a]);
                 }
-                _ => state.update(rows, groups, arg, ranks.as_deref()),
+                _ => state.update(rows, groups, arg, ranks.as_deref(), weight),
             }
         }
     }
@@ -1654,9 +1772,11 @@ impl Prepared<'_> {
 
     fn merge(&self, mut a: Partial, mut b: Partial, ranks: &[Option<Vec<u32>>]) -> Partial {
         if self.dense.is_some() {
-            for (group, seen) in b.seen.iter().enumerate() {
-                if *seen {
-                    a.seen[group] = true;
+            // a group no row of `b` touched has nothing to merge (one pass
+            // only adds rows or only removes them, so touched ⇔ rows ≠ 0)
+            for (group, rows) in b.rows.iter().enumerate() {
+                if *rows != 0 {
+                    a.rows[group] += rows;
                     for ((into, from), ranks) in a.states.iter_mut().zip(&mut b.states).zip(ranks) {
                         into.merge(group, from, group, ranks.as_deref());
                     }
@@ -1671,13 +1791,13 @@ impl Prepared<'_> {
                 let id = a.keys.len();
                 a.lookup.insert(*key, u32::try_from(id).unwrap_or(u32::MAX));
                 a.keys.push(*key);
-                a.seen.push(false);
+                a.rows.push(0);
                 for state in &mut a.states {
                     state.grow(a.keys.len());
                 }
                 id
             };
-            a.seen[target] |= b.seen[group];
+            a.rows[target] += b.rows[group];
             for ((into, from), ranks) in a.states.iter_mut().zip(&mut b.states).zip(ranks) {
                 into.merge(target, from, group, ranks.as_deref());
             }
@@ -1702,20 +1822,93 @@ impl Prepared<'_> {
 
     /// Shared bitsets for `COUNT(DISTINCT code)` over dense groups, per
     /// aggregate, when they are small enough.
-    fn bitsets(&self) -> Vec<Option<Bitset>> {
+    /// `space` is the code space a bitset must cover; `pad` leaves room
+    /// for the dictionary to grow (for a result kept across epochs).
+    fn bitsets(&self, pad: bool) -> Vec<Option<Bitset>> {
         self.aggs
             .iter()
             .map(|agg| {
                 let groups: usize = self.dense.as_ref()?.iter().product();
                 let read = &self.reads[agg.arg?];
                 let ok = agg.func == AggFunc::Count && agg.distinct && read.kind == Kind::Codes;
-                let space = code_space(read);
+                let space = if pad {
+                    padded(code_space(read))
+                } else {
+                    code_space(read)
+                };
                 let folded = self.folded(agg.arg?);
                 let rows = folded.as_ref().map_or(groups, |f| f.expand.len());
                 (ok && rows.checked_mul(space)? <= BITSET_LIMIT)
                     .then(|| Bitset::new(groups, space, folded))
             })
             .collect()
+    }
+
+    /// Whether every aggregate can take deleted rows back out.
+    fn subtractable(&self) -> bool {
+        self.aggs.iter().all(|a| {
+            matches!(
+                a.func,
+                AggFunc::CountStar | AggFunc::Sum | AggFunc::Avg | AggFunc::Count
+            ) && !a.distinct
+        })
+    }
+
+    /// Whether `state` can be brought up to date for this plan: built from
+    /// the same relationship maps, derived dictionaries that only grew, and
+    /// group and bitset layouts that still have room for every code.
+    fn compatible(&self, state: &Incremental, table: &TableSnapshot) -> bool {
+        let maps =
+            self.reads
+                .iter()
+                .zip(&state.maps)
+                .all(|(read, old)| match (&read.gathered, old) {
+                    (None, None) => true,
+                    (Some(map), Some(old)) => Arc::ptr_eq(map, old),
+                    _ => false,
+                });
+        let derived =
+            self.reads
+                .iter()
+                .zip(&state.derived)
+                .all(|(read, old)| match (&read.derived, old) {
+                    (None, None) => true,
+                    (Some(now), Some(old)) => {
+                        now.map.len() >= old.map.len() && now.map[..old.map.len()] == old.map[..]
+                    }
+                    _ => false,
+                });
+        let dense = match (&self.dense, &state.dense) {
+            (None, None) => true,
+            (Some(now), Some(old)) => {
+                now.len() == old.len() && now.iter().zip(old).all(|(n, o)| n <= o)
+            }
+            _ => false,
+        };
+        let bitsets = self.aggs.iter().zip(&state.shared).all(|(agg, old)| {
+            let wanted = self.dense.is_some()
+                && agg.func == AggFunc::Count
+                && agg.distinct
+                && agg.arg.is_some_and(|a| self.reads[a].kind == Kind::Codes);
+            match old {
+                None => !wanted,
+                Some(old) => agg
+                    .arg
+                    .is_some_and(|a| old.space >= code_space(&self.reads[a])),
+            }
+        });
+        let rows: u64 = table
+            .segments
+            .iter()
+            .map(|s| s.data.start + u64::from(s.data.rows))
+            .max()
+            .unwrap_or(0);
+        maps && derived
+            && dense
+            && bitsets
+            && rows >= state.high
+            && state.maps.len() == self.reads.len()
+            && state.shared.len() == self.aggs.len()
     }
 
     /// The dimensions a distinct count over read `arg` determines (see
@@ -1813,59 +2006,201 @@ impl Prepared<'_> {
             .collect()
     }
 
-    /// Run over every live row: (dimension values, aggregate values) per group.
+    /// The answer: (dimension values, aggregate values) per group. With a
+    /// `kept` slot (a cached engine), the answer last kept there is brought
+    /// up to date when it can be (only rows appended or deleted since are
+    /// scanned), and the new one is kept in its place.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn run(&self, table: &TableSnapshot) -> Vec<(Vec<Scalar>, Vec<Scalar>)> {
+    pub(crate) fn run(
+        &mut self,
+        table: &TableSnapshot,
+        epoch: u64,
+        kept: Option<&mut Option<Incremental>>,
+    ) -> Vec<(Vec<Scalar>, Vec<Scalar>)> {
         let ranks = self.ranks();
-        let shared = self.bitsets();
-        let morsels: Vec<(usize, Range<usize>)> = table
+        let keeping = kept.is_some();
+        let mut kept = kept;
+        let mut state = kept
+            .as_mut()
+            .and_then(|k| k.take())
+            .filter(|s| s.epoch <= epoch && self.compatible(s, table));
+
+        // rows deleted since they were counted, by segment
+        let mut removed: Vec<(usize, Vec<u32>)> = Vec::new();
+        if let Some(st) = &state {
+            for (s, view) in table.segments.iter().enumerate() {
+                let start = view.data.start;
+                let same = st.segments.iter().any(|(at, rows, deletes)| {
+                    *at == start && *rows == view.data.rows && Arc::ptr_eq(deletes, &view.deletes)
+                });
+                if same {
+                    continue;
+                }
+                let offsets: Vec<u32> = view
+                    .deletes
+                    .iter()
+                    .filter(|d| {
+                        let id = start + u64::from(*d);
+                        id < st.high && !st.deleted.contains(id)
+                    })
+                    .collect();
+                if !offsets.is_empty() {
+                    removed.push((s, offsets));
+                }
+            }
+            if !removed.is_empty() && !self.subtractable() {
+                // MIN, MAX and distinct counts can't take rows back out
+                state = None;
+                removed.clear();
+            }
+        }
+        let mut state = if let Some(st) = state {
+            self.dense.clone_from(&st.dense);
+            st
+        } else {
+            {
+                if keeping && let Some(spaces) = &self.dense {
+                    let padded: Vec<usize> = spaces.iter().map(|s| padded(*s)).collect();
+                    if padded
+                        .iter()
+                        .try_fold(1usize, |acc, s| acc.checked_mul(*s))
+                        .is_some_and(|n| n <= DENSE_LIMIT)
+                    {
+                        self.dense = Some(padded);
+                    }
+                }
+                Incremental {
+                    epoch,
+                    high: 0,
+                    deleted: RoaringTreemap::new(),
+                    segments: Vec::new(),
+                    dense: self.dense.clone(),
+                    partial: self.empty(),
+                    shared: self.bitsets(keeping),
+                    maps: self.reads.iter().map(|r| r.gathered.clone()).collect(),
+                    derived: self.reads.iter().map(|r| r.derived.clone()).collect(),
+                }
+            }
+        };
+
+        // the rows to add: everything from the high-water mark on
+        let high = state.high;
+        let added: Vec<(usize, Range<usize>, Task)> = table
             .segments
             .iter()
             .enumerate()
             .flat_map(|(s, view)| {
                 let rows = view.data.rows as usize;
+                let from =
+                    usize::try_from(high.saturating_sub(view.data.start)).unwrap_or(usize::MAX);
                 (0..rows)
                     .step_by(MORSEL)
                     .map(move |start| (s, start..(start + MORSEL).min(rows)))
+                    .filter(move |(_, morsel)| morsel.end > from)
+                    .map(move |(s, morsel)| (s, morsel, Task::Add { from }))
             })
             .collect();
-        let mut partial = morsels
-            .into_par_iter()
-            .fold(
-                || (self.empty(), Scratch::default()),
-                |(mut partial, mut scratch), (segment, rows)| {
-                    self.scan(
-                        &mut partial,
-                        table,
-                        segment,
-                        rows,
-                        &ranks,
-                        &shared,
-                        &mut scratch,
-                    );
-                    (partial, scratch)
-                },
-            )
-            .map(|(partial, mut scratch)| {
-                for (bits, pending) in shared.iter().zip(&mut scratch.pending) {
-                    if let Some(bits) = bits {
-                        bits.flush(pending);
-                    }
-                }
-                partial
+        let taken: Vec<(usize, Range<usize>, Task)> = removed
+            .iter()
+            .flat_map(|(s, offsets)| {
+                let rows = table.segments[*s].data.rows as usize;
+                (0..rows).step_by(MORSEL).filter_map(move |start| {
+                    let morsel = start..(start + MORSEL).min(rows);
+                    let here: Vec<u32> = offsets
+                        .iter()
+                        .copied()
+                        .filter(|o| morsel.contains(&(*o as usize)))
+                        .collect();
+                    (!here.is_empty()).then_some((*s, morsel, Task::Remove(here)))
+                })
             })
-            .reduce(|| self.empty(), |a, b| self.merge(a, b, &ranks));
+            .collect();
 
+        let shared = std::mem::take(&mut state.shared);
+        let pass = |tasks: Vec<(usize, Range<usize>, Task)>| {
+            tasks
+                .into_par_iter()
+                .fold(
+                    || (self.empty(), Scratch::default()),
+                    |(mut partial, mut scratch), (segment, rows, task)| {
+                        self.scan(
+                            &mut partial,
+                            table,
+                            segment,
+                            rows,
+                            &task,
+                            &ranks,
+                            &shared,
+                            &mut scratch,
+                        );
+                        (partial, scratch)
+                    },
+                )
+                .map(|(partial, mut scratch)| {
+                    for (bits, pending) in shared.iter().zip(&mut scratch.pending) {
+                        if let Some(bits) = bits {
+                            bits.flush(pending);
+                        }
+                    }
+                    partial
+                })
+                .reduce(|| self.empty(), |a, b| self.merge(a, b, &ranks))
+        };
+        let plus = pass(added);
+        let minus = pass(taken);
+        let partial = std::mem::replace(&mut state.partial, self.empty());
+        let partial = self.merge(self.merge(partial, plus, &ranks), minus, &ranks);
+
+        // what's counted now
+        for view in table.segments.iter() {
+            let start = view.data.start;
+            let same = state.segments.iter().any(|(at, rows, deletes)| {
+                *at == start && *rows == view.data.rows && Arc::ptr_eq(deletes, &view.deletes)
+            });
+            if !same {
+                state
+                    .deleted
+                    .extend(view.deletes.iter().map(|d| start + u64::from(d)));
+            }
+        }
+        state.segments = table
+            .segments
+            .iter()
+            .map(|v| (v.data.start, v.data.rows, Arc::clone(&v.deletes)))
+            .collect();
+        state.high = table
+            .segments
+            .iter()
+            .map(|v| v.data.start + u64::from(v.data.rows))
+            .max()
+            .unwrap_or(0)
+            .max(high);
+        state.epoch = epoch;
+        state.partial = partial;
+        state.shared = shared;
+        let out = self.output(&mut state.partial, &state.shared);
+        if let Some(kept) = kept {
+            *kept = Some(state);
+        }
+        out
+    }
+
+    /// The answer from a merged partial and distinct-count bitsets.
+    fn output(
+        &self,
+        partial: &mut Partial,
+        shared: &[Option<Bitset>],
+    ) -> Vec<(Vec<Scalar>, Vec<Scalar>)> {
         // distinct counts per group, counted in parallel
-        let groups = partial.seen.len();
+        let groups = partial.rows.len();
         let counts: Vec<Option<Vec<i64>>> = shared
             .iter()
-            .map(|bits| bits.as_ref().map(|bits| bits.counts(groups)))
+            .map(|bits| bits.as_ref().map(Bitset::counts))
             .collect();
         let mut out = Vec::new();
         for group in 0..groups {
             // without dimensions there is always exactly one row, as in SQL
-            if !partial.seen[group] && !self.dims.is_empty() {
+            if partial.rows[group] == 0 && !self.dims.is_empty() {
                 continue;
             }
             let dims: Vec<Scalar> = if let Some(spaces) = &self.dense {

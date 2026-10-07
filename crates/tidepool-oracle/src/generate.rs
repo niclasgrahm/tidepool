@@ -315,7 +315,19 @@ pub fn schema(rng: &mut Rng) -> Schema {
         });
     }
 
+    // sometimes a keyed fact: rows rewritten and deleted after they were
+    // counted, which is what keeps incremental answers honest
+    let keyed = rng.chance(50);
     let mut f0 = vec![];
+    if keyed {
+        f0.push(column(
+            "key",
+            "string",
+            "VARCHAR",
+            false,
+            Gen::Key("o".into(), 10_000),
+        ));
+    }
     for d in 0..dims {
         f0.push(column(
             &format!("d{d}_key"),
@@ -358,7 +370,7 @@ pub fn schema(rng: &mut Rng) -> Schema {
     ]);
     tables.push(Table {
         name: "f0".into(),
-        upsert: false,
+        upsert: keyed,
         columns: f0,
     });
     if second_fact {
@@ -733,6 +745,9 @@ pub enum Write {
     Publish,
 }
 
+/// One generated row, by column.
+type Row = Map<String, Json>;
+
 /// The final contents of every table (what DuckDB loads), and the writes
 /// that lead there (what Tidepool gets).
 #[derive(Clone, Debug, Default)]
@@ -799,6 +814,7 @@ fn value(rng: &mut Rng, schema: &Schema, column: &Column, index: usize) -> Json 
 /// Random data for `schema`, written in a random order of batches with
 /// upserts, deletes and publishes mixed in.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
     let mut data = Data::default();
     let mut tables: BTreeMap<String, BTreeMap<String, Map<String, Json>>> = BTreeMap::new();
@@ -812,8 +828,9 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
             .collect()
     };
 
+    let is_fact = |t: &Table| t.name.starts_with('f');
     // dimensions first, then an update pass and some deletes
-    for table in schema.tables.iter().filter(|t| t.upsert) {
+    for table in schema.tables.iter().filter(|t| t.upsert && !is_fact(t)) {
         let keys = keys_of(schema, &table.name);
         let rows: Vec<Map<String, Json>> = (0..keys.len()).map(|i| row(rng, table, i)).collect();
         for r in &rows {
@@ -831,17 +848,28 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
     }
     data.writes.push(Write::Publish);
 
-    for table in schema.tables.iter().filter(|t| !t.upsert) {
+    // a keyed fact's live rows by key, in insertion order
+    let mut keyed: BTreeMap<String, Vec<(String, Row)>> = BTreeMap::new();
+    for table in schema.tables.iter().filter(|t| is_fact(t)) {
         let total = 20 + rng.below(600);
         let batches = 1 + rng.below(4);
         for b in 0..batches {
             let rows: Vec<Map<String, Json>> = (0..total / batches)
                 .map(|i| row(rng, table, b * total + i))
                 .collect();
-            facts
-                .entry(table.name.clone())
-                .or_default()
-                .extend(rows.iter().cloned());
+            if table.upsert {
+                let live = keyed.entry(table.name.clone()).or_default();
+                for r in &rows {
+                    if let Some(Json::String(key)) = r.get("key") {
+                        live.push((key.clone(), r.clone()));
+                    }
+                }
+            } else {
+                facts
+                    .entry(table.name.clone())
+                    .or_default()
+                    .extend(rows.iter().cloned());
+            }
             data.writes.push(Write::Rows {
                 table: table.name.clone(),
                 rows: rows.into_iter().map(Json::Object).collect(),
@@ -849,9 +877,49 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
             if rng.chance(60) {
                 data.writes.push(Write::Publish);
             }
+            // a keyed fact: rewrite and delete rows already written
+            if table.upsert
+                && rng.chance(70)
+                && let Some(live) = keyed.get_mut(&table.name)
+                && !live.is_empty()
+            {
+                let rewritten: Vec<Map<String, Json>> = (0..=rng.below(8))
+                    .map(|_| {
+                        let at = rng.below(live.len());
+                        let mut fresh = row(rng, table, 0);
+                        fresh.insert("key".into(), json!(live[at].0));
+                        live[at].1.clone_from(&fresh);
+                        fresh
+                    })
+                    .collect();
+                data.writes.push(Write::Rows {
+                    table: table.name.clone(),
+                    rows: rewritten.into_iter().map(Json::Object).collect(),
+                });
+                let mut gone: Vec<Json> = Vec::new();
+                for _ in 0..rng.below(4) {
+                    if !live.is_empty() {
+                        let at = rng.below(live.len());
+                        gone.push(json!({ "key": live.remove(at).0 }));
+                    }
+                }
+                if !gone.is_empty() {
+                    data.writes.push(Write::Delete {
+                        table: table.name.clone(),
+                        keys: gone,
+                    });
+                }
+                if rng.chance(60) {
+                    data.writes.push(Write::Publish);
+                }
+            }
             // dimension changes in between fact batches
             if rng.chance(50)
-                && let Some(dim) = schema.tables.iter().filter(|t| t.upsert).nth(rng.below(3))
+                && let Some(dim) = schema
+                    .tables
+                    .iter()
+                    .filter(|t| t.upsert && !is_fact(t))
+                    .nth(rng.below(3))
             {
                 let keys = keys_of(schema, &dim.name);
                 let changed: Vec<Map<String, Json>> = (0..=rng.below(4))
@@ -892,6 +960,10 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
     }
     for (name, rows) in facts {
         data.tables.insert(name, rows);
+    }
+    for (name, live) in keyed {
+        data.tables
+            .insert(name, live.into_iter().map(|(_, row)| row).collect());
     }
     data
 }

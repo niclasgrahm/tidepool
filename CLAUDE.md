@@ -32,6 +32,8 @@ just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
 just bench-query     # query latency on the reference dataset (args: --orders N --runs N --metrics a,b,c)
+just bench-live      # freshness: 50 WebSocket sessions while ingesting 100k rows/s
+just feed            # keep a running server (`just run`) fed with retail data, to watch it live
 just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
 cargo run -p tidepool -- validate --config examples/retail    # check a config directory
 cargo run -p tidepool -- plan --config new/ --base old/       # what changes, and what it costs
@@ -236,10 +238,31 @@ that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
   that reads them), and answers per epoch. A new cache must key the same
   way, and get a planted-bug check against the oracle's history replay.
 
+- **Incremental answers** (`Incremental` in `fast.rs`): with an `Engine`,
+  each anchor's aggregate state is kept with a row-id high-water mark and
+  the deleted rows it accounted for. The next epoch scans only appended
+  rows, and takes deleted ones back out when every aggregate can
+  (count/sum/avg); otherwise, or when a related table changed, it
+  recomputes. Row ids never change, so sealing costs nothing here.
+
 Over HTTP, `POST /v1/query` (`tidepool-server::query`) resolves the semantic
 layer's names (`dataset.field`, metric names, with did-you-mean errors),
 converts JSON filter values by the field's type, and runs the query in
 `spawn_blocking`.
+
+### Live dashboards (`tidepool-server::live`)
+
+`/v1/ws` speaks the protocol in `tidepool-protocol::live` (JSON messages
+tagged by `type`). The `Hub` holds sessions and knows nothing of sockets;
+tests drive it through a real socket (`tests/live.rs`). A session has a
+selection with back/forward history, an open dashboard, filter-list
+windows, and hashes of what it last sent, so a frame carries only what
+changed. Every visual is run through the shared `Engine` with its selection
+cut to the fields that can change it (`tidepool_engine::relevant`), which
+is what makes sessions on the same dashboard share work. One epoch loop
+refreshes every session from the newest snapshot (coalescing); selection
+changes are answered at once, outside it. Never hold a session's lock
+while calling `Session::send`: it takes the lock itself.
 
 ### The oracle (`tidepool-oracle`)
 
@@ -248,7 +271,11 @@ epochs) and queries from a seed; every query runs on the fast path, the
 general path and a cached `Engine`, and is compared with DuckDB. A few
 queries are also replayed over every intermediate snapshot through one
 cached engine and compared with uncached answers, which is what catches a
-cache that outlives its data. A failure names the
+cache that outlives its data. The incremental oracle (`check_live`) goes
+further: writes go to Tidepool and DuckDB one at a time, and after every
+epoch a few live queries on one cached engine must equal DuckDB's cold
+answer as of that epoch. `f0` is sometimes keyed, so fact rows get
+rewritten and deleted after they were counted. A failure names the
 seed and the query: `TIDEPOOL_ORACLE_SEED=<n> cargo test -p tidepool-oracle`
 reproduces it. Debug builds use 13-row morsels so small data still splits
 segments. When you add a query feature, extend the generator so the oracle
@@ -273,6 +300,13 @@ off by default so `cargo check` never needs a frontend build), a directory
 output under `assets/` (`data-target-path` in `index.html`) so the server's
 immutable-cache rule applies to them. It depends on `tidepool-protocol`
 directly: request and response types are shared, never generated or copied.
+
+Since M4 it shows a dashboard live: it connects to `/v1/ws` (keeping a
+`?token=` from the page URL), applies frames to a `Board`, and renders
+filter lists with Qlik's states plus simple KPI, bar, line and table
+visuals. Each filter and visual reads its own entry through a `Memo`: one
+that re-rendered on every frame would swallow clicks. `board.rs` holds the
+logic that needs no DOM. `just run` plus `just feed` shows it working.
 
 It is a workspace member, so `just ci` lints and tests it natively. Keep logic
 that can be tested (state transitions, formatting, frame handling) in plain

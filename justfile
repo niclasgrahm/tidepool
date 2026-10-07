@@ -70,6 +70,14 @@ bench *args:
 bench-query *args:
   cargo run --release -p tidepool-bench -- query {{args}}
 
+# keep a running server (`just run`) fed with retail data (args: --rate N --server URL)
+feed *args:
+  cargo run --release -p tidepool-bench -- feed {{args}}
+
+# freshness with live sessions while ingesting, release build (args: --orders N --sessions N --rate N --seconds N)
+bench-live *args:
+  cargo run --release -p tidepool-bench -- live {{args}}
+
 # the DuckDB oracle at depth, release build (args: number of seeds)
 oracle seeds="400":
   TIDEPOOL_ORACLE_SEEDS={{seeds}} cargo test --release -p tidepool-oracle

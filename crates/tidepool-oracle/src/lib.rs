@@ -205,6 +205,37 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
         let width = query.dims.len() + query.metrics.len();
         let theirs = duck::run(&db, &sql, width)
             .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
+        // the filter list of the query's first plain dimension, under its
+        // selection
+        if let Some((table, name, None)) = query.dims.first() {
+            let sql = duck::values_sql(&schema, table, name, &query);
+            let theirs = duck::run(&db, &sql, 2)
+                .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
+            let at = FieldRef {
+                table: model
+                    .table_named(table)
+                    .map(|t| t.id)
+                    .ok_or("unknown table")?,
+                field: name.clone(),
+            };
+            for (path, ours) in [
+                (
+                    "values",
+                    tidepool_engine::values(snapshot, &at, &engine.selection),
+                ),
+                (
+                    "cached values",
+                    cached.values(snapshot, &at, &engine.selection),
+                ),
+            ] {
+                let ours = ours.map_err(|e| format!("seed {seed} query {q}: {e}"))?;
+                let ours: Vec<Vec<Canon>> = ours
+                    .iter()
+                    .map(|(v, n)| vec![canon(v), canon(&Scalar::Int(*n))])
+                    .collect();
+                compare(seed, q, path, &query, &sql, ours, theirs.clone())?;
+            }
+        }
         // every execution path must agree with DuckDB: the fast one, the
         // general one, and the fast one with caches built by earlier queries
         for (path, ours) in [
@@ -226,8 +257,91 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
     Ok(queries)
 }
 
+/// The incremental oracle (plan §11): a few queries kept live on one cached
+/// engine while the data is written, write by write, to Tidepool and to
+/// DuckDB; after every published epoch each live answer must equal DuckDB's
+/// cold evaluation of the data as of that epoch. Returns how many
+/// (epoch, query) answers were compared.
+///
+/// # Errors
+/// A report of the first mismatch.
+pub fn check_live(seed: u64, live: usize) -> Result<usize, String> {
+    let mut rng = Rng::new(seed);
+    let schema = generate::schema(&mut rng);
+    let files = generate::files(&schema);
+    let (set, diagnostics) = ConfigSet::from_files(files);
+    let (compiled, more) = compile(&set, &Catalog::default());
+    let Some(compiled) = compiled else {
+        let mut all = diagnostics;
+        all.extend(more);
+        return Err(format!(
+            "seed {seed}: the generated project doesn't compile:\n{}",
+            render_all(&all, &set.files)
+        ));
+    };
+    let model = Arc::new(compiled.model);
+    let data = generate::data(&mut rng, &schema);
+    let queries: Vec<(generate::Query, Query)> = (0..live)
+        .map(|_| {
+            let query = generate::query(&mut rng, &schema, &data);
+            let engine = engine_query(&model, &schema, &query)?;
+            Ok((query, engine))
+        })
+        .collect::<Result<_, String>>()
+        .map_err(|e| format!("seed {seed}: {e}"))?;
+
+    let db = duck::empty(&schema).map_err(|e| format!("seed {seed}: {e}"))?;
+    let mut store = Store::with_seal_rows(Arc::clone(&model), 8 + rng.below(200));
+    let engine = Engine::default();
+    let mut compared = 0;
+    let check = |snapshot: &Snapshot, compared: &mut usize| -> Result<(), String> {
+        for (q, (query, live)) in queries.iter().enumerate() {
+            let sql = duck::sql(&schema, query);
+            let width = query.dims.len() + query.metrics.len();
+            let theirs = duck::run(&db, &sql, width)
+                .map_err(|e| format!("seed {seed} epoch {}: DuckDB: {e}", snapshot.epoch))?;
+            let ours = engine
+                .run(snapshot, live)
+                .map_err(|e| format!("seed {seed} live query {q}: {e}"))?;
+            let ours: Vec<Vec<Canon>> = ours
+                .rows
+                .iter()
+                .map(|r| r.iter().map(canon).collect())
+                .collect();
+            let path = format!("live, epoch {}", snapshot.epoch);
+            compare(seed, q, &path, query, &sql, ours, theirs)?;
+            *compared += 1;
+        }
+        Ok(())
+    };
+    for write in data.writes.iter().chain(std::iter::once(&Write::Publish)) {
+        duck::apply(&db, &schema, write).map_err(|e| format!("seed {seed}: DuckDB: {e}"))?;
+        let (table, op, rows) = match write {
+            Write::Publish => {
+                if let Some(snapshot) = store.publish() {
+                    check(&snapshot, &mut compared)?;
+                }
+                continue;
+            }
+            Write::Rows { table, rows } => (table, Op::Write, rows),
+            Write::Delete { table, keys } => (table, Op::Delete, keys),
+        };
+        let spec = model.table_named(table).ok_or("unknown table")?;
+        let shape = if op == Op::Delete {
+            Shape::Keys
+        } else {
+            Shape::Rows
+        };
+        let body = serde_json::to_vec(rows).map_err(|e| e.to_string())?;
+        let batch =
+            json_array(spec, shape, &body).map_err(|r| format!("{} rejected: {r:?}", spec.name))?;
+        store.apply(spec.id, op, &batch);
+    }
+    Ok(compared)
+}
+
 /// Queries also run over every intermediate snapshot.
-const HISTORY_QUERIES: usize = 4;
+const HISTORY_QUERIES: usize = 12;
 
 /// Run `queries` over each snapshot in turn with one cached engine, as a
 /// server would while data arrives, and check every answer against the

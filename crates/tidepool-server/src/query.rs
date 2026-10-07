@@ -45,7 +45,7 @@ fn hint<'a>(
 }
 
 /// `dataset.field`, resolved, with the field's type.
-fn field(model: &Model, name: &str) -> Result<(FieldRef, Type), String> {
+pub(crate) fn field(model: &Model, name: &str) -> Result<(FieldRef, Type), String> {
     let Some((dataset, field)) = name.split_once('.') else {
         return Err(format!("`{name}` should be `dataset.field`"));
     };
@@ -108,7 +108,7 @@ fn decimal(text: &str) -> Option<Scalar> {
 }
 
 /// A JSON value as a value of type `ty`.
-fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
+pub(crate) fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
     if value.is_null() {
         return Some(Scalar::Null);
     }
@@ -164,7 +164,7 @@ fn dimension_name(dim: &QueryDimension) -> String {
 }
 
 /// The engine's query for a request.
-fn resolve(model: &Model, request: &QueryRequest) -> Result<Query, String> {
+pub(crate) fn resolve(model: &Model, request: &QueryRequest) -> Result<Query, String> {
     let metrics = request
         .metrics
         .iter()
@@ -252,7 +252,7 @@ fn type_name(ty: Type) -> String {
     }
 }
 
-fn json(value: &Scalar) -> Json_ {
+pub(crate) fn json(value: &Scalar) -> Json_ {
     match value {
         Scalar::Null => Json_::Null,
         Scalar::Bool(b) => Json_::Bool(*b),
@@ -266,7 +266,7 @@ fn json(value: &Scalar) -> Json_ {
     }
 }
 
-fn result(request: &QueryRequest, answer: &ResultSet, epoch: u64) -> QueryResult {
+pub(crate) fn result(request: &QueryRequest, answer: &ResultSet, epoch: u64) -> QueryResult {
     // the request's spelling of the dimensions, which is also how they sort
     let names = request
         .dimensions

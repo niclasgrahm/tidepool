@@ -70,11 +70,20 @@ pub async fn authorize(access: Access, tokens: &Tokens, request: Request, next: 
     let Some(expected) = tokens.required(access) else {
         return next.run(request).await;
     };
-    let presented = request
+    // a header, or `?token=` (a browser can't set headers on a WebSocket)
+    let from_query = request.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .map(str::to_string)
+    });
+    let header = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let presented = header.or(from_query);
+    let presented = presented.as_deref();
     let ok = presented.is_some_and(|token| bool::from(token.as_bytes().ct_eq(expected.as_bytes())));
     if ok {
         return next.run(request).await;

@@ -8,6 +8,7 @@
 //! partial never changes until its delete bitmap does.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use tidepool_expr::eval::{Row, eval};
@@ -518,7 +519,19 @@ pub(crate) fn execute(
             continue;
         };
         let groups = match prepared {
-            Some(prepared) => prepared.run(table),
+            Some(mut prepared) => match caches {
+                // a kept answer for this anchor is brought up to date
+                Some(caches) => {
+                    let key = format!("{:p} {anchor:?}", Arc::as_ptr(&snapshot.model));
+                    let mut kept = caches.take_anchor(&key);
+                    let groups = prepared.run(table, snapshot.epoch, Some(&mut kept));
+                    if let Some(kept) = kept {
+                        caches.keep_anchor(key, kept);
+                    }
+                    groups
+                }
+                None => prepared.run(table, snapshot.epoch, None),
+            },
             None => slow(&reader, anchor, table),
         };
         for (dims, finished) in groups {

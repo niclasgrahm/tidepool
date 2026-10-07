@@ -17,7 +17,7 @@ use tidepool_model::ir::{
     FieldRef, FieldSource, IgnoreSelection, MetricBody, MetricId, Model, TableId, type_of,
 };
 
-use crate::query::{Condition, Query, QueryError};
+use crate::query::{Condition, Query, QueryError, Selection};
 
 /// One step along a relationship, from the many side to the one side.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,6 +422,86 @@ pub(crate) fn plan(model: &Model, query: &Query) -> Result<Plan, QueryError> {
         derived,
         dim_types,
     })
+}
+
+/// Stands for "rows" in a [`values`] plan: no model metric has it.
+pub(crate) const ROWS: MetricId = MetricId(u32::MAX);
+
+/// The rows of `field`'s table per value of `field`, under `selection`
+/// (one-directional, as for metrics on that table): what a filter list
+/// shows as possible values.
+pub(crate) fn values(
+    model: &Model,
+    field: &FieldRef,
+    selection: &Selection,
+) -> Result<Plan, QueryError> {
+    let query = Query {
+        dimensions: vec![crate::query::Dim {
+            field: field.clone(),
+            grain: None,
+        }],
+        selection: selection.clone(),
+        ..Query::default()
+    };
+    let mut builder = AnchorBuilder {
+        model,
+        plan: anchor_plan(model, field.table, &query, &|_| false)?,
+    };
+    let access = builder
+        .access(field)?
+        .ok_or_else(|| error(format!("unknown field `{}`", label(model, field))))?;
+    builder.plan.dims.push((access, None));
+    let conditions = (0..builder.plan.conditions.len()).collect();
+    builder.plan.aggs.push(AggPlan {
+        call: AggCall {
+            func: tidepool_expr::ir::AggFunc::CountStar,
+            distinct: false,
+            arg: None,
+            filter: None,
+            ty: Type::Int,
+        },
+        conditions,
+    });
+    builder.plan.metrics.push(MetricPlan {
+        id: ROWS,
+        aggs: 0..1,
+        combine: Expr::Column {
+            slot: 0,
+            ty: Type::Int,
+        },
+    });
+    let ty = builder.plan.accesses[access].ty;
+    Ok(Plan {
+        anchors: vec![builder.plan],
+        metrics: vec![ROWS],
+        derived: Vec::new(),
+        dim_types: vec![ty],
+    })
+}
+
+/// The part of `query`'s selection that changes its answer: conditions on
+/// fields some metric's table reaches and doesn't ignore. Sessions whose
+/// selections differ only elsewhere can share one answer.
+pub(crate) fn relevant(model: &Model, query: &Query) -> Result<Selection, QueryError> {
+    let plan = plan(model, query)?;
+    let used: BTreeSet<FieldRef> = plan
+        .anchors
+        .iter()
+        .flat_map(|a| {
+            a.conditions
+                .iter()
+                .map(|(access, _)| a.accesses[*access].field.clone())
+        })
+        .collect();
+    Ok(Selection(
+        query
+            .selection
+            .0
+            .iter()
+            .filter(|(field, _)| used.contains(*field))
+            .map(|(f, c)| (f.clone(), c.clone()))
+            .collect(),
+    ))
 }
 
 fn empty(table: TableId) -> AnchorPlan {

@@ -88,10 +88,11 @@ pub enum Operation {
     GetTable,
     PreviewTable,
     Query,
+    Live,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 11] = [
+pub const OPERATIONS: [Operation; 12] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -103,6 +104,7 @@ pub const OPERATIONS: [Operation; 11] = [
     Operation::GetTable,
     Operation::PreviewTable,
     Operation::Query,
+    Operation::Live,
 ];
 
 impl Operation {
@@ -121,6 +123,7 @@ impl Operation {
             Self::GetTable => "getTable",
             Self::PreviewTable => "previewTable",
             Self::Query => "query",
+            Self::Live => "live",
         }
     }
 }
@@ -542,6 +545,33 @@ pub fn endpoints() -> Vec<ApiDoc> {
                     body: Body::Json("ApiError"),
                 },
             ],
+        },
+        ApiDoc {
+            path: "/v1/ws",
+            method: Method::Get,
+            operation: Operation::Live,
+            summary: "Live dashboards (WebSocket)",
+            description: "Upgrades to a WebSocket speaking the live protocol: JSON messages \
+                          tagged by `type` (`ClientMessage` in, `ServerMessage` out). A \
+                          session holds a selection with back/forward history and shows one \
+                          dashboard; the server sends one frame per epoch with whatever \
+                          changed on it, and answers selection changes right away. Browsers \
+                          can't set headers on a WebSocket, so the read token may also come \
+                          as `?token=`.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![ParamDoc {
+                name: "token",
+                description: "The read token, when one is configured.",
+                example: "s3cret",
+            }],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 101,
+                description: "Switching to the WebSocket protocol.",
+                body: Body::None,
+            }],
         },
         ApiDoc {
             path: "/healthz",

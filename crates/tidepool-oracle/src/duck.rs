@@ -13,7 +13,7 @@ use duckdb::Connection;
 use duckdb::types::Value as Duck;
 use serde_json::Value as Json;
 
-use crate::generate::{Cond, Data, Gen, Ignore, MetricKind, Query, Schema};
+use crate::generate::{Cond, Data, Gen, Ignore, MetricKind, Query, Schema, Write};
 
 /// A value both sides can be compared as.
 #[derive(Clone, Debug, PartialEq)]
@@ -345,6 +345,136 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
 ///
 /// # Errors
 /// DuckDB rejects the SQL.
+/// One write applied to DuckDB the way the store applies it to Tidepool:
+/// appends insert; upserts replace rows by key (within a batch, the last
+/// row for a key wins); deletes remove by key.
+///
+/// # Errors
+/// DuckDB refused a statement.
+pub fn apply(db: &Connection, schema: &Schema, write: &Write) -> Result<(), String> {
+    let insert = |table: &str, rows: &[&Json]| -> Result<(), String> {
+        let Some(spec) = schema.table(table) else {
+            return Err(format!("no table {table}"));
+        };
+        for chunk in rows.chunks(500) {
+            let values: Vec<String> = chunk
+                .iter()
+                .map(|row| {
+                    let cells: Vec<String> = spec
+                        .columns
+                        .iter()
+                        .map(|c| literal(row.get(&c.name).unwrap_or(&Json::Null), &c.values))
+                        .collect();
+                    format!("({})", cells.join(", "))
+                })
+                .collect();
+            db.execute_batch(&format!(
+                "INSERT INTO {table} VALUES {};",
+                values.join(", ")
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
+    let delete = |table: &str, keys: &[&Json]| -> Result<(), String> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let list: Vec<String> = keys
+            .iter()
+            .map(|k| literal(k, &Gen::Choice(Vec::new())))
+            .collect();
+        db.execute_batch(&format!(
+            "DELETE FROM {table} WHERE key IN ({});",
+            list.join(", ")
+        ))
+        .map_err(|e| e.to_string())
+    };
+    match write {
+        Write::Publish => Ok(()),
+        Write::Rows { table, rows } => {
+            let upsert = schema.table(table).is_some_and(|t| t.upsert);
+            if !upsert {
+                return insert(table, &rows.iter().collect::<Vec<_>>());
+            }
+            // the last row per key
+            let mut last: BTreeMap<String, &Json> = BTreeMap::new();
+            for row in rows {
+                if let Some(key) = row.get("key") {
+                    last.insert(key.to_string(), row);
+                }
+            }
+            let keys: Vec<&Json> = last.values().filter_map(|r| r.get("key")).collect();
+            delete(table, &keys)?;
+            insert(table, &last.into_values().collect::<Vec<_>>())
+        }
+        Write::Delete { table, keys } => {
+            let keys: Vec<&Json> = keys.iter().filter_map(|k| k.get("key")).collect();
+            delete(table, &keys)
+        }
+    }
+}
+
+/// An empty database with `schema`'s tables.
+///
+/// # Errors
+/// DuckDB refused a statement.
+pub fn empty(schema: &Schema) -> Result<Connection, String> {
+    load(schema, &Data::default())
+}
+
+/// SQL for a filter list: the rows of `table` per value of `field`, under
+/// the selected fields `table` reaches (as for a metric on `table`).
+#[must_use]
+pub fn values_sql(schema: &Schema, table: &str, field: &str, query: &Query) -> String {
+    let reachable: Vec<String> = schema
+        .reachable(table)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    let mut from = table.to_string();
+    for (_, via) in schema.reachable(table) {
+        if let Some(r) = via {
+            let _ = write!(
+                from,
+                " LEFT JOIN {to} ON {from_t}.{fk} = {to}.key",
+                to = r.to,
+                from_t = r.from,
+                fk = r.fk
+            );
+        }
+    }
+    let conditions: Vec<String> = query
+        .selection
+        .iter()
+        .filter(|(t, _, _)| reachable.contains(t))
+        .map(|(t, column, cond)| {
+            let name = format!("{t}.{column}");
+            let source = gen_of(schema, t, column).cloned().unwrap_or(Gen::Float);
+            match cond {
+                Cond::In(values) => {
+                    let list: Vec<String> = values.iter().map(|v| literal(v, &source)).collect();
+                    format!("{name} IN ({})", list.join(", "))
+                }
+                Cond::Range(lo, hi) => format!(
+                    "{name} >= {} AND {name} < {}",
+                    literal(lo, &source),
+                    literal(hi, &source)
+                ),
+            }
+        })
+        .collect();
+    let mut sql = format!(
+        "SELECT {} AS d0, COUNT(*) AS n FROM {from}",
+        field_sql(schema, table, field)
+    );
+    if !conditions.is_empty() {
+        let _ = write!(sql, " WHERE {}", conditions.join(" AND "));
+    }
+    sql.push_str(" GROUP BY ALL");
+    sql
+}
+
 pub fn run(db: &Connection, sql: &str, width: usize) -> Result<Vec<Vec<Canon>>, String> {
     let mut statement = db.prepare(sql).map_err(|e| format!("{e}\n{sql}"))?;
     let rows = statement

@@ -1,40 +1,188 @@
+/* Pool water: cool paper, deep teal ink, one coral that only ever means
+   "selected". The filter lists carry the design; everything else is quiet. */
 :root {
-  --bg: #f4f5f7;
-  --surface: #ffffff;
-  --border: #dde1e7;
-  --text: #1c2430;
-  --muted: #778092;
-  --accent: #2f6fdb;
-  --error: #c2402f;
+  --paper: #eef3f2;
+  --surface: #f8fbfa;
+  --ink: #14302f;
+  --ink-soft: #4d6664;
+  --tide: #1f7a73;
+  --kelp: #c9d8d4;
+  --sand: #b9c7c3;
+  --anemone: #d9466f;
+  --problem: #a23b2c;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --text: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12161c;
-    --surface: #1a1f27;
-    --border: #2a313c;
-    --text: #e3e7ee;
-    --muted: #8b94a3;
-    --accent: #6b9cf0;
-    --error: #ef7d6b;
+    --paper: #0f2321;
+    --surface: #142c2a;
+    --ink: #e2eeeb;
+    --ink-soft: #9db5b1;
+    --tide: #4fb3a9;
+    --kelp: #2b4441;
+    --sand: #35504c;
+    --anemone: #f07a98;
+    --problem: #f0937f;
   }
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body { min-height: 100%; }
 body {
   margin: 0;
   display: flex;
   flex-direction: column;
-  font-family: system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  min-height: 100vh;
+  font: 15px/1.45 var(--text);
+  background: var(--paper);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
-header { padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border); }
-h1 { font-size: 16px; margin: 0; letter-spacing: 0.02em; }
-main { flex: 1; padding: 20px; }
-.lede { color: var(--muted); }
-footer { padding: 8px 20px; font-size: 12px; border-top: 1px solid var(--border); background: var(--surface); }
-.muted { color: var(--muted); }
-.ok { color: var(--muted); }
-.error { color: var(--error); }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--tide); outline-offset: 2px; }
+
+/* the strip: dashboard, selection, live state */
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--sand);
+}
+.strip h1 {
+  margin: 0;
+  font: 700 22px/1.1 var(--display);
+  letter-spacing: -0.01em;
+}
+.selection { display: flex; align-items: center; gap: 8px; flex: 1; flex-wrap: wrap; }
+.selection > button {
+  border: 1px solid var(--sand);
+  background: transparent;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.selection > button:disabled { opacity: 0.4; cursor: default; }
+.chips { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; flex-wrap: wrap; }
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 999px;
+  background: var(--anemone);
+  color: #fff;
+}
+.chip-field { opacity: 0.85; }
+.chip button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 6px;
+}
+.pulse { margin: 0; color: var(--ink-soft); font-size: 13px; }
+.pulse::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--tide);
+}
+.pulse.offline::before { background: var(--sand); }
+.problem { margin: 8px 24px; color: var(--problem); }
+
+/* the page: filter rail, dashboard grid */
+.page { display: flex; flex: 1; gap: 24px; padding: 20px 24px; }
+.rail { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 22px; }
+.grid { flex: 1; display: grid; gap: 16px; align-content: start; min-width: 0; }
+
+/* filter lists: Qlik's three states, at a glance */
+.filter h2, .visual h2 {
+  margin: 0 0 8px;
+  font: 500 15px/1.2 var(--display);
+}
+.filter input {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--sand);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.filter ul { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; }
+.value {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 4px 8px;
+  margin-bottom: 2px;
+  border: 0;
+  border-left: 4px solid var(--tide);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+.value.selected { border-left-color: var(--anemone); background: var(--anemone); color: #fff; }
+.value.excluded { border-left-color: var(--kelp); background: transparent; color: var(--ink-soft); }
+.value .rows { opacity: 0.7; }
+
+/* visuals */
+.visual {
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border-top: 3px solid var(--tide);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.quiet { color: var(--ink-soft); }
+.kpi-value {
+  margin: auto 0 0;
+  font: 700 clamp(22px, 3.2vw, 44px)/1 var(--display);
+  overflow-wrap: anywhere;
+}
+.bars { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+.bars button {
+  display: grid;
+  grid-template-columns: 7em 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.bars button:disabled { cursor: default; }
+.bar-fill { height: 14px; background: var(--tide); }
+.bars button:hover:enabled .bar-fill { background: var(--anemone); }
+.bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.line { flex: 1; width: 100%; min-height: 0; }
+.line polyline { fill: none; stroke: var(--tide); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.line circle { fill: var(--tide); }
+.axis { display: flex; justify-content: space-between; margin: 4px 0 0; font-size: 12px; color: var(--ink-soft); }
+.table-wrap { overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th { text-align: left; font-weight: 700; border-bottom: 1px solid var(--sand); padding: 4px 8px 4px 0; }
+td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--kelp); }
+.num { text-align: right; }
+
+footer { padding: 8px 24px; font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--sand); }
+.error { color: var(--problem); }
+
+@media (max-width: 760px) {
+  .page { flex-direction: column; padding: 16px; }
+  .rail { width: auto; }
+  .grid { grid-template-columns: 1fr !important; grid-auto-rows: auto !important; }
+  .visual { grid-column: auto !important; grid-row: auto !important; min-height: 200px; }
+}

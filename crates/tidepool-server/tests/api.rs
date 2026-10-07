@@ -362,3 +362,27 @@ async fn every_config_kind_has_a_schema_and_others_are_404() {
             .is_some_and(|e| e.contains("kinds: server, table"))
     );
 }
+
+#[tokio::test]
+async fn the_token_may_come_in_the_query_string() {
+    // browsers can't set headers on a WebSocket, so `?token=` works too
+    let tokens = Tokens {
+        read: Some("read-secret".into()),
+        ..Tokens::default()
+    };
+    let server = state(common::retail(), tokens, None);
+    let reply = call(
+        Arc::clone(&server),
+        HttpMethod::GET,
+        "/v1/tables?token=read-secret",
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let reply = call(
+        Arc::clone(&server),
+        HttpMethod::GET,
+        "/v1/tables?token=wrong",
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
