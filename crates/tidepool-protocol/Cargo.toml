@@ -1,0 +1,18 @@
+[package]
+name = "tidepool-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# Permissive side of the split: the types any client of Tidepool needs.
+# See licensing.md.
+license = "Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true

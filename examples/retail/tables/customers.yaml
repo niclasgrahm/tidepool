@@ -1,0 +1,8 @@
+name: customers
+mode: upsert
+primary_key: [customer_id]
+columns:
+  customer_id: { type: string }
+  name:        { type: string, encoding: plain }
+  region:      { type: string }
+  segment:     { type: string, nullable: true }

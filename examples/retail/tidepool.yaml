@@ -1,0 +1,4 @@
+listen: 127.0.0.1:7070
+epoch_interval: 200ms
+memory_budget: 75%
+durability: fsync

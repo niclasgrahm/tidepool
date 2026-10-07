@@ -1,0 +1,85 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/tidepool-config",
+    "crates/tidepool-model",
+    "crates/tidepool-expr",
+    "crates/tidepool-store",
+    "crates/tidepool-engine",
+    "crates/tidepool-protocol",
+    "crates/tidepool-server",
+    "crates/tidepool-oracle",
+    "crates/tidepool",
+    "crates/tidepool-bench",
+    "frontend",
+]
+# spikes are throwaway experiments with their own toolchains; see CLAUDE.md
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+repository = "https://github.com/niclasgrahm/tidepool"
+# Every member still declares its own `license`, on purpose: which side of the
+# split a crate is on (see licensing.md) is a decision to make per crate, and
+# `tests/licensing.rs` in the binary crate checks each one.
+
+[workspace.dependencies]
+# internal
+tidepool-config = { path = "crates/tidepool-config" }
+tidepool-model = { path = "crates/tidepool-model" }
+tidepool-expr = { path = "crates/tidepool-expr" }
+tidepool-store = { path = "crates/tidepool-store" }
+tidepool-engine = { path = "crates/tidepool-engine" }
+tidepool-protocol = { path = "crates/tidepool-protocol" }
+tidepool-server = { path = "crates/tidepool-server" }
+
+# external
+anyhow = "1.0.102"
+axum = "0.8.9"
+clap = { version = "4.6.1", features = ["derive"] }
+rust-embed = { version = "8.12.0", features = ["debug-embed", "include-exclude"] }
+schemars = "1.2.1"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# test-only
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"            # tidepool-store will opt out locally, for the tail segment only
+
+[workspace.lints.clippy]
+# Groups (lower priority so individual lints below can override them)
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Restriction lints, opted into individually
+unwrap_used = "warn"
+expect_used = "warn"
+
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Same reasoning as Kayak's: the dev profile's debug info is what fills the
+# disk, and file-and-line backtraces are what a failing test needs.
+[profile.dev]
+split-debuginfo = "packed"
+debug = "line-tables-only"
+
+# Query kernels are worth optimising even while developing: a debug-build
+# engine is too slow to tell whether a benchmark or an oracle run is
+# representative. Our own crates stay debuggable; dependencies don't need to be.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

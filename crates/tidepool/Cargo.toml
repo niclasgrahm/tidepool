@@ -1,0 +1,30 @@
+[package]
+name = "tidepool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# Copyleft side of the split: see licensing.md.
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tidepool"
+path = "src/main.rs"
+
+[dependencies]
+tidepool-server.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+# The web UI compiled into the binary. See tidepool-server's feature of the
+# same name for why it is off by default.
+embed-assets = ["tidepool-server/embed-assets"]

@@ -1,0 +1,13 @@
+name: orders
+mode: append
+event_time: ordered_at
+retention: 730d
+columns:
+  order_id:    { type: string, encoding: plain }
+  customer_id: { type: string }
+  product_id:  { type: string }
+  status:      { type: string }
+  ordered_at:  { type: timestamptz }
+  quantity:    { type: int32 }
+  amount:      { type: decimal(14,2) }
+  note:        { type: string, nullable: true, encoding: plain }

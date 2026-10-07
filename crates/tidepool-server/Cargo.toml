@@ -1,0 +1,36 @@
+[package]
+name = "tidepool-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# Copyleft side of the split: see licensing.md.
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidepool-protocol.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+rust-embed = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+[features]
+default = []
+# Compile `frontend/dist` into the binary, so a release is one artifact. Off by
+# default because `frontend/dist` is a build output: turning it on makes the
+# crate uncompilable until the frontend has been built, which would put a
+# frontend toolchain in the way of `cargo check` and `just ci`. `just build`
+# switches it on after building the frontend.
+embed-assets = ["dep:rust-embed"]

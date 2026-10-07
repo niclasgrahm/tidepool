@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tidepool",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": ["serve", "--listen", "127.0.0.1:7070", "--ui-dir", "frontend/dist"],
+      "port": 7070
+    }
+  ]
+}

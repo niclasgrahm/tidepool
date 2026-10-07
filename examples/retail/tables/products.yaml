@@ -1,0 +1,8 @@
+name: products
+mode: upsert
+primary_key: [product_id]
+columns:
+  product_id: { type: string }
+  name:       { type: string }
+  category:   { type: string }
+  list_price: { type: decimal(12,2) }

@@ -1,0 +1,72 @@
+version: "0.1.1"
+name: retail
+datasets:
+  - name: orders
+    source: orders                       # table name from tables/*.yaml
+    fields:
+      - name: ordered_at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: ordered_at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+      - name: order_year                 # derived field: a cheap dimension (see §6.2)
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: "EXTRACT(YEAR FROM ordered_at)" }] }
+        datatype: Integer
+      - name: status
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+  - name: customers
+    source: customers
+    primary_key: [customer_id]
+    fields:
+      - name: region
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
+  - name: products
+    source: products
+    primary_key: [product_id]
+    fields:
+      - name: category
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: category }] }
+
+relationships:
+  - name: order_customer
+    from: orders                         # many side
+    to: customers                        # one side
+    from_columns: [customer_id]
+    to_columns: [customer_id]
+  - name: order_product
+    from: orders
+    to: products
+    from_columns: [product_id]
+    to_columns: [product_id]
+
+metrics:
+  - name: revenue
+    description: Gross order value
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+  - name: paid_revenue                   # SQL's standard FILTER clause instead of set analysis
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount) FILTER (WHERE orders.status = 'paid')" }] }
+  - name: order_count
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+    custom_extensions:
+      - vendor_name: tidepool
+        data: '{"table": "orders"}'      # anchor table for COUNT(*)
+  - name: customer_count
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id)" }] }
+  - name: avg_order_value
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_count" }] }
+    custom_extensions:
+      - vendor_name: tidepool
+        data: '{"kind": "derived"}'      # expression over other metrics, computed after aggregation
+  - name: revenue_all_regions
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: tidepool
+        data: '{"ignore_selection": ["customers.region"]}'
+  - name: revenue_prev_year
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: tidepool
+        data: '{"time_offset": "-1y", "time_field": "orders.ordered_at"}'
+
+custom_extensions:
+  - vendor_name: tidepool
+    data: '{"filter_direction": "one_to_many"}'

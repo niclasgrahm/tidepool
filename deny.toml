@@ -1,0 +1,50 @@
+# Dependency policy: licences, RUSTSEC advisories, bans and sources.
+# `just deny` runs it locally; CI runs it as its own job.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "BSL-1.0",
+  "Zlib",
+  "Unlicense",
+  "CC0-1.0",
+  # the icu crates' licence: permissive, Unicode's own
+  "Unicode-3.0",
+  # Tidepool's own crates. This necessarily also lets an AGPL dependency
+  # through; one would be fine for the server and wrong for the permissive
+  # crates, which is a judgement no allow-list can make (see licensing.md).
+  "AGPL-3.0-or-later",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# our crates are `publish = false`; checking them against the list is still
+# what we want, since that is where the split is declared
+ignore = false
+
+[advisories]
+ignore = [
+  # Not a vulnerability: a notice that nobody maintains the crate. It arrives
+  # through Leptos (either_of, reactive_graph, tachys), so the fix is upstream;
+  # Kayak ignores the same one. assessed 2026-10-07
+  { id = "RUSTSEC-2024-0436", reason = "paste, transitive through leptos; unmaintained, not vulnerable" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

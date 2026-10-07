@@ -1,0 +1,7 @@
+# Also flag .unwrap()/.expect() in tests, not just in src (default ignores tests)
+allow-unwrap-in-tests = false
+allow-expect-in-tests = false
+
+# Product names that are not code, so `doc_markdown` shouldn't ask for backticks.
+# ".." keeps clippy's own defaults.
+doc-valid-idents = ["..", "DuckDB", "OpenAPI", "ECharts", "WebSocket", "Ossie"]

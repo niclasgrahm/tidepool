@@ -1,0 +1,33 @@
+name: Sales overview
+layout: { columns: 12, row_height: 80 }
+filters:
+  - field: customers.region
+  - field: products.category
+  - field: orders.ordered_at
+    widget: date_range
+visuals:
+  - id: kpi_revenue
+    type: kpi
+    metrics: [revenue]
+    compare: revenue_prev_year
+    at: { x: 0, y: 0, w: 3, h: 2 }
+  - id: by_region
+    type: bar
+    dimensions: [customers.region]
+    metrics: [revenue]
+    sort: { by: revenue, desc: true }
+    on_click: select
+    at: { x: 3, y: 0, w: 5, h: 4 }
+  - id: trend
+    type: line
+    dimensions: [{ field: orders.ordered_at, grain: day }]
+    metrics: [revenue, order_count]
+    on_brush: select_range
+    at: { x: 0, y: 4, w: 12, h: 4 }
+  - id: top_products
+    type: table
+    dimensions: [products.name, products.category]
+    metrics: [revenue, order_count, avg_order_value]
+    sort: { by: revenue, desc: true }
+    limit: 50
+    at: { x: 8, y: 0, w: 4, h: 4 }

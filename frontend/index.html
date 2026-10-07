@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tidepool</title>
+    <!-- Hashed outputs go under assets/, which the server caches as immutable
+         (see tidepool_server::ui); index.html itself is always revalidated. -->
+    <link data-trunk rel="css" href="style.css" data-target-path="assets" />
+    <link data-trunk rel="rust" data-target-path="assets" data-wasm-opt="z" />
+  </head>
+  <body></body>
+</html>

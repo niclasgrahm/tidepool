@@ -1,0 +1,13 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "/"
+
+# `just dev`: trunk serves the app with hot reload and proxies the API to a
+# tidepool server running beside it.
+[serve]
+addresses = ["127.0.0.1"]
+port = 7080
+
+[[proxy]]
+backend = "http://127.0.0.1:7070/v1/"

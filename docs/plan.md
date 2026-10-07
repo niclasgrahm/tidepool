@@ -20,7 +20,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D7 | Config as code, with live apply | Config files are the source of truth. Every change, whether from files, the UI, the API or an agent, goes through one validate → plan → apply pipeline and is written back to the files. |
 | D8 | Semantic layer in Apache Ossie | Pinned to spec **0.1.1**. Tidepool-specific semantics live in `custom_extensions`. Internally everything compiles to our own Model IR. |
 | D9 | Expressions are SQL | Row and aggregate expressions use SQL syntax (parsed with sqlparser-rs). Metric modifiers are structured YAML, not a new language. |
-| D10 | Frontend is a TypeScript SPA embedded in the binary, **unless the M0 spike says Leptos is fine** | Default: Vite + React + ECharts (+ Perspective later), with protocol types generated from Rust. Kayak is Leptos 0.8, and one stack across both products is worth something, so M0 includes a 2-day Leptos spike (§12, M0) that decides this. |
+| D10 | Frontend is **Leptos (client-side rendered, built with trunk)**, embedded in the binary | Decided by the M0 spike (2026-10-07, `spikes/leptos-charts/README.md`): the whole ECharts wrapper is 120 lines; searching 50k rows takes 4–5 ms; a selection click re-renders everything in 5–14 ms. One stack with Kayak, and the UI uses `tidepool-protocol` types directly. Client-side only rather than Kayak's SSR + hydrate: a logged-in dashboard app gains nothing from server rendering, and a static `dist/` keeps embedding trivial. |
 | D11 | Every update batch ("epoch") is consistent | Every result the server sends is tagged with an epoch. A client never shows a mix of results from different epochs on one screen. |
 | D12 | Kayak is the connector layer | Tidepool only ingests over HTTP, permanently. Kafka, MQTT, NATS, OPC UA, databases and so on are reached through Kayak pipelines with a `tidepool` output (§15). Tidepool never grows transforms, and Kayak never grows dashboards. |
 | D13 | Licence split, same as Kayak | `tidepool-protocol` and `tidepool-config` (the types any client needs) are **Apache-2.0**. Everything else (server, engine, frontend) is **AGPL-3.0-or-later**, with a commercial licence available. Every crate declares `license`, and a test enforces it. |
@@ -293,13 +293,13 @@ tidepool/
 │   ├── tidepool-expr/            # SQL expression parsing (sqlparser), type checking, expression IR, vectorized kernels
 │   ├── tidepool-store/           # types, dictionaries, segments, tail, PK index, delete bitmaps, epochs/snapshots, WAL, persistence
 │   ├── tidepool-engine/          # selection engine, aggregate states, executor, caches, subscription manager
-│   ├── tidepool-protocol/        # [Apache-2.0] wire types (serde + ts-rs → TS), Arrow frame encoding, ingest request/response types
+│   ├── tidepool-protocol/        # [Apache-2.0] wire types (shared with the wasm frontend), the endpoint table, Arrow frame encoding
 │   ├── tidepool-server/          # axum: ingest, query, admin/config, WebSocket, MCP, static assets, auth
 │   ├── tidepool-oracle/          # test-only: DuckDB reference evaluator + random model/data/query generators
 │   └── tidepool/                 # the binary: CLI (serve, validate, plan, init) wiring it all together
-├── frontend/                     # Vite + React + TS
+├── frontend/                     # Leptos CSR app (tidepool-frontend), built by trunk into frontend/dist
 ├── tidepool-bench/               # load generator + benchmark scenarios (like kayak-bench)
-├── justfile                      # dev, build, ci, test, lint, codegen, bench (same verbs as Kayak)
+├── justfile                      # dev, run, build, frontend, ci, test, lint, deny, miri, bench (same verbs as Kayak)
 ├── examples/retail/              # example project + synthetic data generator config
 └── docs/
 ```
@@ -633,7 +633,7 @@ result(view, selection, epoch) =
 
 ## 7. Client protocol (WebSocket `/v1/ws`)
 
-Binary WS messages with a framed format: `u32 header_len | header (JSON) | payloads (Arrow IPC streams)`. JSON-only messages are allowed when there's no payload. Types are defined in `tidepool-protocol` and exported to TypeScript with `ts-rs`.
+Binary WS messages with a framed format: `u32 header_len | header (JSON) | payloads (Arrow IPC streams)`. JSON-only messages are allowed when there's no payload. Types are defined in `tidepool-protocol` and used directly by the server and the wasm frontend.
 
 **Client → server:**
 
@@ -760,21 +760,21 @@ Port Kayak's auth stack instead of designing a new one:
 ### 10.1 Stack and build
 
 - **Stack:**
-  - Vite + React + TypeScript
-  - Apache ECharts (canvas; click and brush events)
-  - TanStack Virtual for long lists
-  - a small dashboard grid (react-grid-layout, read-only in v1)
-  - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor
-  - `apache-arrow` for decoding frames
+  - Leptos 0.8, client-side rendering, built by trunk (D10)
+  - Apache ECharts through a small wrapper component (`EChart`, see `spikes/leptos-charts/src/echarts.rs`): an option signal in, click and x-brush callbacks out, `ResizeObserver` sizing. ECharts is vendored with its licence (like Kayak's Scalar).
+  - a virtualised list component for filter lists (spike: `vlist.rs`)
+  - a small dashboard grid (CSS grid from the YAML layout, read-only in v1)
+  - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor, through the same kind of thin wrapper as ECharts
+  - Arrow frames decoded with arrow-rs compiled to wasm, or a lighter frame format if bundle size says so (decide in M4)
 - **State:**
-  - a store outside React (Zustand) holds `{model, selection, frames by epoch}`
-  - charts are updated imperatively from frames (`setOption` with `notMerge: false`), not through React re-renders
+  - signals hold `{model, selection, frames by epoch}`; a frame is applied to all of them at once (D11)
+  - charts are updated through their option signals, so ECharts merges the new data and animates the change itself
 - **Build:**
-  - `just build` = `pnpm build` in `frontend/`, then `cargo build --release --features embed-assets`
+  - `just frontend` = `trunk build --release` in `frontend/` → `frontend/dist` (hashed files under `assets/`, which the server caches as immutable)
+  - `just build` = `just frontend`, then `cargo build --release -p tidepool --features embed-assets`
   - the `tidepool-server` crate embeds `frontend/dist` with `rust-embed` behind the `embed-assets` feature. It's off by default so `cargo check` never needs a frontend build (same reasoning as Kayak).
-  - dev: `just dev` runs Vite and `tidepool serve --ui-proxy http://localhost:5173` against `examples/retail`
-- **Types:** `just codegen` runs `ts-rs` export into `frontend/src/protocol/`. CI fails if the generated files are stale.
-- If the M0 spike picks Leptos instead, this whole subsection follows Kayak's setup (cargo-leptos, `frontend` crate with `ssr`/`hydrate`, shared types straight from `tidepool-protocol`). §10.2 (features) doesn't change.
+  - dev: `just dev` runs the server on :7070 and `trunk serve` on :7080 with hot reload, proxying `/v1` to the server
+- **Types:** shared directly: the frontend depends on `tidepool-protocol`. There is no codegen step to keep in sync.
 
 ### 10.2 Features
 
@@ -832,7 +832,7 @@ Correctness is the main risk of an incremental engine. A bug shows up as **plaus
    - `criterion` microbenchmarks for kernels, packing and merge.
    - `tidepool-bench` (a workspace crate, like `kayak-bench`; `just bench`, not part of `just ci`): a synthetic retail generator at a configurable scale and ingest rate, plus N simulated sessions clicking randomly. It reports the §2.3 metrics.
    - Benchmark results are tracked per commit on a fixed machine (later).
-9. **Frontend:** Vitest for the store and protocol decoding. Playwright e2e for: open dashboard → click bar → selection applied → live update arrives → back.
+9. **Frontend:** plain `cargo test` for the frontend's pure logic (state transitions, frame application, formatting); `wasm-bindgen-test` where the DOM is needed. Playwright e2e for: open dashboard → click bar → selection applied → live update arrives → back.
 
 ---
 
@@ -841,7 +841,9 @@ Correctness is the main risk of an incremental engine. A bug shows up as **plaus
 Effort is in focused engineer-weeks and is rough. The frontend track can run in parallel from M2 against a mocked protocol.
 
 ### M0: Skeleton + frontend spike (1–2 wks)
-- Cargo workspace with the crates above. `justfile` with `dev`, `build`, `ci`, `test`, `lint`, `codegen`, `bench`.
+**Status: done 2026-10-07.**
+
+- Cargo workspace with the crates above. `justfile` with `dev`, `run`, `build`, `frontend`, `ci`, `test`, `lint`, `deny`, `miri`, `bench`.
 - Lints as in Kayak: clippy `all` + `pedantic`, `unwrap_used`/`expect_used`, applied to tests too (`clippy.toml`).
 - CI (GitHub Actions running `just ci`): fmt, clippy `-D warnings`, test, Miri on `tidepool-store`, frontend lint and test, a licence-declaration test, `cargo deny`.
 - `CLAUDE.md` with commands, the definition of done (new behaviour ships with a test that fails without it; `just ci` green before anything is called done), and an architecture tour that grows with the code.

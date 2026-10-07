@@ -1,5 +1,11 @@
 /target
 /data
-node_modules/
-frontend/dist/
 .DS_Store
+
+# build outputs: `just frontend` / trunk
+/frontend/dist
+
+# spikes build with their own toolchains
+/spikes/*/target
+/spikes/*/dist
+/spikes/*/node_modules
