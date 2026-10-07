@@ -214,6 +214,15 @@ that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
   fast path answer something it can't do exactly.
 - **Semantics** follow DuckDB, except dividing by zero is NULL. No
   dimensions means exactly one row, as in SQL.
+- **Caches** (`cache.rs`) live in an `Engine`, which the server keeps for
+  its lifetime; the free `run` is uncached. Entries are keyed by the
+  *identity* of immutable store data (an unchanged table keeps its
+  `Arc<TableSnapshot>`, a segment its `Arc<SegmentData>`) and hold `Weak`s
+  to it, so nothing is invalidated by hand: a changed table simply doesn't
+  match. Relationship maps per path, join columns (related codes
+  materialized per anchor segment, in morsel chunks filled by the first scan
+  that reads them), and answers per epoch. A new cache must key the same
+  way, and get a planted-bug check against the oracle's history replay.
 
 Over HTTP, `POST /v1/query` (`tidepool-server::query`) resolves the semantic
 layer's names (`dataset.field`, metric names, with did-you-mean errors),
@@ -223,8 +232,11 @@ converts JSON filter values by the field's type, and runs the query in
 ### The oracle (`tidepool-oracle`)
 
 Random schemas, data (written in random batches with upserts, deletes and
-epochs) and queries from a seed; every query runs on **both** executors
-(`run` and `run_general`) and is compared with DuckDB. A failure names the
+epochs) and queries from a seed; every query runs on the fast path, the
+general path and a cached `Engine`, and is compared with DuckDB. A few
+queries are also replayed over every intermediate snapshot through one
+cached engine and compared with uncached answers, which is what catches a
+cache that outlives its data. A failure names the
 seed and the query: `TIDEPOOL_ORACLE_SEED=<n> cargo test -p tidepool-oracle`
 reproduces it. Debug builds use 13-row morsels so small data still splits
 segments. When you add a query feature, extend the generator so the oracle

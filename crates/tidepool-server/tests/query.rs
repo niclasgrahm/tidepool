@@ -157,3 +157,20 @@ async fn unknown_names_are_400s_with_suggestions() {
         assert!(error.starts_with(expected), "{error}");
     }
 }
+
+#[tokio::test]
+async fn answers_follow_writes_to_related_tables() {
+    let state = loaded().await;
+    let by_region =
+        json!({"metrics": ["order_count"], "dimensions": [{"field": "customers.region"}]});
+    let reply = post(&state, "/v1/query", &by_region).await;
+    assert_eq!(reply.json()["rows"], json!([["north", 2], ["south", 1]]));
+
+    // Ada moves south: the cached answer, relationship map and join column
+    // built for the first query all describe the old customers table
+    let moved = json!([{"customer_id": "c1", "name": "Ada", "region": "south"}]);
+    let reply = post(&state, "/v1/tables/customers/rows?wait=visible", &moved).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let reply = post(&state, "/v1/query", &by_region).await;
+    assert_eq!(reply.json()["rows"], json!([["south", 3]]));
+}

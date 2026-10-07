@@ -470,13 +470,14 @@ pub(crate) fn execute(
     snapshot: &Snapshot,
     plan: &Plan,
     fast: bool,
+    caches: Option<&crate::cache::Caches>,
 ) -> Vec<(Vec<Scalar>, Vec<Scalar>)> {
     let prepared: Vec<_> = plan
         .anchors
         .iter()
         .map(|anchor| {
             if fast {
-                crate::fast::prepare(model, snapshot, anchor)
+                crate::fast::prepare(model, snapshot, anchor, caches)
             } else {
                 None
             }

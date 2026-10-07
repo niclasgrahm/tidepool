@@ -56,6 +56,7 @@ impl Packed {
     }
 
     #[must_use]
+    #[inline]
     pub fn get(&self, index: usize) -> u64 {
         if self.width == 0 {
             return 0;
@@ -90,6 +91,33 @@ impl Packed {
                 (1u64 << width) - 1
             },
             remaining: rows.len(),
+        }
+    }
+
+    /// `convert` of the values of `rows`, into `out` (as long as `rows`).
+    /// When the width divides 64 and `rows` starts on a word, no value
+    /// straddles two words, and a word is unpacked by shifting alone.
+    pub fn unpack<T>(&self, rows: Range<usize>, out: &mut [T], convert: impl Fn(u64) -> T) {
+        let width = usize::from(self.width);
+        if width > 0 && 64 % width == 0 && (rows.start * width).is_multiple_of(64) {
+            let mask = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            let first = rows.start * width / 64;
+            for (chunk, word) in out.chunks_mut(64 / width).zip(&self.words[first..]) {
+                let mut word = *word;
+                for slot in chunk {
+                    *slot = convert(word & mask);
+                    // `width` < 64 here unless there is one value per word
+                    word = word.checked_shr(u32::from(self.width)).unwrap_or(0);
+                }
+            }
+            return;
+        }
+        for (slot, v) in out.iter_mut().zip(self.iter(rows)) {
+            *slot = convert(v);
         }
     }
 
@@ -140,6 +168,7 @@ pub struct Bits(Vec<u64>);
 
 impl Bits {
     #[must_use]
+    #[inline]
     pub fn get(&self, index: usize) -> bool {
         self.0
             .get(index / 64)
@@ -266,11 +295,124 @@ impl ColumnData {
             Self::PackedCodes { packed, .. } => {
                 out.resize(rows.len(), 0);
                 #[allow(clippy::cast_possible_truncation)]
-                for (slot, v) in out.iter_mut().zip(packed.iter(rows)) {
-                    *slot = v as u32;
+                packed.unpack(rows, out, |v| v as u32);
+            }
+            _ => {}
+        }
+    }
+
+    /// The codes at rows `start + r` for each `r` of `at`, into `out[r]`.
+    /// `out` is sized to `len` first; its other entries keep what they
+    /// held. For reading a few scattered rows without decoding them all.
+    pub fn gather_codes(&self, start: usize, at: &[u32], len: usize, out: &mut Vec<u32>) {
+        out.resize(len, 0);
+        match self {
+            Self::Codes(codes) => {
+                for r in at {
+                    out[*r as usize] = codes[start + *r as usize];
+                }
+            }
+            Self::PackedCodes { packed, .. } =>
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                for r in at {
+                    out[*r as usize] = packed.get(start + *r as usize) as u32;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// [`ColumnData::gather_codes`] through `map`, as
+    /// [`ColumnData::map_codes`] does for every row.
+    pub fn gather_map_codes<T: Copy, U: Copy + From<T>>(
+        &self,
+        start: usize,
+        at: &[u32],
+        map: &[T],
+        missing: U,
+        out: &mut [U],
+    ) {
+        let lookup = |code: u64| {
+            usize::try_from(code)
+                .ok()
+                .and_then(|c| map.get(c))
+                .map_or(missing, |v| U::from(*v))
+        };
+        match self {
+            Self::Codes(codes) => {
+                for r in at {
+                    out[*r as usize] = lookup(u64::from(codes[start + *r as usize]));
+                }
+            }
+            Self::PackedCodes { packed, .. } => {
+                for r in at {
+                    out[*r as usize] = lookup(packed.get(start + *r as usize));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`ColumnData::gather_codes`] for a 64-bit integer column, with NULLs.
+    pub fn gather_i64(
+        &self,
+        start: usize,
+        at: &[u32],
+        len: usize,
+        values: &mut Vec<i64>,
+        nulls: &mut Vec<bool>,
+    ) {
+        values.resize(len, 0);
+        nulls.resize(len, false);
+        let null_bits = match self {
+            Self::I64 { values: v, nulls } => {
+                for r in at {
+                    values[*r as usize] = v[start + *r as usize];
+                }
+                nulls
+            }
+            Self::PackedI64 {
+                base,
+                packed,
+                nulls,
+                ..
+            } => {
+                #[allow(clippy::cast_possible_wrap)]
+                for r in at {
+                    values[*r as usize] = base.wrapping_add(packed.get(start + *r as usize) as i64);
+                }
+                nulls
+            }
+            _ => return,
+        };
+        for r in at {
+            nulls[*r as usize] = null_bits
+                .as_ref()
+                .is_some_and(|b| b.get(start + *r as usize));
+        }
+    }
+
+    /// [`ColumnData::gather_i64`] for a float column.
+    pub fn gather_f64(
+        &self,
+        start: usize,
+        at: &[u32],
+        len: usize,
+        values: &mut Vec<f64>,
+        nulls: &mut Vec<bool>,
+    ) {
+        values.resize(len, 0.0);
+        nulls.resize(len, false);
+        if let Self::F64 {
+            values: v,
+            nulls: bits,
+        } = self
+        {
+            for r in at {
+                values[*r as usize] = v[start + *r as usize];
+                nulls[*r as usize] = bits.as_ref().is_some_and(|b| b.get(start + *r as usize));
+            }
         }
     }
 
@@ -299,9 +441,7 @@ impl ColumnData {
                 }
             }
             Self::PackedCodes { packed, .. } => {
-                for (slot, code) in out.iter_mut().zip(packed.iter(rows)) {
-                    *slot = at(code);
-                }
+                packed.unpack(rows, out, at);
             }
             _ => {}
         }
@@ -329,9 +469,7 @@ impl ColumnData {
             } => {
                 values.resize(rows.len(), 0);
                 #[allow(clippy::cast_possible_wrap)]
-                for (slot, v) in values.iter_mut().zip(packed.iter(rows.clone())) {
-                    *slot = base.wrapping_add(v as i64);
-                }
+                packed.unpack(rows.clone(), values, |v| base.wrapping_add(v as i64));
                 n
             }
             _ => return,
@@ -567,6 +705,26 @@ pub fn seal(parts: &[&ColumnData], storage: Storage, dict: bool) -> ColumnData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpacking_a_range_matches_reading_each_value() {
+        for width in 0u32..=64 {
+            // values that use the full width, so a shift error shows
+            let values: Vec<u64> = (0..300u64)
+                .map(|i| match width {
+                    0 => 0,
+                    64 => i.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    w => i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - w),
+                })
+                .collect();
+            let packed = Packed::pack(values.iter().copied());
+            for rows in [0..300, 64..192, 128..300, 1..299, 37..38, 0..0] {
+                let mut out = vec![0u64; rows.len()];
+                packed.unpack(rows.clone(), &mut out, |v| v);
+                assert_eq!(out, values[rows.clone()], "width {width}, rows {rows:?}");
+            }
+        }
+    }
 
     #[test]
     fn packing_round_trips_at_every_width() {

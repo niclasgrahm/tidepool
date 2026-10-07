@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde_json::Value as Json;
 use tidepool_config::ConfigSet;
 use tidepool_config::diag::render_all;
-use tidepool_engine::{Condition, Dim, Query, ResultSet, Selection, run, run_general};
+use tidepool_engine::{Condition, Dim, Engine, Query, Selection, run, run_general};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{FieldRef, Model};
 use tidepool_model::{Catalog, compile};
@@ -124,15 +124,14 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
 }
 
 /// Write `data` to a fresh store for `model`, the way clients would.
-fn store(model: &Arc<Model>, rng: &mut Rng, writes: &[Write]) -> Result<Snapshot, String> {
+/// Every snapshot published along the way, the final one last.
+fn store(model: &Arc<Model>, rng: &mut Rng, writes: &[Write]) -> Result<Vec<Snapshot>, String> {
     let mut store = Store::with_seal_rows(Arc::clone(model), 8 + rng.below(200));
-    let mut last = store.publish();
+    let mut history: Vec<Snapshot> = store.publish().into_iter().collect();
     for write in writes {
         let (table, op, rows) = match write {
             Write::Publish => {
-                if let Some(snapshot) = store.publish() {
-                    last = Some(snapshot);
-                }
+                history.extend(store.publish());
                 continue;
             }
             Write::Rows { table, rows } => (table, Op::Write, rows),
@@ -149,10 +148,11 @@ fn store(model: &Arc<Model>, rng: &mut Rng, writes: &[Write]) -> Result<Snapshot
             json_array(spec, shape, &body).map_err(|r| format!("{} rejected: {r:?}", spec.name))?;
         store.apply(spec.id, op, &batch);
     }
-    if let Some(snapshot) = store.publish() {
-        last = Some(snapshot);
+    history.extend(store.publish());
+    if history.is_empty() {
+        return Err("nothing published".to_string());
     }
-    last.ok_or_else(|| "nothing published".to_string())
+    Ok(history)
 }
 
 fn sorted(mut rows: Vec<Vec<Canon>>) -> Vec<Vec<Canon>> {
@@ -186,24 +186,33 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
     };
     let model = Arc::new(compiled.model);
     let data = generate::data(&mut rng, &schema);
-    let snapshot =
-        store(&model, &mut rng, &data.writes).map_err(|e| format!("seed {seed}: {e}"))?;
+    let history = store(&model, &mut rng, &data.writes).map_err(|e| format!("seed {seed}: {e}"))?;
+    let Some(snapshot) = history.last() else {
+        return Err(format!("seed {seed}: nothing published"));
+    };
     let db = duck::load(&schema, &data).map_err(|e| format!("seed {seed}: loading DuckDB: {e}"))?;
 
+    let cached = Engine::default();
+    let mut replayed = Vec::new();
     for q in 0..queries {
         let query = generate::query(&mut rng, &schema, &data);
         let engine = engine_query(&model, &schema, &query)
             .map_err(|e| format!("seed {seed} query {q}: {e}"))?;
+        if q < HISTORY_QUERIES {
+            replayed.push(engine.clone());
+        }
         let sql = duck::sql(&schema, &query);
         let width = query.dims.len() + query.metrics.len();
         let theirs = duck::run(&db, &sql, width)
             .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
-        // both execution paths must agree with DuckDB
-        for (path, answer) in [
-            ("fast", run as fn(&Snapshot, &Query) -> Result<ResultSet, _>),
-            ("general", run_general),
+        // every execution path must agree with DuckDB: the fast one, the
+        // general one, and the fast one with caches built by earlier queries
+        for (path, ours) in [
+            ("fast", run(snapshot, &engine)),
+            ("general", run_general(snapshot, &engine)),
+            ("cached", cached.run(snapshot, &engine)),
         ] {
-            let ours = answer(&snapshot, &engine)
+            let ours = ours
                 .map_err(|e| format!("seed {seed} query {q}: Tidepool refused {query:?}: {e}"))?;
             let ours: Vec<Vec<Canon>> = ours
                 .rows
@@ -213,7 +222,44 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
             compare(seed, q, path, &query, &sql, ours, theirs.clone())?;
         }
     }
+    replay(seed, &history, &replayed)?;
     Ok(queries)
+}
+
+/// Queries also run over every intermediate snapshot.
+const HISTORY_QUERIES: usize = 4;
+
+/// Run `queries` over each snapshot in turn with one cached engine, as a
+/// server would while data arrives, and check every answer against the
+/// uncached engine's: caches built on one epoch must never leak into the next.
+fn replay(seed: u64, history: &[Snapshot], queries: &[Query]) -> Result<(), String> {
+    let cached = Engine::default();
+    let canon_rows = |rows: &[Vec<Scalar>]| -> Vec<Vec<Canon>> {
+        rows.iter()
+            .map(|row| row.iter().map(canon).collect())
+            .collect()
+    };
+    for (e, snapshot) in history.iter().enumerate() {
+        for (q, query) in queries.iter().enumerate() {
+            let fresh = run(snapshot, query).map_err(|err| format!("seed {seed}: {err}"))?;
+            let reused = cached
+                .run(snapshot, query)
+                .map_err(|err| format!("seed {seed}: {err}"))?;
+            let (fresh, reused) = (canon_rows(&fresh.rows), canon_rows(&reused.rows));
+            let same = fresh.len() == reused.len()
+                && fresh
+                    .iter()
+                    .zip(&reused)
+                    .all(|(a, b)| a.iter().zip(b).all(|(x, y)| x.close(y)));
+            if !same {
+                return Err(format!(
+                    "seed {seed} snapshot {e} (epoch {}) query {q}: the cached engine differs\nquery: {query:?}\nuncached: {fresh:?}\ncached: {reused:?}",
+                    snapshot.epoch
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compare(

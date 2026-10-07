@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
@@ -31,11 +32,12 @@ use tidepool_expr::ir::{AggFunc, Expr};
 use tidepool_expr::temporal::{Part, date_from_days, days_from_date, trunc_date};
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{Model, TableId};
-use tidepool_store::column::{ColumnData, Raw};
+use tidepool_store::column::ColumnData;
 use tidepool_store::dict::{DictSnapshot, DictValue};
 use tidepool_store::store::{ColumnLayout, SegmentView, Snapshot, TableSnapshot};
 use tidepool_store::value::{Storage, Value};
 
+use crate::cache::{Caches, JoinColumn, Narrow};
 use crate::exec::scalar;
 use crate::plan::{AnchorPlan, Target};
 use crate::query::Condition;
@@ -59,7 +61,9 @@ struct Read<'s> {
     kind: Kind,
     /// Values reached through relationships, indexed by the anchor's
     /// foreign-key code (`column`).
-    gathered: Option<Map>,
+    gathered: Option<Arc<Map>>,
+    /// With caches, the gathered codes materialized per anchor segment.
+    joined: Option<Vec<Arc<JoinColumn>>>,
     /// The column the value finally comes from.
     layout: ColumnLayout,
     dict: Option<&'s DictSnapshot>,
@@ -188,6 +192,7 @@ pub(crate) fn prepare<'s>(
     model: &Model,
     snapshot: &'s Snapshot,
     plan: &AnchorPlan,
+    caches: Option<&Caches>,
 ) -> Option<Prepared<'s>> {
     if plan.dims.len() > MAX_DIMS {
         return None;
@@ -207,24 +212,55 @@ pub(crate) fn prepare<'s>(
             Some(first) => {
                 // the target's values by its key, then back along the path:
                 // each table's values by its own key
-                let mut values = scatter(model, snapshot, target_table, target_column, kind, None)?;
-                for (i, hop) in access.path.iter().enumerate().skip(1).rev() {
-                    values = scatter(
-                        model,
-                        snapshot,
-                        access.path[i - 1].to,
-                        hop.fk_column,
-                        kind,
-                        Some(&values),
-                    )?;
-                }
-                (first.fk_column, Some(Map::narrow(values)))
+                let build = || {
+                    let mut values =
+                        scatter(model, snapshot, target_table, target_column, kind, None)?;
+                    for (i, hop) in access.path.iter().enumerate().skip(1).rev() {
+                        values = scatter(
+                            model,
+                            snapshot,
+                            access.path[i - 1].to,
+                            hop.fk_column,
+                            kind,
+                            Some(&values),
+                        )?;
+                    }
+                    Some(Map::narrow(values))
+                };
+                let map = match caches {
+                    Some(caches) => {
+                        let tables = access
+                            .path
+                            .iter()
+                            .map(|hop| snapshot.tables.get(&hop.to))
+                            .collect::<Option<Vec<_>>>()?;
+                        let hops = access.path.iter().map(|h| h.fk_column).collect();
+                        caches.map(&tables, hops, target_column, build)?
+                    }
+                    None => Arc::new(build()?),
+                };
+                (first.fk_column, Some(map))
             }
+        };
+        // related codes are worth materializing per anchor row
+        let joined = match (caches, &gathered) {
+            (Some(caches), Some(map)) if map.is_codes() => {
+                let anchor = snapshot.table(plan.table)?;
+                Some(
+                    anchor
+                        .segments
+                        .iter()
+                        .map(|s| caches.join(&s.data, map))
+                        .collect(),
+                )
+            }
+            _ => None,
         };
         reads.push(Read {
             column,
             kind,
             gathered,
+            joined,
             layout,
             dict,
         });
@@ -395,37 +431,62 @@ impl Row for OneSlot {
     }
 }
 
+/// Decode `rows` of a column into `out` (of the column's kind), reusing
+/// its buffers.
+fn decode_into(column: &ColumnData, rows: Range<usize>, out: &mut Values) {
+    match out {
+        Values::Codes(v) => column.decode_codes(rows, v),
+        Values::Ints(v, n) => column.decode_i64(rows, v, n),
+        Values::Floats(v, n) => column.decode_f64(rows, v, n),
+    }
+}
+
 /// Decode `rows` of a column as `kind`.
 fn decode(column: &ColumnData, kind: Kind, rows: Range<usize>) -> Values {
-    match kind {
-        Kind::Codes => {
-            let mut out = Vec::new();
-            column.decode_codes(rows, &mut out);
-            Values::Codes(out)
-        }
-        Kind::Ints => {
-            let (mut v, mut n) = (Vec::new(), Vec::new());
-            column.decode_i64(rows, &mut v, &mut n);
-            Values::Ints(v, n)
-        }
-        Kind::Floats => {
-            let (mut v, mut n) = (Vec::new(), Vec::new());
-            column.decode_f64(rows, &mut v, &mut n);
-            Values::Floats(v, n)
-        }
-    }
+    let mut out = Values::empty(kind);
+    decode_into(column, rows, &mut out);
+    out
 }
 
 /// Values by a referenced key, for following a relationship. Codes are
 /// stored as narrow as they fit: these maps are read at random, so the
 /// smaller they are, the more of them stays in cache.
-enum Map {
+pub(crate) enum Map {
     Codes8(Vec<u8>),
     Codes16(Vec<u16>),
     Values(Values),
 }
 
 impl Map {
+    fn is_codes(&self) -> bool {
+        matches!(
+            self,
+            Self::Codes8(_) | Self::Codes16(_) | Self::Values(Values::Codes(_))
+        )
+    }
+
+    /// One morsel of a join column: `rows` of the foreign key, followed.
+    fn narrow_rows(&self, column: &ColumnData, rows: Range<usize>) -> Narrow {
+        match self {
+            Self::Codes8(m) => {
+                let mut out = Vec::new();
+                column.map_codes(rows, m, 0u8, &mut out);
+                Narrow::U8(out.into())
+            }
+            Self::Codes16(m) => {
+                let mut out = Vec::new();
+                column.map_codes(rows, m, 0u16, &mut out);
+                Narrow::U16(out.into())
+            }
+            Self::Values(Values::Codes(m)) => {
+                let mut out = Vec::new();
+                column.map_codes(rows, m, 0u32, &mut out);
+                Narrow::U32(out.into())
+            }
+            Self::Values(_) => Narrow::U32(Box::new([])),
+        }
+    }
+
     fn narrow(values: Values) -> Self {
         match values {
             Values::Codes(codes) => {
@@ -452,39 +513,31 @@ impl Map {
     }
 }
 
-/// Decode `rows` of a foreign-key column through `map`: following the
-/// relationship.
-fn follow(column: &ColumnData, map: &Map, rows: Range<usize>) -> Values {
-    let mut out = Vec::new();
-    match map {
-        Map::Codes8(m) => column.map_codes(rows, m, 0u32, &mut out),
-        Map::Codes16(m) => column.map_codes(rows, m, 0u32, &mut out),
-        Map::Values(values) => return through(column, values, rows),
+/// Decode `rows` of a foreign-key column through `map` into `out`:
+/// following the relationship.
+fn follow_into(column: &ColumnData, map: &Map, rows: Range<usize>, out: &mut Values) {
+    match (map, out) {
+        (Map::Codes8(m), Values::Codes(v)) => column.map_codes(rows, m, 0u32, v),
+        (Map::Codes16(m), Values::Codes(v)) => column.map_codes(rows, m, 0u32, v),
+        (Map::Values(values), out) => through_into(column, values, rows, out),
+        _ => {}
     }
-    Values::Codes(out)
 }
 
 /// Decode `rows` of a foreign-key column through `map` (values by the
-/// referenced key).
-fn through(column: &ColumnData, map: &Values, rows: Range<usize>) -> Values {
-    match map {
-        Values::Codes(m) => {
-            let mut out = Vec::new();
-            column.map_codes(rows, m, 0, &mut out);
-            Values::Codes(out)
+/// referenced key) into `out`.
+fn through_into(column: &ColumnData, map: &Values, rows: Range<usize>, out: &mut Values) {
+    match (map, out) {
+        (Values::Codes(m), Values::Codes(v)) => column.map_codes(rows, m, 0, v),
+        (Values::Ints(m, nulls), Values::Ints(v, n)) => {
+            column.map_codes(rows.clone(), m, 0, v);
+            column.map_codes(rows, nulls, true, n);
         }
-        Values::Ints(m, nulls) => {
-            let (mut v, mut n) = (Vec::new(), Vec::new());
-            column.map_codes(rows.clone(), m, 0, &mut v);
-            column.map_codes(rows, nulls, true, &mut n);
-            Values::Ints(v, n)
+        (Values::Floats(m, nulls), Values::Floats(v, n)) => {
+            column.map_codes(rows.clone(), m, 0.0, v);
+            column.map_codes(rows, nulls, true, n);
         }
-        Values::Floats(m, nulls) => {
-            let (mut v, mut n) = (Vec::new(), Vec::new());
-            column.map_codes(rows.clone(), m, 0.0, &mut v);
-            column.map_codes(rows, nulls, true, &mut n);
-            Values::Floats(v, n)
-        }
+        _ => {}
     }
 }
 
@@ -523,7 +576,11 @@ fn scatter(
         segment.data.columns[key].decode_codes(rows.clone(), &mut codes);
         let values = match inner {
             None => decode(&segment.data.columns[column], kind, rows),
-            Some(map) => through(&segment.data.columns[column], map, rows),
+            Some(map) => {
+                let mut out = Values::empty(kind);
+                through_into(&segment.data.columns[column], map, rows, &mut out);
+                out
+            }
         };
         let deleted: Vec<u32> = segment.deletes.iter().collect();
         let mut deleted = deleted.into_iter().peekable();
@@ -538,79 +595,84 @@ fn scatter(
     Some(out)
 }
 
+/// Keep the rows of `sel` that pass `keep`, in order. Branch-free: about
+/// half the rows pass a typical selection, which is the worst case for a
+/// predicted branch.
+fn compact(sel: &mut Vec<u32>, keep: impl Fn(u32) -> bool) {
+    let mut kept = 0;
+    for i in 0..sel.len() {
+        let r = sel[i];
+        sel[kept] = r;
+        kept += usize::from(keep(r));
+    }
+    sel.truncate(kept);
+}
+
 /// Decode only the rows in `sel` when fewer than one in this many are left.
 const SPARSE: usize = 4;
 
+/// A join column's chunk as codes in `out`: every row, or `sel`'s.
+fn widen(chunk: &Narrow, sel: Option<&[u32]>, out: &mut Vec<u32>) {
+    fn copy<T: Copy + Into<u32>>(codes: &[T], sel: Option<&[u32]>, out: &mut Vec<u32>) {
+        match sel {
+            None => {
+                out.clear();
+                out.extend(codes.iter().map(|c| (*c).into()));
+            }
+            Some(sel) => {
+                out.resize(codes.len(), 0);
+                for r in sel {
+                    out[*r as usize] = codes[*r as usize].into();
+                }
+            }
+        }
+    }
+    match chunk {
+        Narrow::U8(c) => copy(c, sel, out),
+        Narrow::U16(c) => copy(c, sel, out),
+        Narrow::U32(c) => copy(c, sel, out),
+    }
+}
+
 /// [`Prepared::load`] for a few rows: `sel`'s, relative to `rows.start`.
-fn sparse(column: &ColumnData, read: &Read, rows: Range<usize>, sel: &[u32]) -> Values {
+/// Other rows of `out` keep whatever they held.
+fn sparse_into(
+    column: &ColumnData,
+    read: &Read,
+    rows: Range<usize>,
+    sel: &[u32],
+    out: &mut Values,
+) {
     let (start, len) = (rows.start, rows.len());
-    let code = |r: u32| match column.get(start + r as usize) {
-        Raw::Code(c) => c as usize,
-        _ => 0,
-    };
-    let codes = |map: &dyn Fn(usize) -> u32| {
-        let mut out = vec![0u32; len];
-        for r in sel {
-            out[*r as usize] = map(code(*r));
+    match (read.gathered.as_deref(), out) {
+        (None, Values::Codes(o)) => column.gather_codes(start, sel, len, o),
+        (None, Values::Ints(v, n)) => column.gather_i64(start, sel, len, v, n),
+        (None, Values::Floats(v, n)) => column.gather_f64(start, sel, len, v, n),
+        (Some(Map::Codes8(m)), Values::Codes(o)) => {
+            o.resize(len, 0);
+            column.gather_map_codes(start, sel, m, 0u32, o);
         }
-        Values::Codes(out)
-    };
-    let numbers = |value: &dyn Fn(u32) -> Option<i64>| {
-        let (mut v, mut n) = (vec![0i64; len], vec![true; len]);
-        for r in sel {
-            if let Some(x) = value(*r) {
-                v[*r as usize] = x;
-                n[*r as usize] = false;
-            }
+        (Some(Map::Codes16(m)), Values::Codes(o)) => {
+            o.resize(len, 0);
+            column.gather_map_codes(start, sel, m, 0u32, o);
         }
-        (v, n)
-    };
-    let floats = |value: &dyn Fn(u32) -> Option<f64>| {
-        let (mut v, mut n) = (vec![0.0f64; len], vec![true; len]);
-        for r in sel {
-            if let Some(x) = value(*r) {
-                v[*r as usize] = x;
-                n[*r as usize] = false;
-            }
+        (Some(Map::Values(Values::Codes(m))), Values::Codes(o)) => {
+            o.resize(len, 0);
+            column.gather_map_codes(start, sel, m, 0, o);
         }
-        (v, n)
-    };
-    match &read.gathered {
-        Some(Map::Codes8(m)) => codes(&|c| m.get(c).map_or(0, |v| u32::from(*v))),
-        Some(Map::Codes16(m)) => codes(&|c| m.get(c).map_or(0, |v| u32::from(*v))),
-        Some(Map::Values(Values::Codes(m))) => codes(&|c| m.get(c).copied().unwrap_or(0)),
-        Some(Map::Values(Values::Ints(m, nulls))) => {
-            let (v, n) = numbers(&|r| {
-                let c = code(r);
-                (!nulls.get(c).copied().unwrap_or(true)).then(|| m.get(c).copied().unwrap_or(0))
-            });
-            Values::Ints(v, n)
+        (Some(Map::Values(Values::Ints(m, nulls))), Values::Ints(v, n)) => {
+            v.resize(len, 0);
+            n.resize(len, true);
+            column.gather_map_codes(start, sel, m, 0, v);
+            column.gather_map_codes(start, sel, nulls, true, n);
         }
-        Some(Map::Values(Values::Floats(m, nulls))) => {
-            let (v, n) = floats(&|r| {
-                let c = code(r);
-                (!nulls.get(c).copied().unwrap_or(true)).then(|| m.get(c).copied().unwrap_or(0.0))
-            });
-            Values::Floats(v, n)
+        (Some(Map::Values(Values::Floats(m, nulls))), Values::Floats(v, n)) => {
+            v.resize(len, 0.0);
+            n.resize(len, true);
+            column.gather_map_codes(start, sel, m, 0.0, v);
+            column.gather_map_codes(start, sel, nulls, true, n);
         }
-        None => match read.kind {
-            #[allow(clippy::cast_possible_truncation)]
-            Kind::Codes => codes(&|c| c as u32),
-            Kind::Ints => {
-                let (v, n) = numbers(&|r| match column.get(start + r as usize) {
-                    Raw::I64(x) => Some(x),
-                    _ => None,
-                });
-                Values::Ints(v, n)
-            }
-            Kind::Floats => {
-                let (v, n) = floats(&|r| match column.get(start + r as usize) {
-                    Raw::F64(x) => Some(x),
-                    _ => None,
-                });
-                Values::Floats(v, n)
-            }
-        },
+        _ => {}
     }
 }
 
@@ -624,7 +686,7 @@ enum Cell {
 }
 
 /// One read's values for the rows of a morsel.
-enum Values {
+pub(crate) enum Values {
     /// 0 is NULL.
     Codes(Vec<u32>),
     Ints(Vec<i64>, Vec<bool>),
@@ -632,6 +694,14 @@ enum Values {
 }
 
 impl Values {
+    fn empty(kind: Kind) -> Self {
+        match kind {
+            Kind::Codes => Self::Codes(Vec::new()),
+            Kind::Ints => Self::Ints(Vec::new(), Vec::new()),
+            Kind::Floats => Self::Floats(Vec::new(), Vec::new()),
+        }
+    }
+
     fn cell(&self, row: usize) -> Cell {
         match self {
             Self::Codes(c) => match c[row] {
@@ -681,7 +751,7 @@ impl Values {
 
 /// Rows scanned per task. Tiny in debug builds, so tests over small data
 /// still split segments.
-const MORSEL: usize = if cfg!(debug_assertions) { 13 } else { 1 << 14 };
+pub(crate) const MORSEL: usize = if cfg!(debug_assertions) { 13 } else { 1 << 14 };
 
 /// A group key: one part per dimension, and which parts are NULL.
 type Key = ([i64; MAX_DIMS], u8);
@@ -961,34 +1031,90 @@ const BITSET_LIMIT: usize = 1 << 28;
 /// `COUNT(DISTINCT code)` for every dense group at once: bit
 /// `group * space + code`, set by every scanning task. Cheaper than
 /// per-task sets merged afterwards when the code space is moderate.
+///
+/// The bitset is larger than any cache, and rows hit it at random, so a
+/// task doesn't set bits as it scans: it collects their positions into
+/// [`Pending`] buckets by range and sets them a bucket at a time, each
+/// bucket's slice of the bitset small enough to stay in cache.
 struct Bitset {
     space: usize,
+    /// Bucket of a bit: `bit >> shift`.
+    shift: u32,
     words: Vec<AtomicU64>,
+    /// One per bucket: whoever holds it owns that slice of `words`, so
+    /// setting bits there needs no atomic read-modify-write.
+    locks: Vec<std::sync::Mutex<()>>,
 }
+
+/// Bit positions a task has yet to set, by bucket.
+#[derive(Default)]
+struct Pending {
+    buckets: Vec<Vec<u32>>,
+    count: usize,
+}
+
+/// Buckets of a [`Bitset`], at most.
+const BUCKETS: usize = 64;
+/// Positions a task collects before setting them.
+const PENDING: usize = 1 << 17;
 
 impl Bitset {
     fn new(groups: usize, space: usize) -> Self {
+        let bits = groups * space;
+        // at least 6: a word (64 bits) always lies in one bucket
+        let shift = (usize::BITS - bits.leading_zeros())
+            .saturating_sub(BUCKETS.trailing_zeros())
+            .max(6);
         Self {
             space,
-            words: (0..(groups * space).div_ceil(64))
+            shift,
+            // zeroed in parallel: tens of megabytes, touched for the first time
+            words: (0..bits.div_ceil(64))
+                .into_par_iter()
                 .map(|_| AtomicU64::new(0))
                 .collect(),
+            locks: (0..=BUCKETS).map(|_| std::sync::Mutex::new(())).collect(),
         }
     }
 
-    fn insert(&self, rows: &[u32], groups: &[u32], codes: &[u32]) {
+    fn insert(&self, rows: &[u32], groups: &[u32], codes: &[u32], pending: &mut Pending) {
+        if pending.buckets.is_empty() {
+            pending.buckets = (0..=BUCKETS).map(|_| Vec::new()).collect();
+        }
         for (r, g) in rows.iter().zip(groups) {
-            let code = codes[*r as usize] as usize;
+            let code = codes[*r as usize];
             if code == 0 {
                 continue;
             }
-            let bit = *g as usize * self.space + code;
-            let (word, mask) = (&self.words[bit / 64], 1u64 << (bit % 64));
-            // reading first skips the write when the bit is already set
-            if word.load(Ordering::Relaxed) & mask == 0 {
-                word.fetch_or(mask, Ordering::Relaxed);
+            // < BITSET_LIMIT, so it fits
+            #[allow(clippy::cast_possible_truncation)]
+            let bit = (*g as usize * self.space + code as usize) as u32;
+            pending.buckets[(bit >> self.shift) as usize].push(bit);
+        }
+        pending.count += rows.len();
+        if pending.count >= PENDING {
+            self.flush(pending);
+        }
+    }
+
+    /// Set every pending bit.
+    fn flush(&self, pending: &mut Pending) {
+        for (bucket, lock) in pending.buckets.iter_mut().zip(&self.locks) {
+            if bucket.is_empty() {
+                continue;
+            }
+            // nothing guarded can be left half-done: a poisoned lock is fine
+            let _owned = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for bit in bucket.drain(..) {
+                let (word, mask) = (&self.words[bit as usize / 64], 1u64 << (bit % 64));
+                // a bucket's words are only written under its lock, and a
+                // word never straddles two buckets (`shift` >= 6)
+                word.store(word.load(Ordering::Relaxed) | mask, Ordering::Relaxed);
             }
         }
+        pending.count = 0;
     }
 
     fn count(&self, group: usize) -> i64 {
@@ -1032,10 +1158,15 @@ fn truncate(part: Part, days: i64, memo: &mut hashbrown::HashMap<(Part, i64), i6
 /// Reusable buffers of one scanning task.
 #[derive(Default)]
 struct Scratch {
+    /// Decoded values per read, reused from morsel to morsel.
+    buffers: Vec<Values>,
+    loaded: Vec<bool>,
     sel: Vec<u32>,
     groups: Vec<u32>,
     filtered_sel: Vec<u32>,
     filtered_groups: Vec<u32>,
+    /// Per aggregate: distinct-count bits not set yet.
+    pending: Vec<Pending>,
     memo: hashbrown::HashMap<(Part, i64), i64>,
 }
 
@@ -1061,18 +1192,36 @@ impl Prepared<'_> {
         }
     }
 
-    /// Decode read `read` for `rows` of a segment: every row, or only the
-    /// rows in `sel` (relative to `rows.start`) when they are few. Other
-    /// rows then hold arbitrary values, and nothing reads them.
-    fn load(&self, view: &SegmentView, read: usize, rows: Range<usize>, sel: &[u32]) -> Values {
+    /// Decode read `read` for `rows` of a segment into `out`: every row, or
+    /// only the rows in `sel` (relative to `rows.start`) when they are few.
+    /// Other rows then hold arbitrary values, and nothing reads them.
+    #[allow(clippy::too_many_arguments)]
+    fn load(
+        &self,
+        view: &SegmentView,
+        segment: usize,
+        read: usize,
+        rows: Range<usize>,
+        sel: &[u32],
+        out: &mut Values,
+    ) {
         let read = &self.reads[read];
         let column = &view.data.columns[read.column];
-        if sel.len() * SPARSE < rows.len() {
-            return sparse(column, read, rows, sel);
+        let sparse = sel.len() * SPARSE < rows.len();
+        if let (Some(joined), Some(map), Values::Codes(out)) =
+            (&read.joined, &read.gathered, &mut *out)
+            && let Some(chunk) = joined
+                .get(segment)
+                .and_then(|j| j.chunk(rows.start, || map.narrow_rows(column, rows.clone())))
+        {
+            return widen(chunk, sparse.then_some(sel), out);
+        }
+        if sparse {
+            return sparse_into(column, read, rows, sel, out);
         }
         match &read.gathered {
-            Some(map) => follow(column, map, rows),
-            None => decode(column, read.kind, rows),
+            Some(map) => follow_into(column, map, rows, out),
+            None => decode_into(column, rows, out),
         }
     }
 
@@ -1091,8 +1240,17 @@ impl Prepared<'_> {
         // the selection: live rows passing every condition. Columns are
         // decoded as needed: a condition's before it filters, the rest after
         // the conditions, only at the rows left when few are.
-        let mut loaded: Vec<Option<Values>> = (0..self.reads.len()).map(|_| None).collect();
-        let sel = &mut scratch.sel;
+        let Scratch {
+            buffers,
+            loaded,
+            sel,
+            ..
+        } = scratch;
+        if buffers.len() != self.reads.len() {
+            *buffers = self.reads.iter().map(|r| Values::empty(r.kind)).collect();
+        }
+        loaded.clear();
+        loaded.resize(self.reads.len(), false);
         sel.clear();
         let len = u32::try_from(rows.len()).unwrap_or(u32::MAX);
         let start = u32::try_from(rows.start).unwrap_or(u32::MAX);
@@ -1113,34 +1271,37 @@ impl Prepared<'_> {
             }
         }
         for (read, test) in &self.conditions {
-            let values =
-                loaded[*read].get_or_insert_with(|| self.load(view, *read, rows.clone(), sel));
-            match (test, &*values) {
+            if !loaded[*read] {
+                self.load(view, segment, *read, rows.clone(), sel, &mut buffers[*read]);
+                loaded[*read] = true;
+            }
+            match (test, &buffers[*read]) {
                 (Test::Codes(pass), Values::Codes(c)) => {
-                    sel.retain(|r| pass.get(c[*r as usize] as usize).copied().unwrap_or(false));
+                    compact(sel, |r| {
+                        pass.get(c[r as usize] as usize).copied().unwrap_or(false)
+                    });
                 }
                 (Test::IntIn(set), Values::Ints(v, n)) => {
-                    sel.retain(|r| !n[*r as usize] && set.contains(&v[*r as usize]));
+                    compact(sel, |r| !n[r as usize] && set.contains(&v[r as usize]));
                 }
-                (Test::IntRange(from, to), Values::Ints(v, n)) => sel.retain(|r| {
-                    let (v, n) = (v[*r as usize], n[*r as usize]);
-                    !n && from.is_none_or(|f| v >= f) && to.is_none_or(|t| v < t)
+                (Test::IntRange(from, to), Values::Ints(v, n)) => compact(sel, |r| {
+                    let (v, n) = (v[r as usize], n[r as usize]);
+                    !n & from.is_none_or(|f| v >= f) & to.is_none_or(|t| v < t)
                 }),
                 (Test::Floats(condition), Values::Floats(v, n)) => {
-                    sel.retain(|r| {
-                        !n[*r as usize] && condition.matches(&Scalar::Float(v[*r as usize]))
+                    compact(sel, |r| {
+                        !n[r as usize] && condition.matches(&Scalar::Float(v[r as usize]))
                     });
                 }
                 _ => sel.clear(),
             }
         }
-        let values: Vec<Values> = loaded
-            .into_iter()
-            .enumerate()
-            .map(|(read, values)| {
-                values.unwrap_or_else(|| self.load(view, read, rows.clone(), sel))
-            })
-            .collect();
+        for read in 0..self.reads.len() {
+            if !loaded[read] {
+                self.load(view, segment, read, rows.clone(), sel, &mut buffers[read]);
+            }
+        }
+        let values: &[Values] = buffers;
 
         // group ids
         let groups = &mut scratch.groups;
@@ -1160,7 +1321,7 @@ impl Prepared<'_> {
             }
             None => {
                 for r in sel.iter() {
-                    let key = self.key(&values, *r as usize, &mut scratch.memo);
+                    let key = self.key(values, *r as usize, &mut scratch.memo);
                     let id = if let Some(id) = partial.lookup.get(&key) {
                         *id
                     } else {
@@ -1181,12 +1342,16 @@ impl Prepared<'_> {
             partial.seen[*g as usize] = true;
         }
 
-        for (((agg, state), ranks), bits) in self
+        if scratch.pending.len() != self.aggs.len() {
+            scratch.pending = self.aggs.iter().map(|_| Pending::default()).collect();
+        }
+        for (a, (((agg, state), ranks), bits)) in self
             .aggs
             .iter()
             .zip(&mut partial.states)
             .zip(ranks)
             .zip(shared)
+            .enumerate()
         {
             let arg = agg.arg.map(|a| &values[a]);
             let (rows, groups): (&[u32], &[u32]) = match &agg.filter {
@@ -1195,23 +1360,29 @@ impl Prepared<'_> {
                     let Values::Codes(codes) = &values[*read] else {
                         continue;
                     };
-                    scratch.filtered_sel.clear();
-                    scratch.filtered_groups.clear();
+                    // branch-free, as `compact`
+                    let (fs, fg) = (&mut scratch.filtered_sel, &mut scratch.filtered_groups);
+                    fs.resize(sel.len(), 0);
+                    fg.resize(sel.len(), 0);
+                    let mut kept = 0;
                     for (r, g) in sel.iter().zip(groups.iter()) {
-                        if pass
-                            .get(codes[*r as usize] as usize)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            scratch.filtered_sel.push(*r);
-                            scratch.filtered_groups.push(*g);
-                        }
+                        fs[kept] = *r;
+                        fg[kept] = *g;
+                        kept += usize::from(
+                            pass.get(codes[*r as usize] as usize)
+                                .copied()
+                                .unwrap_or(false),
+                        );
                     }
+                    fs.truncate(kept);
+                    fg.truncate(kept);
                     (&scratch.filtered_sel, &scratch.filtered_groups)
                 }
             };
             match (bits, arg) {
-                (Some(bits), Some(Values::Codes(codes))) => bits.insert(rows, groups, codes),
+                (Some(bits), Some(Values::Codes(codes))) => {
+                    bits.insert(rows, groups, codes, &mut scratch.pending[a]);
+                }
                 _ => state.update(rows, groups, arg, ranks.as_deref()),
             }
         }
@@ -1383,11 +1554,27 @@ impl Prepared<'_> {
                     (partial, scratch)
                 },
             )
-            .map(|(partial, _)| partial)
+            .map(|(partial, mut scratch)| {
+                for (bits, pending) in shared.iter().zip(&mut scratch.pending) {
+                    if let Some(bits) = bits {
+                        bits.flush(pending);
+                    }
+                }
+                partial
+            })
             .reduce(|| self.empty(), |a, b| self.merge(a, b, &ranks));
 
+        // distinct counts per group, counted in parallel
+        let groups = partial.seen.len();
+        let counts: Vec<Option<Vec<i64>>> = shared
+            .iter()
+            .map(|bits| {
+                bits.as_ref()
+                    .map(|bits| (0..groups).into_par_iter().map(|g| bits.count(g)).collect())
+            })
+            .collect();
         let mut out = Vec::new();
-        for group in 0..partial.seen.len() {
+        for group in 0..groups {
             // without dimensions there is always exactly one row, as in SQL
             if !partial.seen[group] && !self.dims.is_empty() {
                 continue;
@@ -1415,9 +1602,9 @@ impl Prepared<'_> {
                 .states
                 .iter_mut()
                 .zip(&self.aggs)
-                .zip(&shared)
-                .map(|((state, agg), bits)| match bits {
-                    Some(bits) => Scalar::Int(bits.count(group)),
+                .zip(&counts)
+                .map(|((state, agg), counts)| match counts {
+                    Some(counts) => Scalar::Int(counts[group]),
                     None => state.finish(group, agg, &self.reads),
                 })
                 .collect();

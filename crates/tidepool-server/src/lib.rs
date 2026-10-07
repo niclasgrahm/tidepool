@@ -34,6 +34,8 @@ pub struct AppState {
     pub(crate) writer: WriterHandle,
     pub(crate) tokens: Tokens,
     pub(crate) keys: idempotency::Keys,
+    /// The query engine and its caches, shared by every query.
+    pub(crate) engine: Arc<tidepool_engine::Engine>,
 }
 
 impl AppState {
@@ -62,6 +64,7 @@ impl AppState {
             writer,
             tokens,
             keys: idempotency::Keys::default(),
+            engine: Arc::new(tidepool_engine::Engine::default()),
         }
     }
 

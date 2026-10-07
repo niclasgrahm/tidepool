@@ -308,7 +308,8 @@ pub async fn query(
     };
     // scans are CPU-bound and parallel: keep them off the async workers
     let epoch = snapshot.epoch;
-    let answer = tokio::task::spawn_blocking(move || tidepool_engine::run(&snapshot, &query)).await;
+    let engine = Arc::clone(&state.engine);
+    let answer = tokio::task::spawn_blocking(move || engine.run(&snapshot, &query)).await;
     match answer {
         Ok(Ok(answer)) => Json(result(&request, &answer, epoch)).into_response(),
         Ok(Err(error)) => bad_request(error.to_string()),

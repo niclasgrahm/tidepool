@@ -5,6 +5,7 @@
 //! against DuckDB by `tidepool-oracle`, and every optimisation must keep that
 //! green.
 
+mod cache;
 mod exec;
 mod fast;
 mod plan;
@@ -23,7 +24,7 @@ pub use query::{
 /// The query refers to something the model doesn't have, groups a metric by
 /// a field its table can't reach, or uses something not supported yet.
 pub fn run(snapshot: &Snapshot, query: &Query) -> Result<ResultSet, QueryError> {
-    answer(snapshot, query, true)
+    answer(snapshot, query, true, None)
 }
 
 /// [`run`] without the columnar fast path: every value is decoded and
@@ -32,10 +33,59 @@ pub fn run(snapshot: &Snapshot, query: &Query) -> Result<ResultSet, QueryError> 
 /// # Errors
 /// As [`run`].
 pub fn run_general(snapshot: &Snapshot, query: &Query) -> Result<ResultSet, QueryError> {
-    answer(snapshot, query, false)
+    answer(snapshot, query, false, None)
 }
 
-fn answer(snapshot: &Snapshot, query: &Query, fast: bool) -> Result<ResultSet, QueryError> {
+/// The engine with its caches (plan §6.5): what a server keeps for its
+/// lifetime and every query goes through. Answers are always the same as
+/// [`run`]'s; only how much is recomputed differs.
+pub struct Engine {
+    caches: cache::Caches,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new(1 << 30)
+    }
+}
+
+impl Engine {
+    /// An engine whose join columns may hold up to `join_budget` bytes.
+    #[must_use]
+    pub fn new(join_budget: usize) -> Self {
+        Self {
+            caches: cache::Caches::new(join_budget),
+        }
+    }
+
+    /// Answer `query` from `snapshot`, reusing what earlier queries built.
+    ///
+    /// # Errors
+    /// As [`run`].
+    pub fn run(&self, snapshot: &Snapshot, query: &Query) -> Result<ResultSet, QueryError> {
+        let key = format!("{:p} {query:?}", std::sync::Arc::as_ptr(&snapshot.model));
+        if let Some(result) = self.caches.result(snapshot.epoch, &key) {
+            return Ok(result);
+        }
+        self.caches.sweep();
+        let result = answer(snapshot, query, true, Some(&self.caches))?;
+        self.caches.keep_result(snapshot.epoch, key, result.clone());
+        Ok(result)
+    }
+
+    /// Bytes held by materialized join columns.
+    #[must_use]
+    pub fn join_bytes(&self) -> usize {
+        self.caches.join_bytes()
+    }
+}
+
+fn answer(
+    snapshot: &Snapshot,
+    query: &Query,
+    fast: bool,
+    caches: Option<&cache::Caches>,
+) -> Result<ResultSet, QueryError> {
     let model = &snapshot.model;
     let plan = plan::plan(model, query)?;
     let mut columns: Vec<ResultColumn> = query
@@ -71,7 +121,7 @@ fn answer(snapshot: &Snapshot, query: &Query, fast: bool) -> Result<ResultSet, Q
         .iter()
         .filter_map(|id| plan.metrics.iter().position(|m| m == id))
         .collect();
-    let mut rows: Vec<Vec<Scalar>> = exec::execute(model, snapshot, &plan, fast)
+    let mut rows: Vec<Vec<Scalar>> = exec::execute(model, snapshot, &plan, fast, caches)
         .into_iter()
         .map(|(mut dims, metrics)| {
             dims.extend(positions.iter().map(|p| metrics[*p].clone()));

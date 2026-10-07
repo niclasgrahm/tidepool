@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tidepool_engine::{Condition, Dim, Query, Selection, run};
+use tidepool_engine::{Condition, Dim, Engine, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::Model;
 use tidepool_model::ir::FieldRef;
@@ -172,37 +172,69 @@ fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], runs: usize) {
         ..Query::default()
     };
     let started = Instant::now();
-    let result = run(snapshot, &query).unwrap_or_else(|e| panic!("{e}"));
+    // a fresh engine: nothing cached from the other metric set
+    let engine = Engine::default();
+    let result = engine
+        .run(snapshot, &query)
+        .unwrap_or_else(|e| panic!("{e}"));
     println!(
         "    cold: 2 dims × 3 metrics over all orders    {:>8.1} ms  ({} groups)",
         started.elapsed().as_secs_f64() * 1000.0,
         result.rows.len()
     );
 
-    let mut times = Vec::new();
-    for i in 0..runs {
-        let mut selected = query.clone();
+    // every selection a distinct (regions, statuses) combination, in a
+    // scrambled order: each one new to the engine, as a click would be
+    let mut combos: Vec<(u64, u64)> = (1..64u64)
+        .flat_map(|r| (0..16u64).map(move |s| (r, s)))
+        .collect();
+    combos.sort_by_key(|(r, s)| mix(r * 16 + s));
+    combos.truncate(runs);
+    let selection = |(regions, statuses): (u64, u64)| {
+        let pick = |mask: u64, names: &[&str]| -> Vec<Scalar> {
+            names
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask >> i & 1 == 1)
+                .map(|(_, n)| Scalar::String((*n).into()))
+                .collect()
+        };
         let mut selection = Selection::default();
-        let region = REGIONS[i % REGIONS.len()];
         selection.0.insert(
             field(model, "customers", "region"),
-            Condition::In(vec![Scalar::String(region.into())]),
+            Condition::In(pick(regions, &REGIONS)),
         );
-        if i % 2 == 0 {
-            let status = STATUSES[i % STATUSES.len()];
+        if statuses != 0 {
             selection.0.insert(
                 field(model, "orders", "status"),
-                Condition::In(vec![Scalar::String(status.into())]),
+                Condition::In(pick(statuses, &STATUSES)),
             );
         }
-        selected.selection = selection;
-        let started = Instant::now();
-        let _ = run(snapshot, &selected).unwrap_or_else(|e| panic!("{e}"));
-        times.push(started.elapsed());
-    }
-    println!(
-        "    selection changes ({runs}):                    p50 {:>6.1} ms   p95 {:>6.1} ms",
-        percentile(&mut times, 0.5),
-        percentile(&mut times, 0.95)
-    );
+        Query {
+            selection,
+            ..query.clone()
+        }
+    };
+    let time = |label: &str, combos: &[(u64, u64)]| {
+        let mut times: Vec<Duration> = combos
+            .iter()
+            .map(|combo| {
+                let selected = selection(*combo);
+                let started = Instant::now();
+                let _ = engine
+                    .run(snapshot, &selected)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                started.elapsed()
+            })
+            .collect();
+        println!(
+            "    {label:<32} min {:>6.1} ms   p50 {:>6.1} ms   p95 {:>6.1} ms",
+            percentile(&mut times, 0.0),
+            percentile(&mut times, 0.5),
+            percentile(&mut times, 0.95)
+        );
+    };
+    // join columns are reused (they depend on the data only); answers aren't
+    time(&format!("fresh selections ({}):", combos.len()), &combos);
+    time(&format!("toggled back ({}):", combos.len()), &combos);
 }
