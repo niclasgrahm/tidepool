@@ -4,8 +4,34 @@
     {
       "name": "tidepool",
       "runtimeExecutable": "target/debug/tidepool",
-      "runtimeArgs": ["serve", "--config", "target/demo-config", "--listen", "127.0.0.1:7070", "--ui-dir", "frontend/dist", "--data", "target/demo-data"],
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/demo-config",
+        "--listen",
+        "127.0.0.1:7070",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/demo-data"
+      ],
       "port": 7070
+    },
+    {
+      "name": "tidepool-both",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/both-config",
+        "--listen",
+        "127.0.0.1:7071",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/both-data"
+      ],
+      "port": 7071
     }
   ]
 }

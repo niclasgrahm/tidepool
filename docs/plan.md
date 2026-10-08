@@ -969,11 +969,13 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
   - a `docker compose` integration test where Kayak's dummy/MQTT input fills a Tidepool table, and `POST /v1/query` row counts match what Kayak's history says it sent
   - retries after a forced 503 produce no duplicates (idempotency)
 
+**Status: done 2026-10-08** (in the Kayak repo: `src/outputs/tidepool.rs`, a `tidepool` connection kind, the `sensors_to_tidepool` example pipeline, the site's "tidepool" page). An offline suite against a fake Tidepool on a loopback port that dedups by `Idempotency-Key` as the real one does: the NDJSON body and headers, every startup mismatch (unknown column, wrong type, null into a required column, a required column nothing writes, no such table), a `400` quoted and not retried, the table read again after a refusal, and a `503` after the write landed retried under the same key with the rows written once (a key minted per attempt fails it). `just demo-check` is the compose test: the demo on its own ports, Tidepool cut off the network for six seconds midway, then Tidepool's `readings` rows must equal the messages Kayak's history says it handed the output, with no output errors. The demo now uses the `tidepool` output. Changes from §15.2: the wire types are written out in Kayak rather than taken from `tidepool-protocol`, because the two repositories don't share a workspace and Kayak builds on its own CI; `emit` retries a busy or unreachable server itself for up to `retry_seconds` (Kayak's run loop drops a batch whose `emit` fails, so backpressure handled there would lose data); schema drift is detected by a refusal (a `400`, `404` or `409`) rather than a config version in the response, after which the next batch re-reads the table; the epoch goes to Kayak's debug log; Arrow IPC is not done. Tidepool's idempotency keys are still in memory, so a retry across a Tidepool *restart* can write a batch twice.
+
 **Total:** roughly 26–35 engineer-weeks to v0.1.
 
 ### After v0.1 (ordered by expected value)
 
-1. Bidirectional filtering for filter widgets and selections (§5.4)
+1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
 2. Late binding of dimension attributes (no fact rescans on dimension upserts)
 3. Percentiles/median, approximate distinct
 4. Segment compaction and dictionary compaction

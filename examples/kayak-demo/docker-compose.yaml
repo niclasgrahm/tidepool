@@ -28,7 +28,7 @@ services:
       context: ../..
     image: tidepool:demo
     command: ["serve", "--config", "/demo", "--data", "/data", "--listen", "0.0.0.0:7070"]
-    ports: ["7070:7070"]
+    ports: ["${TIDEPOOL_PORT:-7070}:7070"]
     volumes:
       - ./tidepool:/demo
       - tidepool-data:/data
@@ -41,7 +41,7 @@ services:
     command: ["--config", "/pipelines/config.yaml"]
     environment:
       LEPTOS_SITE_ADDR: 0.0.0.0:6767
-    ports: ["6767:6767"]
+    ports: ["${KAYAK_PORT:-6767}:6767"]
     volumes:
       - ./kayak:/pipelines
 
