@@ -60,6 +60,9 @@ pub struct DomainId(pub ColumnId);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub server: ServerConfig,
+    /// Which way selections flow along relationships.
+    #[serde(default)]
+    pub direction: Direction,
     /// The Ossie model's name, or `None` without a model file.
     pub name: Option<String>,
     pub tables: Vec<Table>,
@@ -102,6 +105,16 @@ impl Model {
             column.map_or("?", |c| c.name.as_str())
         )
     }
+}
+
+/// Which way selections flow along relationships (plan D5, §5.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Direction {
+    /// From the one side to the many side only.
+    #[default]
+    OneToMany,
+    /// Both ways: a selection on a fact narrows its dimensions too.
+    Both,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

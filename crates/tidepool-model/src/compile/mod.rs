@@ -82,6 +82,7 @@ pub fn compile(set: &ConfigSet, previous: &Catalog) -> (Option<Compiled>, Diagno
 
     let model = Model {
         server,
+        direction: semantic.direction,
         name: set.model.as_ref().map(|m| m.value.name.clone()),
         tables,
         datasets: semantic.datasets,

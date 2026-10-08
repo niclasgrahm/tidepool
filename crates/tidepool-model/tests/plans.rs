@@ -266,3 +266,11 @@ scenario!(
         ),
     ]
 );
+scenario!(
+    selections_flow_both_ways,
+    [Replace(
+        "model.ossie.yaml",
+        r#"data: '{"filter_direction": "one_to_many"}'"#,
+        r#"data: '{"filter_direction": "both"}'"#
+    )]
+);

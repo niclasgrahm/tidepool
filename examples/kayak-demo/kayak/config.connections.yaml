@@ -2,3 +2,6 @@ plant:
   type: mqtt
   host: mosquitto
   port: 1883
+tidepool:
+  type: tidepool
+  url: http://tidepool:7070

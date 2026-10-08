@@ -1,6 +1,7 @@
-# Plant topics → Tidepool tables. The publisher sends rows shaped as the
-# tables are, so each pipeline only batches (Tidepool takes a JSON array
-# of rows per request) and posts.
+# Plant topics → Tidepool tables, through Kayak's `tidepool` output: the
+# table is read when a pipeline starts and the mapping checked against it,
+# each batch is one request with an idempotency key, and a busy or
+# unreachable Tidepool is retried without writing anything twice.
 pipelines:
 - id: machines
   inputs:
@@ -10,9 +11,10 @@ pipelines:
     qos: at_least_once
   transforms: []
   outputs:
-  - type: http
-    url: http://tidepool:7070/v1/tables/machines/rows
-    body: batch
+  # the publisher sends rows shaped as the table is: sent as they are
+  - type: tidepool
+    connection: tidepool
+    table: machines
 - id: readings
   inputs:
   - type: mqtt
@@ -25,9 +27,19 @@ pipelines:
     seconds: 1
     max_messages: 5000
   outputs:
-  - type: http
-    url: http://tidepool:7070/v1/tables/readings/rows
-    body: batch
+  # mapped column by column: a type Tidepool can't take, or a column it
+  # needs that nothing writes, stops the pipeline at startup and says so
+  - type: tidepool
+    connection: tidepool
+    table: readings
+    columns:
+    - { name: machine_id, type: text, nullable: false }
+    - { name: at, type: timestamp, nullable: false }
+    - { name: temperature, type: float, nullable: false }
+    - { name: vibration, type: float, nullable: false }
+    - { name: speed, type: integer, nullable: false }
+    - { name: produced, type: integer, nullable: false }
+    - { name: rejected, type: integer, nullable: false }
 - id: stoppages
   inputs:
   - type: mqtt
@@ -36,6 +48,6 @@ pipelines:
     qos: at_least_once
   transforms: []
   outputs:
-  - type: http
-    url: http://tidepool:7070/v1/tables/stoppages/rows
-    body: batch
+  - type: tidepool
+    connection: tidepool
+    table: stoppages

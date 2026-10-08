@@ -529,3 +529,18 @@ case!(
     )]
 );
 case!(dashboards_without_a_model, [Remove("model.ossie.yaml")]);
+case!(
+    both_ways_with_a_loop,
+    [
+        Replace(
+            "model.ossie.yaml",
+            r#"data: '{"filter_direction": "one_to_many"}'"#,
+            r#"data: '{"filter_direction": "both"}'"#
+        ),
+        Replace(
+            "model.ossie.yaml",
+            "  - name: order_product\n",
+            "  - name: billed_to\n    from: orders\n    to: customers\n    from_columns: [customer_id]\n    to_columns: [customer_id]\n    custom_extensions:\n      - vendor_name: TIDEPOOL\n        data: '{\"role\": \"billing\"}'\n  - name: order_product\n"
+        ),
+    ]
+);

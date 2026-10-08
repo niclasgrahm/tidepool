@@ -22,7 +22,8 @@ What's where:
 | | |
 |---|---|
 | `plant/publish.sh` | the simulated plant: six machines on two lines (`mosquitto_pub` and `awk`) |
-| `kayak/config.yaml` | three pipelines: `plant/…` topics → buffer → Kayak's `http` output → `POST /v1/tables/{table}/rows` |
+| `kayak/config.yaml` | three pipelines: `plant/…` topics → buffer → Kayak's `tidepool` output → `POST /v1/tables/{table}/rows` |
+| `check.sh` | the integration test of the two (`just demo-check`): the demo on its own ports, Tidepool cut off the network midway, then its row count compared with what Kayak sent |
 | `tidepool/` | the Tidepool project: `machines`, `readings`, `stoppages`, metrics, the `plant` dashboard |
 
 Things to try: click a machine or a stoppage reason to select it; open
@@ -30,6 +31,8 @@ Config and add a metric (say `MIN(readings.temperature)`) and put it on the
 dashboard, without restarting anything; `docker compose restart tidepool`
 and see the data come back from its volume.
 
-Kayak's generic `http` output is used here. Its dedicated `tidepool` output
-(Kayak milestone K1: column types checked at startup, idempotency keys) will
-replace it.
+Kayak writes through its `tidepool` output: each pipeline reads its table when
+it starts and checks the mapping against it (`readings` maps every column;
+try changing a type in `kayak/config.yaml` and restarting Kayak), every batch
+carries an idempotency key, and a busy or unreachable Tidepool is retried
+without writing anything twice.

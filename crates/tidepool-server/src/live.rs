@@ -512,6 +512,12 @@ fn selection_message(model: &Model, inner: &SessionState) -> ServerMessage {
                         from: from.as_ref().map(json),
                         to: to.as_ref().map(json),
                     },
+                    Condition::Set(set) => SelectedField {
+                        field,
+                        values: Some(set.values().iter().map(json).collect()),
+                        from: None,
+                        to: None,
+                    },
                 }
             })
             .collect(),

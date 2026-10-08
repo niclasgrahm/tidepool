@@ -573,6 +573,14 @@ fn dashboards(plan: &mut Plan, old: &Model, new: &Model) {
 }
 
 fn settings(plan: &mut Plan, old: &Model, new: &Model) {
+    if old.direction != new.direction {
+        let name = |d: crate::ir::Direction| match d {
+            crate::ir::Direction::OneToMany => "one_to_many",
+            crate::ir::Direction::Both => "both",
+        };
+        plan.push(Op::Change, "setting", "filter_direction", ChangeClass::Safe)
+            .detail(format!("{} → {}", name(old.direction), name(new.direction)));
+    }
     let (a, b) = (&old.server, &new.server);
     let mut setting = |name: &str, before: String, after: String, restart: bool| {
         if before != after {

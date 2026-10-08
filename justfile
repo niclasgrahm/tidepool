@@ -99,6 +99,10 @@ docker:
 demo:
   cd examples/kayak-demo && docker compose up --build
 
+# the Kayak ↔ Tidepool integration test: the demo on its own ports, an outage midway, row counts compared
+demo-check:
+  examples/kayak-demo/check.sh
+
 # the DuckDB oracle at depth, release build (args: number of seeds)
 oracle seeds="400":
   TIDEPOOL_ORACLE_SEEDS={{seeds}} cargo test --release -p tidepool-oracle

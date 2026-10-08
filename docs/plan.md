@@ -233,7 +233,7 @@ custom_extensions:
 | metric | `format` | display hint: `currency:EUR`, `percent`, `int`, … |
 | field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
-| model | `filter_direction` | `one_to_many` (v1 only value) |
+| model | `filter_direction` | `one_to_many` (default) or `both`: selections also flow from the many side to the one side (§5.4) |
 
 Only `OSSIE_SQL_2026` and `ANSI_SQL` are read (in that order of preference). Other dialects in the file are kept but ignored, so a model can be shared with other Ossie tools. A YAML gotcha the validator explains: in a `{ … }` flow mapping a comma ends the value, so write `type: "decimal(14,2)"` quoted.
 
@@ -541,13 +541,22 @@ For a filter on field F of table T, the widget shows each value as one of:
 - **possible**: occurs in rows of T passing `filter(T)` computed *without F's own selection* (Qlik semantics: alternatives in the same field stay visible)
 - **excluded**: everything else
 
-The possible set is computed as a code bitset by scanning T's passing rows for F's codes. With one-directional filtering, a filter on a dimension field reflects selections on that dimension and on anything upstream of it, but not selections on facts. This is a known limitation of D5, and the UI should show it honestly.
+The possible set is computed as a code bitset by scanning T's passing rows for F's codes. With one-directional filtering, a filter on a dimension field reflects selections on that dimension and on anything upstream of it, but not selections on facts. This is a known limitation of D5, and the UI should show it honestly. `filter_direction: both` lifts it (§5.4).
 
 Large filter lists are served windowed: the client requests `(offset, limit, search, sort)` and the server answers from the bitsets and the dictionary sort permutation.
 
-### 5.4 Prepared for bidirectional (later)
+### 5.4 Both ways (`filter_direction: both`)
 
-Bidirectional propagation adds a reverse pass: `fact passing rows → present key codes → filter dimension rows`. This needs a fixpoint over the relationship tree (one pass up, one pass down). Steps 1–4 above stay the same. The extension point is the `passing_keys` computation; nothing else changes.
+**Status: done 2026-10-08, after v0.1.** Opt in per model with the model-level extension `{"filter_direction": "both"}`. Selecting a product category then narrows customers to those who bought from it, and through them everything else related to customers, as in Qlik.
+
+It's message passing on the relationship tree (`tidepool-engine::assoc`). The message along a relationship from its many side to its one side is the set of foreign keys present in the many side's rows that pass what's selected on that side, itself including the messages into that side from further away. A query anchored on T gets, for every table T reaches many → one, the messages from every *other* relationship into that table, as one more condition on the table's key (`Condition::Set`). From there the one-directional engine (steps 1–4 above) applies them like any selection, on both executors. So nothing below the planner changed.
+
+- Relationships must form a tree: the compiler refuses a loop under `both` (it would make the answer depend on the order messages go round). Role-playing relationships (two between the same tables) are loops.
+- A side of the tree with nothing selected sends no message, so a customer without orders stays possible while only a region is selected (Qlik does the same).
+- A NULL foreign key relates to nothing. Relationships over more than one column send no message.
+- Messages are kept per epoch in the `Engine`, keyed by relationship and selection, so the visuals and filter lists of one dashboard compute each message once. Under `both`, a query's relevant selection (§6.6) is the whole selection: anything selected anywhere connected can change it, so fewer sessions share subscriptions.
+- `ignore_selection` applies first: an ignored field sends nothing either.
+- The oracle generates `both` for half its schemas (a second fact, a snowflake parent and nullable foreign keys give messages to carry) and builds the same thing in SQL as `key IN (SELECT fk FROM … WHERE …)`, recursively. It catches a planted bug that sends messages from empty sides, or that leaves out the messages a message itself carries.
 
 ---
 
@@ -963,11 +972,13 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
   - a `docker compose` integration test where Kayak's dummy/MQTT input fills a Tidepool table, and `POST /v1/query` row counts match what Kayak's history says it sent
   - retries after a forced 503 produce no duplicates (idempotency)
 
+**Status: done 2026-10-08** (in the Kayak repo: `src/outputs/tidepool.rs`, a `tidepool` connection kind, the `sensors_to_tidepool` example pipeline, the site's "tidepool" page). An offline suite against a fake Tidepool on a loopback port that dedups by `Idempotency-Key` as the real one does: the NDJSON body and headers, every startup mismatch (unknown column, wrong type, null into a required column, a required column nothing writes, no such table), a `400` quoted and not retried, the table read again after a refusal, and a `503` after the write landed retried under the same key with the rows written once (a key minted per attempt fails it). `just demo-check` is the compose test: the demo on its own ports, Tidepool cut off the network for six seconds midway, then Tidepool's `readings` rows must equal the messages Kayak's history says it handed the output, with no output errors. The demo now uses the `tidepool` output. Changes from §15.2: the wire types are written out in Kayak rather than taken from `tidepool-protocol`, because the two repositories don't share a workspace and Kayak builds on its own CI; `emit` retries a busy or unreachable server itself for up to `retry_seconds` (Kayak's run loop drops a batch whose `emit` fails, so backpressure handled there would lose data); schema drift is detected by a refusal (a `400`, `404` or `409`) rather than a config version in the response, after which the next batch re-reads the table; the epoch goes to Kayak's debug log; Arrow IPC is not done. Tidepool's idempotency keys are still in memory, so a retry across a Tidepool *restart* can write a batch twice.
+
 **Total:** roughly 26–35 engineer-weeks to v0.1.
 
 ### After v0.1 (ordered by expected value)
 
-1. Bidirectional filtering for filter widgets and selections (§5.4)
+1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
 2. Late binding of dimension attributes (no fact rescans on dimension upserts)
 3. Percentiles/median, approximate distinct
 4. Segment compaction and dictionary compaction

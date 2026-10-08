@@ -371,3 +371,74 @@ async fn the_example_kpi_compares_with_the_year_before_the_selected_dates() {
     assert_eq!(rows(&frame, "kpi_revenue"), json!([[null]]));
     assert_eq!(visual(&frame, "kpi_revenue")["compare"], "15.00");
 }
+
+/// A filter's values in a frame; `None` when they didn't change.
+fn filter_values(frame: &Value, field: &str) -> Option<Value> {
+    frame["filters"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["field"] == field))
+        .map(|filter| filter["values"].clone())
+}
+
+/// Selecting a category with `filter_direction: both` narrows regions to
+/// those of customers who bought from it, through orders.
+async fn regions_after_selecting_paddles(direction: &str) -> (Option<Value>, Value) {
+    let model = retail_with(
+        "model.ossie.yaml",
+        r#"{"filter_direction": "one_to_many"}"#,
+        &format!(r#"{{"filter_direction": "{direction}"}}"#),
+    );
+    let (state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    post(
+        &state,
+        "/v1/tables/products/rows?wait=visible",
+        &json!([{"product_id": "p2", "name": "Paddle", "category": "paddles", "list_price": "90.00"}]),
+    )
+    .await;
+    let mut paddle = order("o3", "c1", "paid", "3.00");
+    paddle["product_id"] = json!("p2");
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([paddle]),
+    )
+    .await;
+
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    next(&mut socket, "frame").await;
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "products.category", "values": ["paddles"]}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    (
+        filter_values(&frame, "customers.region"),
+        rows(&frame, "by_region"),
+    )
+}
+
+#[tokio::test]
+async fn selections_flow_from_orders_to_customers_when_the_model_says_both() {
+    let (regions, by_region) = regions_after_selecting_paddles("both").await;
+    assert_eq!(
+        regions,
+        Some(json!([
+            {"value": "north", "state": "possible", "rows": 1},
+            {"value": "south", "state": "excluded", "rows": 0},
+        ]))
+    );
+    assert_eq!(by_region, json!([["north", "3.00"]]));
+
+    // one way only, every customer stays possible: the list doesn't change,
+    // so the frame leaves it out
+    let (regions, by_region) = regions_after_selecting_paddles("one_to_many").await;
+    assert_eq!(regions, None);
+    assert_eq!(by_region, json!([["north", "3.00"]]));
+}

@@ -359,6 +359,16 @@ pub(crate) fn prepare<'s>(
                             .map(|(raw, _)| raw)
                             .collect(),
                     ),
+                    Condition::Set(set) => Test::IntIn(
+                        set.values()
+                            .iter()
+                            .map(|v| raw_ceil(v, read.layout.column_type))
+                            .collect::<Option<Vec<_>>>()?
+                            .into_iter()
+                            .filter(|(_, exact)| *exact)
+                            .map(|(raw, _)| raw)
+                            .collect(),
+                    ),
                     Condition::Range { from, to } => {
                         let bound = |b: &Option<Scalar>| match b {
                             None => Some(None),

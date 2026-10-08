@@ -111,6 +111,20 @@ computed once per distinct value, so it's as cheap as a column.
 along them in that direction: a selection on `customers.region` filters
 `orders`, and a selection on an order field doesn't filter customers.
 
+To have selections flow both ways, as in Qlik, set it on the model:
+
+```yaml
+custom_extensions:
+  - vendor_name: TIDEPOOL
+    data: '{"filter_direction": "both"}'
+```
+
+Selecting a product category then also narrows customers to those who
+ordered from it (and their region filter shows the other regions as
+excluded). The relationships must form a tree: two paths between the same
+tables (say an order's billing and shipping customer) are refused, because
+the answer would depend on which way a selection went round.
+
 **Metrics** are aggregate SQL: `SUM`, `COUNT`, `COUNT(DISTINCT …)`, `AVG`,
 `MIN`, `MAX`, with `FILTER (WHERE …)`, arithmetic, `CASE`, `COALESCE`, date
 functions. A metric is computed over the rows of the table its expression
