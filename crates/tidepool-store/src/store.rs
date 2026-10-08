@@ -565,9 +565,129 @@ impl Store {
         }
     }
 
+    /// A store holding recovered data: `segments` per table (with their
+    /// delete bitmaps), dictionaries with every code those segments use,
+    /// and per table (live rows, rows written in total). Primary-key
+    /// indexes are rebuilt from the key columns. Recovery only.
+    #[must_use]
+    pub fn restore(
+        model: Arc<Model>,
+        seal_rows: usize,
+        epoch: u64,
+        dicts: HashMap<DictId, Dictionary>,
+        segments: HashMap<TableId, Vec<SegmentView>>,
+        counts: &HashMap<TableId, (u64, u64)>,
+    ) -> Self {
+        let mut store = Self::with_seal_rows(model, seal_rows);
+        store.epoch = epoch;
+        store.dicts = dicts;
+        for (id, views) in segments {
+            let Some(table) = store.tables.get_mut(&id) else {
+                continue;
+            };
+            store.versions = views
+                .iter()
+                .map(|v| v.version)
+                .fold(store.versions, u64::max);
+            let end = views.last().map_or(0, |v| v.data.end());
+            for view in &views {
+                let Some(pk) = table.pk.as_mut() else { break };
+                let mut key = vec![0u32; table.key_columns.len()];
+                for offset in 0..view.data.rows {
+                    if view.deletes.contains(offset) {
+                        continue;
+                    }
+                    for (slot, column) in table.key_columns.iter().enumerate() {
+                        key[slot] = match view.data.columns[*column].get(offset as usize) {
+                            Raw::Code(code) => code,
+                            _ => NULL,
+                        };
+                    }
+                    pk.insert(&key, view.data.start + u64::from(offset));
+                }
+            }
+            table.segments = views;
+            table.next_row = end;
+            table.builder_start = end;
+            let (live, written) = counts.get(&id).copied().unwrap_or((0, 0));
+            table.live_rows = live;
+            table.written_total = written;
+            table.dirty = true;
+        }
+        store
+    }
+
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Retention (plan §4.6): delete every row of sealed segments whose
+    /// event time is entirely older than the table's retention as of `now`.
+    /// Returns how many rows went. Expiry isn't logged: after a restart,
+    /// rows expired since the last checkpoint come back until it runs again.
+    pub fn expire(&mut self, now: std::time::SystemTime) -> usize {
+        let now = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        let mut expired = 0;
+        let versions = &mut self.versions;
+        for table in self.tables.values_mut() {
+            let (Some(event), Some(retention)) = (table.table.event_time, table.table.retention)
+            else {
+                continue;
+            };
+            let Some(column) = table.layouts.iter().position(|l| l.id == event) else {
+                continue;
+            };
+            let keep = i64::try_from(retention.0.as_micros()).unwrap_or(i64::MAX);
+            let cutoff = match table.layouts[column].column_type {
+                ColumnType::Date => (now - keep).div_euclid(86_400_000_000),
+                _ => now - keep,
+            };
+            let old: Vec<(u64, u32)> = table
+                .segments
+                .iter()
+                .filter(|s| s.data.sealed && table.layouts[column].dict.is_none())
+                .filter(|s| {
+                    s.data.columns[column]
+                        .range()
+                        .is_some_and(|(_, max)| max < cutoff)
+                })
+                .filter(|s| s.deletes.len() < u64::from(s.data.rows))
+                .map(|s| (s.data.start, s.data.rows))
+                .collect();
+            for (start, rows) in old {
+                for offset in 0..rows {
+                    let row = start + u64::from(offset);
+                    let deleted = table
+                        .segment_of(row)
+                        .is_none_or(|s| s.deletes.contains(offset));
+                    if deleted {
+                        continue;
+                    }
+                    if table.pk.is_some() {
+                        let key: Vec<u32> = table
+                            .key_columns
+                            .iter()
+                            .map(|c| match table.stored(row, *c) {
+                                Some(Raw::Code(code)) => code,
+                                _ => NULL,
+                            })
+                            .collect();
+                        if let Some(pk) = table.pk.as_mut()
+                            && pk.get(&key) == Some(row)
+                        {
+                            pk.remove(&key);
+                        }
+                    }
+                    table.delete_row(row, versions);
+                    table.dirty = true;
+                    expired += 1;
+                }
+            }
+        }
+        expired
     }
 
     #[must_use]

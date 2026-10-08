@@ -62,6 +62,14 @@ enum Command {
         #[arg(long)]
         metrics: Option<String>,
     },
+    /// Restart time: the reference dataset checkpointed, then recovered.
+    Restart {
+        #[arg(long, default_value_t = 10_000_000)]
+        orders: u64,
+        /// Where to write the data (removed afterwards).
+        #[arg(long, default_value = "target/bench-restart")]
+        dir: std::path::PathBuf,
+    },
     /// Feed a running server: the retail dimensions, then orders, until stopped.
     Feed {
         /// The server.
@@ -285,6 +293,7 @@ async fn over_http(
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // one arm per subcommand
 async fn main() {
     match Cli::parse().command {
         Command::Query {
@@ -299,6 +308,15 @@ async fn main() {
             query::measure_epochs(&mut store, snapshot, 20, 100_000);
         }
         Command::Feed { server, rate } => live::feed(&server, rate).await,
+        Command::Restart { orders, dir } => {
+            let _ = std::fs::remove_dir_all(&dir);
+            println!(
+                "restart: reference dataset, {orders} orders, in {}\n",
+                dir.display()
+            );
+            query::measure_restart(&model(), orders, &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         Command::Live {
             orders,
             sessions,

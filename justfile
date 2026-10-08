@@ -78,6 +78,15 @@ feed *args:
 bench-live *args:
   cargo run --release -p tidepool-bench -- live {{args}}
 
+# durability at depth: 1,000 crash points, 25 kill -9 cycles
+crash:
+  TIDEPOOL_CRASH_SEEDS=100 cargo test --release -p tidepool-store --test durability
+  TIDEPOOL_KILL_LOOPS=25 cargo test --release -p tidepool --test crash
+
+# restart time of the reference dataset (args: --orders N)
+bench-restart *args:
+  cargo run --release -p tidepool-bench -- restart {{args}}
+
 # the DuckDB oracle at depth, release build (args: number of seeds)
 oracle seeds="400":
   TIDEPOOL_ORACLE_SEEDS={{seeds}} cargo test --release -p tidepool-oracle

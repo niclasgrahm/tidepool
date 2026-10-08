@@ -45,6 +45,21 @@ impl Packed {
         self.len
     }
 
+    /// Width, length and words, for writing to disk.
+    #[must_use]
+    pub fn parts(&self) -> (u8, usize, &[u64]) {
+        (self.width, self.len, &self.words)
+    }
+
+    /// A packed array read back from disk; `None` if the parts don't fit
+    /// together (a corrupt file).
+    #[must_use]
+    pub fn from_parts(width: u8, len: usize, words: Vec<u64>) -> Option<Self> {
+        // what `pack` allocates: the bits, rounded up, and one spare word
+        let wanted = (len * usize::from(width)).div_ceil(64) + 1;
+        (width <= 64 && words.len() == wanted).then_some(Self { width, len, words })
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -191,6 +206,18 @@ impl ExactSizeIterator for PackedIter<'_> {}
 pub struct Bits(Vec<u64>);
 
 impl Bits {
+    /// The words, for writing to disk.
+    #[must_use]
+    pub fn words(&self) -> &[u64] {
+        &self.0
+    }
+
+    /// Bits read back from disk.
+    #[must_use]
+    pub fn from_words(words: Vec<u64>) -> Self {
+        Self(words)
+    }
+
     #[must_use]
     #[inline]
     pub fn get(&self, index: usize) -> bool {

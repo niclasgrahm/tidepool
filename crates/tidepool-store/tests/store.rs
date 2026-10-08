@@ -359,3 +359,96 @@ fn joined_columns_share_one_dictionary() {
         Some(1)
     );
 }
+
+fn order_at(id: u32, at: &str) -> String {
+    format!(
+        r#"{{"order_id":"o{id}","customer_id":"c1","product_id":"p1","status":"paid","ordered_at":"{at}","quantity":1,"amount":"1.00"}}"#
+    )
+}
+
+#[test]
+fn retention_drops_sealed_segments_older_than_the_window() {
+    // orders keep 730 days of `ordered_at`
+    let mut store = Store::with_seal_rows(model(), 4);
+    let old: Vec<String> = (0..4)
+        .map(|i| order_at(i, "2020-01-01T00:00:00Z"))
+        .collect();
+    write(
+        &mut store,
+        "orders",
+        Op::Write,
+        &format!("[{}]", old.join(",")),
+    );
+    let _ = publish(&mut store);
+    let recent: Vec<String> = (4..8)
+        .map(|i| order_at(i, "2026-09-01T00:00:00Z"))
+        .collect();
+    write(
+        &mut store,
+        "orders",
+        Op::Write,
+        &format!("[{}]", recent.join(",")),
+    );
+    let _ = publish(&mut store);
+
+    let now = std::time::UNIX_EPOCH + std::time::Duration::from_hours(497_500); // 2026-10
+    assert_eq!(store.expire(now), 4);
+    let snapshot = publish(&mut store);
+    let orders = table(&snapshot.model, "orders");
+    assert_eq!(snapshot.table(orders).map(|t| t.live_rows), Some(4));
+    // nothing more to do the second time
+    assert_eq!(store.expire(now), 0);
+}
+
+#[test]
+fn the_writer_recovers_its_data_directory() {
+    use tidepool_store::{WriterConfig, spawn};
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("{err}"),
+    };
+    let config = WriterConfig {
+        data: Some(dir.path().to_path_buf()),
+        ..WriterConfig::default()
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+        Ok(runtime) => runtime,
+        Err(err) => panic!("{err}"),
+    };
+    let model = model();
+    let orders = table(&model, "orders");
+    {
+        let (writer, thread) = match spawn(Arc::clone(&model), config.clone()) {
+            Ok(started) => started,
+            Err(err) => panic!("{err}"),
+        };
+        let spec = model
+            .table_named("orders")
+            .unwrap_or_else(|| panic!("no orders"));
+        let body = format!(
+            "[{},{}]",
+            order_at(1, "2026-09-01T00:00:00Z"),
+            order_at(2, "2026-09-01T00:00:00Z")
+        );
+        let batch =
+            json_array(spec, Shape::Rows, body.as_bytes()).unwrap_or_else(|r| panic!("{r:?}"));
+        let receipt = writer
+            .apply(orders, Op::Write, batch)
+            .unwrap_or_else(|_| panic!("busy"));
+        // acknowledged means logged
+        let receipt = runtime
+            .block_on(receipt)
+            .unwrap_or_else(|_| panic!("stopped"));
+        assert_eq!(receipt.applied.written, 2);
+        drop(writer);
+        let _ = thread.join();
+    }
+    let (writer, _thread) = match spawn(Arc::clone(&model), config) {
+        Ok(started) => started,
+        Err(err) => panic!("{err}"),
+    };
+    assert_eq!(
+        writer.snapshot().table(orders).map(|t| t.live_rows),
+        Some(2)
+    );
+}

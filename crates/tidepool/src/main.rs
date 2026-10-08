@@ -42,6 +42,11 @@ enum Command {
         /// the binary. For development, against a frontend being rebuilt.
         #[arg(long)]
         ui_dir: Option<PathBuf>,
+        /// Keep data here (write-ahead log, checkpoints); overrides
+        /// `data_dir` in tidepool.yaml. Without either, data lives in memory
+        /// only and is gone when the server stops.
+        #[arg(long)]
+        data: Option<PathBuf>,
     },
     /// Check a config directory: every file, and how they fit together.
     Validate {
@@ -69,7 +74,8 @@ fn main() -> ExitCode {
             config,
             listen,
             ui_dir,
-        } => match run_server(config.as_deref(), listen, ui_dir) {
+            data,
+        } => match run_server(config.as_deref(), listen, ui_dir, data) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err:#}");
@@ -84,6 +90,7 @@ async fn run_server(
     config: Option<&std::path::Path>,
     listen: Option<SocketAddr>,
     ui_dir: Option<PathBuf>,
+    data: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -117,8 +124,23 @@ async fn run_server(
     let listen = listen
         .or(model.server.listen)
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7070)));
+    // a relative data_dir is relative to the config directory
+    let data = data.or_else(|| {
+        let dir = PathBuf::from(model.server.data_dir.as_ref()?);
+        Some(match config {
+            Some(config) if dir.is_relative() => config.join(dir),
+            _ => dir,
+        })
+    });
+    if let Some(dir) = &data {
+        tracing::info!("data in {}", dir.display());
+    } else {
+        tracing::warn!("no data directory (--data or data_dir): data lives in memory only");
+    }
     let writer = WriterConfig {
         epoch_interval: model.server.epoch_interval.0,
+        data,
+        durability: model.server.durability,
         ..WriterConfig::default()
     };
     tracing::info!(

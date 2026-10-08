@@ -320,3 +320,49 @@ fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], by: &str, runs: usize)
     time(&format!("fresh selections ({}):", combos.len()), &combos);
     time(&format!("toggled back ({}):", combos.len()), &combos);
 }
+
+/// Restart time (plan §2.3): the reference dataset checkpointed to `dir`,
+/// everything dropped, then recovered from disk.
+pub fn measure_restart(model: &Arc<Model>, orders: u64, dir: &std::path::Path) {
+    use tidepool_config::server::Durability;
+    use tidepool_store::persist::Durable;
+    let (store, snapshot) = build(model, orders);
+    drop(store);
+    let (durable, _, mut checkpoints) = Durable::open(
+        Arc::clone(model),
+        dir,
+        tidepool_store::store::DEFAULT_SEAL_ROWS,
+        Durability::Fsync,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    drop(durable);
+    let started = Instant::now();
+    checkpoints
+        .write(&snapshot, 0)
+        .unwrap_or_else(|e| panic!("{e}"));
+    println!(
+        "  checkpoint written in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    drop(snapshot);
+    drop(checkpoints);
+
+    let started = Instant::now();
+    let (_durable, recovered, _) = Durable::open(
+        Arc::clone(model),
+        dir,
+        tidepool_store::store::DEFAULT_SEAL_ROWS,
+        Durability::Fsync,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let elapsed = started.elapsed();
+    let live = model
+        .table_named("orders")
+        .and_then(|t| recovered.table(t.id))
+        .map_or(0, |t| t.live_rows);
+    assert_eq!(live, orders, "every order should be recovered");
+    println!(
+        "  restart: {orders} orders recovered in {:.2}s",
+        elapsed.as_secs_f64()
+    );
+}

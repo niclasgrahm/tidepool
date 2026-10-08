@@ -9,12 +9,15 @@
 
 mod arrow;
 pub mod batch;
+mod codec;
 pub mod column;
 pub mod dict;
+pub mod persist;
 pub mod store;
 pub mod value;
+pub mod wal;
 pub mod writer;
 
 pub use batch::{Batch, Rejected, RowError, Shape};
 pub use store::{Applied, Op, Snapshot, Store, TableSnapshot};
-pub use writer::{Busy, Receipt, WriterConfig, WriterHandle, spawn};
+pub use writer::{Busy, LogStatus, Receipt, WriterConfig, WriterHandle, spawn};

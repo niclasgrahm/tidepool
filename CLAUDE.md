@@ -35,6 +35,7 @@ just bench-query     # query latency on the reference dataset (args: --orders N 
 just bench-live      # freshness: 50 WebSocket sessions while ingesting 100k rows/s
 just feed            # keep a running server (`just run`) fed with retail data, to watch it live
 just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
+just crash           # 1,000 crash points and 25 kill -9 cycles (`just test` runs fewer)
 cargo run -p tidepool -- validate --config examples/retail    # check a config directory
 cargo run -p tidepool -- plan --config new/ --base old/       # what changes, and what it costs
 cargo insta review   # accept or reject changed golden snapshots (diagnostics, plans)
@@ -76,10 +77,10 @@ resolves names in expressions.)
 | `tidepool-config` | Apache-2.0 | serde types for every config file, JSON Schemas, diagnostics with `file:line:col` | M1 ✓ |
 | `tidepool-expr` | AGPL | SQL expressions: syntax + reference analysis (M1 ✓); type-check, kernels (M3) | M1/M3 |
 | `tidepool-model` | AGPL | compiled Model IR, cross-file validation, catalog of stable ids, diff → plan | M1 ✓ |
-| `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders | M2 ✓ / M5 (WAL) |
-| `tidepool-engine` | AGPL | selection engine, aggregation, caches, subscriptions | M3/M4 |
+| `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders, WAL and checkpoints | M2 ✓ / M5 ✓ |
+| `tidepool-engine` | AGPL | selection engine, aggregation, caches, incremental answers | M3 ✓ / M4 ✓ |
 | `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, lifecycle | M0 |
-| `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 |
+| `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 ✓ / M4 ✓ |
 | `tidepool` | AGPL | the binary: CLI and wiring | M0 |
 | `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
 | `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M0 shell, M6 |
@@ -176,6 +177,18 @@ One writer thread owns the `Store`; everything else reads immutable
 - **Decoding** (JSON, NDJSON, Arrow) is strict: values are checked, never
   coerced; a batch is all or nothing; every problem is listed by row and
   column. Decimals are parsed from their text, never through `f64`.
+
+**Durability** (`persist.rs`, `wal.rs`, plan §4.7): with a data directory
+the writer owns a `Durable` (store + WAL) instead of a bare `Store`. Every
+batch is logged before it's applied, and acknowledged only after the burst
+it came in is synced (group commit). Checkpoints are published snapshots
+written down on their own thread: immutable segments go to files once,
+dictionaries are appended, and the checkpoint file is written last,
+atomically. Recovery re-encodes dictionary values in code order, so the
+log replays to the same codes and row ids. Anything that changes what's
+written or how it's replayed must keep `tests/durability.rs` (1,000 power
+losses, including mid-checkpoint) and the `kill -9` loop
+(`crates/tidepool/tests/crash.rs`) green, and add a planted-bug check.
 
 Store tests run against the retail example's model (`tests/store.rs`); use
 `Store::with_seal_rows` with a small number to exercise sealing.
