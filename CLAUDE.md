@@ -186,8 +186,9 @@ One writer thread owns the `Store`; everything else reads immutable
 
 **Durability** (`persist.rs`, `wal.rs`, plan §4.7): with a data directory
 the writer owns a `Durable` (store + WAL) instead of a bare `Store`. Every
-batch is logged before it's applied, and acknowledged only after the burst
-it came in is synced (group commit). Checkpoints are published snapshots
+batch is logged as it's applied (with its idempotency key and response,
+when it has a key), and acknowledged only after the burst it came in is
+synced (group commit). Checkpoints are published snapshots
 written down on their own thread: immutable segments go to files once,
 dictionaries are appended, and the checkpoint file is written last,
 atomically. Recovery re-encodes dictionary values in code order, so the
@@ -222,8 +223,10 @@ Rows endpoints exist once in the endpoint table (`/v1/tables/{table}/rows`)
 and dispatch by name at request time, so a table added to the model works
 without touching the router. The OpenAPI document replaces the templated path
 with one typed path per table (`Row_<table>` / `Key_<table>` schemas).
-Decoding runs in `spawn_blocking`. `Idempotency-Key` is per table, in memory
-for 24 h (into the WAL in M5).
+Decoding runs in `spawn_blocking`. `Idempotency-Key` is per table and kept for
+24 h; with a data directory it's durable: the writer logs the key and the
+response in the batch's WAL record, checkpoints keep the live keys, and
+`AppState::with_writer` restores them (`tidepool_store::keys`).
 
 Access is enforced from the endpoint table: `auth::authorize` wraps every
 route with its declared `Access`, checking the bearer token configured for

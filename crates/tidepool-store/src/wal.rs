@@ -6,6 +6,10 @@
 //! whose dictionaries are restored to the checkpoint's lengths, gives the
 //! same codes and row ids again.
 //!
+//! A write sent with an `Idempotency-Key` carries the key, the time and
+//! the response it was acknowledged with ([`Keyed`]), so recovery can
+//! answer a retry of it (see [`crate::keys`]).
+//!
 //! A model change is a record too ([`Entry::Model`]), logged when the new
 //! model takes over: batches after it are in its tables' columns, and replay
 //! changes the model at the same point.
@@ -25,6 +29,7 @@ use tidepool_model::ir::TableId;
 
 use crate::batch::Batch;
 use crate::codec::{In, Out, corrupt, frame, sync_dir, unframe};
+use crate::keys::{self, Keyed};
 use crate::migrate::{ModelVersion, decode_version, encode_version};
 use crate::store::Op;
 use crate::value::Parsed;
@@ -46,6 +51,8 @@ pub enum Entry {
         table: TableId,
         op: Op,
         batch: Batch,
+        /// Its idempotency key and response, when it was sent with one.
+        key: Option<Keyed>,
     },
     /// The model changed to this version.
     Model(ModelVersion),
@@ -54,20 +61,32 @@ pub enum Entry {
 fn encode(lsn: u64, entry: &Entry) -> Vec<u8> {
     let mut out = Out::default();
     out.u64(lsn);
-    let (table, op, batch) = match entry {
+    let (table, op, batch, key) = match entry {
         Entry::Model(version) => {
             out.u32(0);
             out.u8(2);
             out.bytes(&encode_version(version));
             return out.0;
         }
-        Entry::Write { table, op, batch } => (table, op, batch),
+        Entry::Write {
+            table,
+            op,
+            batch,
+            key,
+        } => (table, op, batch, key),
     };
     out.u32(table.0);
-    out.u8(match op {
-        Op::Write => 0,
-        Op::Delete => 1,
+    // 0/1: a write/delete; 3/4: the same with a key (records written
+    // before keys were logged are 0/1, and still read)
+    out.u8(match (op, key) {
+        (Op::Write, None) => 0,
+        (Op::Delete, None) => 1,
+        (Op::Write, Some(_)) => 3,
+        (Op::Delete, Some(_)) => 4,
     });
+    if let Some(key) = key {
+        keys::put(&mut out, key);
+    }
     out.len(batch.rows);
     out.len(batch.columns.len());
     for column in &batch.columns {
@@ -104,9 +123,11 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
     let mut input = In::new(bytes);
     let lsn = input.u64()?;
     let table = TableId(input.u32()?);
-    let op = match input.u8()? {
-        0 => Op::Write,
-        1 => Op::Delete,
+    let (op, keyed) = match input.u8()? {
+        0 => (Op::Write, false),
+        1 => (Op::Delete, false),
+        3 => (Op::Write, true),
+        4 => (Op::Delete, true),
         2 => {
             return Ok(Record {
                 lsn,
@@ -114,6 +135,11 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
             });
         }
         _ => return Err(corrupt("record")),
+    };
+    let key = if keyed {
+        Some(keys::get(&mut input, table)?)
+    } else {
+        None
     };
     let rows = input.len()?;
     let count = input.len()?;
@@ -145,6 +171,7 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
                 columns,
                 shape: Vec::new(),
             },
+            key,
         },
     })
 }
@@ -260,11 +287,12 @@ impl Wal {
     }
 
     /// Log a write; durable after the next [`Wal::sync`]. Returns its LSN.
-    pub fn append(&mut self, table: TableId, op: Op, batch: &Batch) -> u64 {
+    pub fn append(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<Keyed>) -> u64 {
         self.log(&Entry::Write {
             table,
             op,
             batch: batch.clone(),
+            key,
         })
     }
 
@@ -377,8 +405,19 @@ mod tests {
         let (mut wal, old) =
             Wal::open(dir.path(), 0, Durability::Fsync).unwrap_or_else(|e| panic!("{e}"));
         assert!(old.is_empty());
+        let keyed = Keyed {
+            table: TableId(7),
+            key: "retry-me".into(),
+            at: 1_700_000_000_000,
+            applied: crate::store::Applied {
+                written: 2,
+                ..crate::store::Applied::default()
+            },
+            epoch: 5,
+        };
         for n in 0..3 {
-            wal.append(TableId(7), Op::Write, &batch(n));
+            let key = (n == 1).then(|| keyed.clone());
+            wal.append(TableId(7), Op::Write, &batch(n), key);
         }
         wal.sync().unwrap_or_else(|e| panic!("{e}"));
         let (path, synced) = wal.durable();
@@ -399,11 +438,18 @@ mod tests {
             vec![2, 3]
         );
         match &records[0].entry {
-            Entry::Write { batch: b, .. } => assert_eq!(*b, batch(1)),
+            Entry::Write { batch: b, key, .. } => {
+                assert_eq!(*b, batch(1));
+                assert_eq!(key.as_ref(), Some(&keyed));
+            }
             Entry::Model(_) => panic!("expected the second write"),
+        }
+        match &records[1].entry {
+            Entry::Write { key, .. } => assert_eq!(*key, None),
+            Entry::Model(_) => panic!("expected the third write"),
         }
         assert_eq!(std::fs::metadata(&path).map_or(0, |m| m.len()), synced);
         // appends continue the sequence
-        assert_eq!(wal.append(TableId(7), Op::Delete, &batch(9)), 4);
+        assert_eq!(wal.append(TableId(7), Op::Delete, &batch(9), None), 4);
     }
 }

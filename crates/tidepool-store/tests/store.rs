@@ -436,7 +436,7 @@ fn the_writer_recovers_its_data_directory() {
         let batch =
             json_array(spec, Shape::Rows, body.as_bytes()).unwrap_or_else(|r| panic!("{r:?}"));
         let receipt = writer
-            .apply(orders, Op::Write, batch)
+            .apply(orders, Op::Write, batch, None)
             .unwrap_or_else(|_| panic!("busy"));
         // acknowledged means logged
         let receipt = runtime

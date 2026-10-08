@@ -339,7 +339,7 @@ pub fn measure_restart(model: &Arc<Model>, orders: u64, dir: &std::path::Path) {
     drop(durable);
     let started = Instant::now();
     checkpoints
-        .write(&snapshot, 0)
+        .write(&snapshot, 0, &[])
         .unwrap_or_else(|e| panic!("{e}"));
     println!(
         "  checkpoint written in {:.1}s",

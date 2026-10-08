@@ -494,7 +494,7 @@ fn a_model_change_is_replayed_from_the_log_and_kept_by_checkpoints() {
     let apply = |durable: &mut Durable, name: &str, json: &str| {
         let model = Arc::clone(durable.store().model());
         let batch = decode(&model, name, Op::Write, json);
-        durable.apply(table(&model, name), Op::Write, &batch);
+        durable.apply(table(&model, name), Op::Write, &batch, None);
     };
     apply(&mut durable, "customers", &customers(0..5));
     apply(&mut durable, "orders", &orders(0..12));
@@ -502,7 +502,7 @@ fn a_model_change_is_replayed_from_the_log_and_kept_by_checkpoints() {
         panic!("a snapshot");
     };
     // a checkpoint before the change: the change itself is replayed
-    if let Err(err) = checkpoints.write(&snapshot, lsn) {
+    if let Err(err) = checkpoints.write(&snapshot, lsn, &[]) {
         panic!("{err}");
     }
     let migration = durable.store().plan_migration(v2.clone());
@@ -526,7 +526,7 @@ fn a_model_change_is_replayed_from_the_log_and_kept_by_checkpoints() {
     check_merged(&replayed, 9);
 
     // a checkpoint after the change holds the model and the rebuilt files
-    if let Err(err) = checkpoints.write(&replayed, lsn) {
+    if let Err(err) = checkpoints.write(&replayed, lsn, &[]) {
         panic!("{err}");
     }
     drop((durable, checkpoints, live));
@@ -562,7 +562,7 @@ fn the_writer_rebuilds_in_the_background_and_takes_the_new_epoch_interval() {
         let model = writer.snapshot().model.clone();
         let batch = decode(&model, name, Op::Write, json);
         let receipt = writer
-            .apply(table(&model, name), Op::Write, batch)
+            .apply(table(&model, name), Op::Write, batch, None)
             .unwrap_or_else(|_| panic!("busy"));
         runtime
             .block_on(receipt)

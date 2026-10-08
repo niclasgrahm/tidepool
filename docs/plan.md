@@ -443,7 +443,7 @@ query:   ?wait=visible                (respond only after the rows' epoch is pub
   - Output in every case: a normalized Arrow `RecordBatch`.
 - **Batches are atomic:** either the whole batch is accepted or none of it.
 - **Durability:** the normalized batch is appended to the WAL. The response is sent after group-commit fsync (`durability: fsync`) or immediately (`async`). Then the batch is queued for the writer thread.
-- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL. It's persisted inside the WAL records, so it survives restarts.
+- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data.
 - **Backpressure:** a bounded writer queue. When it's full, respond `503` with `Retry-After`.
 - **Discovery:**
   - `GET /v1/tables`: list tables
@@ -478,6 +478,7 @@ data/
 ```
 
 - **WAL records:** `(lsn, config_version, kind, table_id, payload)`. Kinds are `Append(batch)`, `Upsert(batch)`, `Delete(keys)`, `ConfigApplied(version)`, `SegmentSealed(table, segment_id, row_range)`.
+  - A write sent with an `Idempotency-Key` carries the key, the time it was written and the response it was acknowledged with (rows written/replaced/missing, epoch). The batch is applied before it's logged so the record can say what it did; neither is visible or acknowledged before the commit. (As built: write and delete records, with or without a key, and model changes; old records without keys are still read.)
   - Payload is Arrow IPC of the **raw normalized values**, not codes.
   - Each record carries a CRC32C. Group commit: one fsync per flush interval or batch.
 - **Determinism:** replaying the WAL from a checkpoint re-encodes values. Dictionaries are truncated to the checkpoint's recorded lengths before replay, so the same values get the same codes in the same order.
@@ -485,7 +486,7 @@ data/
   1. Flush dictionaries up to the current lengths.
   2. Write the delete bitmaps.
   3. Write a PK-index snapshot, or rebuild it on recovery from PK columns (for v1, rebuild — simpler).
-  4. Record the checkpoint LSN.
+  4. Record the checkpoint LSN, and the idempotency keys live as of it.
   5. Truncate WAL files that are entirely below the oldest kept checkpoint.
 - **Recovery:**
   1. Load the catalog.
@@ -493,8 +494,8 @@ data/
   3. mmap segment files.
   4. Load dictionaries, truncated to the checkpoint lengths.
   5. Rebuild PK indexes.
-  6. Replay WAL records after the checkpoint LSN into a fresh tail.
-  7. Publish the epoch.
+  6. Replay WAL records after the checkpoint LSN into a fresh tail, adding their idempotency keys to the checkpoint's (expired ones dropped).
+  7. Publish the epoch; the server answers retries from the recovered keys.
 - **Tiering:** sealed segments are mmap'd, so the OS pages cold segments out under memory pressure. Zone-map pruning avoids touching them for selective queries. Explicit eviction policies come later.
 
 ---
@@ -954,6 +955,8 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** v0.1 tagged; the quick-start goes from zero to a live dashboard in < 5 minutes; the Kayak demo runs from one `docker compose up`.
 
 ### K1: Kayak `tidepool` output (in the Kayak repo, 1–2 wks; any time after M2)
+
+**Status (Tidepool side):** `Idempotency-Key`s are durable with the writes they acknowledge (§4.5): logged in the batch's WAL record with its response, kept in checkpoints, rebuilt on recovery. A batch whose reply was lost to a restart can be retried under its key without writing twice, which K1's retry/backoff relies on. Covered by the crash suite (recovered keys equal the acknowledged ones at every crash point; planted bugs that drop keys from checkpoints or from replay fail it), the `kill -9` loop (the batch in flight at each kill is retried under its key, and the table must then hold exactly the acknowledged orders) and a restart test over HTTP. The output itself is still to do.
 - Built per §15.2, against `tidepool-protocol` (Apache-2.0) for the request/response types.
 - **Exit:**
   - Kayak's usual test bar: an offline test with a fake Tidepool (axum in process), plus an entry in `example_config/`

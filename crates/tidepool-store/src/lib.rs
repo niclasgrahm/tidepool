@@ -12,6 +12,7 @@ pub mod batch;
 mod codec;
 pub mod column;
 pub mod dict;
+pub mod keys;
 pub mod migrate;
 pub mod persist;
 pub mod store;

@@ -297,6 +297,105 @@ async fn a_retry_with_the_same_idempotency_key_writes_nothing() {
     assert_eq!(other.json()["written"], 1);
 }
 
+/// A server on the data directory `data`, checkpointing every `every`.
+fn on_disk(data: &std::path::Path, every: std::time::Duration) -> Arc<AppState> {
+    let config = tidepool_store::WriterConfig {
+        data: Some(data.to_path_buf()),
+        checkpoint_interval: every,
+        ..tidepool_store::WriterConfig::default()
+    };
+    match AppState::new(common::retail(), config, None, Tokens::default()) {
+        Ok(state) => {
+            state.set_ready();
+            Arc::new(state)
+        }
+        Err(err) => panic!("opening {}: {err}", data.display()),
+    }
+}
+
+async fn order_count(state: &Arc<AppState>) -> u64 {
+    let table = call(Arc::clone(state), Method::GET, "/v1/tables/orders")
+        .await
+        .json();
+    table["rows"].as_u64().unwrap_or(u64::MAX)
+}
+
+#[tokio::test]
+async fn a_retry_after_a_restart_gets_the_first_response_and_writes_nothing() {
+    use std::time::Duration;
+    let data = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("{err}"),
+    };
+    let rows = "/v1/tables/orders/rows?wait=visible";
+    let batch_a = Value::Array(vec![order(1), order(2)]).to_string();
+    let batch_b = Value::Array(vec![order(3)]).to_string();
+    let key_a = [JSON, ("idempotency-key", "batch-a")];
+    let key_b = [JSON, ("idempotency-key", "batch-b")];
+
+    // `batch-a`, then a checkpoint that holds it
+    let first_a = {
+        let state = on_disk(data.path(), Duration::ZERO);
+        let reply = post(&state, rows, &key_a, batch_a.clone()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        let Some(log) = state.writer().log() else {
+            panic!("a data directory has a log");
+        };
+        let last = log.last_lsn.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..200 {
+            if log
+                .checkpoint_lsn
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= last
+            {
+                break;
+            }
+            let _ = state.writer().publish().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            log.checkpoint_lsn
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= last,
+            "a checkpoint should cover `batch-a`"
+        );
+        reply.json()
+    };
+    // the writer stops with the last handle; give it a moment
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // restarted: `batch-b`, in the log only
+    let first_b = {
+        let state = on_disk(data.path(), Duration::from_hours(1));
+        let reply = post(&state, rows, &key_b, batch_b.clone()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        assert_eq!(order_count(&state).await, 3);
+        reply.json()
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // restarted again: both retries get their first response, nothing is written
+    let state = on_disk(data.path(), Duration::from_hours(1));
+    let retry_a = post(&state, rows, &key_a, batch_a).await;
+    assert_eq!(retry_a.status, StatusCode::OK, "{}", retry_a.text());
+    assert_eq!(retry_a.json(), first_a, "the key from the checkpoint");
+    let retry_b = post(&state, rows, &key_b, batch_b.clone()).await;
+    assert_eq!(retry_b.status, StatusCode::OK, "{}", retry_b.text());
+    assert_eq!(retry_b.json(), first_b, "the key from the log");
+    let _ = state.writer().publish().await;
+    assert_eq!(order_count(&state).await, 3, "the retries wrote nothing");
+
+    // a new key still writes
+    let other = post(
+        &state,
+        rows,
+        &[JSON, ("idempotency-key", "batch-c")],
+        batch_b,
+    )
+    .await;
+    assert_eq!(other.json()["written"], 1);
+}
+
 #[tokio::test]
 async fn a_full_queue_answers_503_with_retry_after() {
     let model = common::retail();

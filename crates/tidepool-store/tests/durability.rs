@@ -9,6 +9,11 @@
 //! equal the acknowledged writes replayed into a fresh in-memory store:
 //! nothing acknowledged lost, nothing unacknowledged invented.
 //!
+//! Some writes carry an idempotency key: after every recovery the store must
+//! hold exactly the keys of the acknowledged ones, each with the response it
+//! was acknowledged with, whether it came back from the log or from a
+//! checkpoint.
+//!
 //! Model changes are part of the stream (M7): every so often the model
 //! moves to a version that drops or adds back a relationship over populated
 //! tables (which rewrites one side's codes) and a column, sometimes built
@@ -30,9 +35,10 @@ use tidepool_config::server::Durability;
 use tidepool_model::compile;
 use tidepool_model::ir::Model;
 use tidepool_store::batch::{Shape, json_array};
+use tidepool_store::keys::Keyed;
 use tidepool_store::migrate::build;
 use tidepool_store::persist::Durable;
-use tidepool_store::{Batch, ModelVersion, Op, Rebuilt, Snapshot, Store};
+use tidepool_store::{Applied, Batch, ModelVersion, Op, Rebuilt, Snapshot, Store};
 
 /// The retail example (without dashboards), or the variant without the
 /// orders → customers relationship and with an extra column, as the
@@ -79,11 +85,31 @@ fn version(previous: Option<&ModelVersion>, variant: bool) -> ModelVersion {
     }
 }
 
-/// A write, or a model change, in the order they were acknowledged.
+/// A write (with its idempotency key and receipt, if it had a key), or a
+/// model change, in the order they were acknowledged.
 #[derive(Clone)]
 enum Event {
-    Write(Write_),
+    Write(Write_, Option<Receipt>),
     Model(ModelVersion),
+}
+
+/// A keyed write as the store should remember it: table, key, what it did,
+/// the epoch it was acknowledged with.
+type Receipt = (u32, String, Applied, u64);
+
+fn receipt(keyed: &Keyed) -> Receipt {
+    (keyed.table.0, keyed.key.clone(), keyed.applied, keyed.epoch)
+}
+
+/// The receipts of the acknowledged keyed writes, oldest first.
+fn expected_keys(acked: &[Event]) -> Vec<Receipt> {
+    acked
+        .iter()
+        .filter_map(|e| match e {
+            Event::Write(_, key) => key.clone(),
+            Event::Model(_) => None,
+        })
+        .collect()
 }
 
 /// `SplitMix64`.
@@ -188,7 +214,7 @@ fn expected(first: &ModelVersion, acked: &[Event]) -> BTreeMap<String, Vec<Strin
     let mut store = Store::with_version(first.clone(), 1 << 20);
     for event in acked {
         match event {
-            Event::Write(write) => {
+            Event::Write(write, _) => {
                 let model = Arc::clone(store.model());
                 let (table, batch) = decode(&model, write);
                 store.apply(table, write.1, &batch);
@@ -227,6 +253,7 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
     let first = version(None, false);
     let mut crash_points = 0;
     let mut changes = 0;
+    let mut keyed = 0;
     for seed in 0..seeds {
         let mut rng = Rng(seed);
         let dir = match tempfile::tempdir() {
@@ -274,8 +301,11 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 let write = random_write(&mut rng, &mut serial);
                 let model = Arc::clone(durable.store().model());
                 let (table, batch) = decode(&model, &write);
-                durable.apply(table, write.1, &batch);
-                pending.push(Event::Write(write));
+                let key = rng.chance(30).then(|| format!("key-{seed}-{serial}"));
+                let applied = durable.apply(table, write.1, &batch, key.as_deref());
+                let epoch = durable.store().epoch() + 1;
+                let key = key.map(|key| (table.0, key, applied, epoch));
+                pending.push(Event::Write(write, key));
                 if rng.chance(30) {
                     if let Err(err) = durable.commit() {
                         panic!("seed {seed}: committing: {err}");
@@ -294,7 +324,8 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                         if dies {
                             checkpoints.crash_after(usize::try_from(rng.below(6)).unwrap_or(0));
                         }
-                        match checkpoints.write(&snapshot, lsn) {
+                        let keys = durable.keys();
+                        match checkpoints.write(&snapshot, lsn, &keys) {
                             // forgotten later, as when the checkpoint
                             // thread reports back while writes go on
                             Ok(()) => late = Some(lsn),
@@ -322,12 +353,12 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 let _ = file.write_all(&torn);
             }
 
-            let (recovered, snapshot, fresh) = open(&first, dir.path(), seal);
+            let (mut recovered, snapshot, fresh) = open(&first, dir.path(), seal);
             // a model change that wasn't acknowledged is gone: the next
             // follows the recovered one
             newest = match acked.iter().rev().find_map(|e| match e {
                 Event::Model(v) => Some(v.clone()),
-                Event::Write(_) => None,
+                Event::Write(..) => None,
             }) {
                 Some(v) if v.version >= newest.version => v,
                 _ => newest,
@@ -338,6 +369,13 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 "seed {seed}, crash {crash} (in a checkpoint: {died_in_checkpoint}): \
                  the recovered store isn't the acknowledged writes"
             );
+            assert_eq!(
+                recovered.keys().iter().map(receipt).collect::<Vec<_>>(),
+                expected_keys(&acked),
+                "seed {seed}, crash {crash} (in a checkpoint: {died_in_checkpoint}): \
+                 the recovered idempotency keys aren't the acknowledged ones"
+            );
+            keyed += expected_keys(&acked).len();
             durable = recovered;
             checkpoints = fresh;
             late = None;
@@ -348,5 +386,9 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
         seeds == 0 || changes > 0,
         "the stream should change the model"
     );
-    println!("{crash_points} crash points recovered exactly, {changes} model changes made");
+    assert!(seeds == 0 || keyed > 0, "some keys should be recovered");
+    println!(
+        "{crash_points} crash points recovered exactly, {changes} model changes made, \
+         {keyed} recovered keys checked"
+    );
 }

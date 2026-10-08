@@ -3,6 +3,11 @@
 //! again, over and over. After every restart the table must hold every
 //! order that was acknowledged, and none that wasn't sent.
 //!
+//! Every batch has an `Idempotency-Key`, and after a restart the batch that
+//! was in flight at the kill is sent again under its key, as a client that
+//! never got the reply would: it may have landed or not, but afterwards the
+//! table must hold exactly the acknowledged orders, that batch once.
+//!
 //! `TIDEPOOL_KILL_LOOPS` sets the number of kills (default 4).
 
 use std::io::{Read, Write};
@@ -22,13 +27,26 @@ fn free_port() -> SocketAddr {
 
 /// One HTTP request: the status and the body.
 fn http(address: SocketAddr, method: &str, path: &str, body: &str) -> Option<(u16, String)> {
+    keyed(address, method, path, body, None)
+}
+
+/// One HTTP request with an `Idempotency-Key`, if given.
+fn keyed(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &str,
+    key: Option<&str>,
+) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{body}",
+        body.len(),
+        key.map(|k| format!("Idempotency-Key: {k}\r\n"))
+            .unwrap_or_default()
     );
     stream.write_all(request.as_bytes()).ok()?;
     let mut response = String::new();
@@ -85,6 +103,8 @@ fn acknowledged_orders_survive_kill_9() {
         Err(err) => panic!("{err}"),
     };
     let (mut acked, mut sent) = (0u64, 0u64);
+    // the batch in flight at the last kill: its key and body
+    let mut unanswered: Option<(String, String)> = None;
     for round in 0..loops {
         let address = free_port();
         let mut server = start(data.path(), address);
@@ -93,9 +113,23 @@ fn acknowledged_orders_survive_kill_9() {
             acked <= stored && stored <= sent,
             "round {round}: {stored} orders after restart; {acked} were acknowledged, {sent} sent"
         );
+        if let Some((key, body)) = unanswered.take() {
+            // the retry of a client that never heard back
+            let path = "/v1/tables/orders/rows?wait=visible";
+            let Some((200, _)) = keyed(address, "POST", path, &body, Some(&key)) else {
+                panic!("round {round}: the retry of {key} wasn't acknowledged");
+            };
+            acked += 50;
+            let stored = orders(address);
+            assert_eq!(
+                stored, acked,
+                "round {round}: {stored} orders after retrying {key}; {acked} were acknowledged \
+                 (a retry under its key must not write a batch that landed twice)"
+            );
+        }
         // writes from here may or may not land: only acks count
-        acked = stored;
-        sent = stored;
+        acked = orders(address);
+        sent = acked;
 
         let stop = Arc::new(AtomicBool::new(false));
         let (confirmed, posted) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
@@ -106,6 +140,8 @@ fn acknowledged_orders_survive_kill_9() {
                 Arc::clone(&posted),
             );
             std::thread::spawn(move || {
+                // the first request without an answer: in flight at the kill
+                let mut unanswered = None;
                 let mut n = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     let rows: Vec<String> = (0..50)
@@ -115,10 +151,12 @@ fn acknowledged_orders_survive_kill_9() {
                             )
                         })
                         .collect();
+                    let key = format!("r{round}-{n}");
                     n += 1;
                     posted.fetch_add(50, Ordering::Relaxed);
                     let body = format!("[{}]", rows.join(","));
-                    match http(address, "POST", "/v1/tables/orders/rows", &body) {
+                    let path = "/v1/tables/orders/rows";
+                    match keyed(address, "POST", path, &body, Some(&key)) {
                         Some((200, _)) => {
                             confirmed.fetch_add(50, Ordering::Relaxed);
                         }
@@ -126,16 +164,21 @@ fn acknowledged_orders_survive_kill_9() {
                             posted.fetch_sub(50, Ordering::Relaxed);
                         }
                         // killed mid-request: it may or may not have landed
-                        _ => {}
+                        _ => {
+                            if unanswered.is_none() {
+                                unanswered = Some((key, body));
+                            }
+                        }
                     }
                 }
+                unanswered
             })
         };
         std::thread::sleep(Duration::from_millis(150 + 97 * (round % 7)));
         let _ = server.kill(); // SIGKILL: no shutdown, no flushing
         let _ = server.wait();
         stop.store(true, Ordering::Relaxed);
-        let _ = writer.join();
+        unanswered = writer.join().unwrap_or_default();
         acked += confirmed.load(Ordering::Relaxed);
         sent += posted.load(Ordering::Relaxed);
     }

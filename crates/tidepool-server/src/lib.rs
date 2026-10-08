@@ -151,12 +151,18 @@ impl AppState {
     #[must_use]
     pub fn with_writer(writer: WriterHandle, ui: Option<Arc<dyn Assets>>, tokens: Tokens) -> Self {
         let snapshot = writer.snapshot();
+        let keys = idempotency::Keys::default();
+        keys.restore(
+            writer.take_recovered_keys(),
+            std::time::Instant::now(),
+            tidepool_store::keys::now_ms(),
+        );
         Self {
             ready: AtomicBool::new(false),
             ui,
             writer,
             tokens,
-            keys: idempotency::Keys::default(),
+            keys,
             engine: Arc::new(tidepool_engine::Engine::default()),
             hub: live::Hub::default(),
             started: std::time::Instant::now(),

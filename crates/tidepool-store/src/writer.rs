@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tidepool_config::server::Durability;
 
 use crate::batch::Batch;
+use crate::keys::Keyed;
 use crate::migrate::{Migration, ModelVersion, Rebuilt, build};
 use crate::persist::{Checkpoints, Durable};
 use crate::store::{Applied, Op, Snapshot, Store};
@@ -43,6 +44,8 @@ enum Command {
         table: TableId,
         op: Op,
         batch: Batch,
+        /// Its idempotency key, logged with what it did.
+        key: Option<String>,
         reply: oneshot::Sender<Receipt>,
     },
     Publish {
@@ -139,6 +142,9 @@ pub struct WriterHandle {
     rebuild: Arc<std::sync::Mutex<Option<Rebuild>>>,
     /// How long publishing an epoch takes (freezing, sealing, snapshots).
     publishing: Arc<Timing>,
+    /// Idempotency keys recovered from the data directory, until the
+    /// server takes them.
+    recovered: Arc<std::sync::Mutex<Vec<Keyed>>>,
 }
 
 /// How the log and checkpoints stand, for status pages. Updated by the
@@ -193,10 +199,22 @@ impl Backend {
         }
     }
 
-    fn apply(&mut self, table: TableId, op: Op, batch: &Batch) -> Applied {
-        match self {
+    /// Apply a batch: what it did, and the epoch it's visible from.
+    fn apply(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<&str>) -> Receipt {
+        let applied = match self {
             Self::Memory(store) => store.apply(table, op, batch),
-            Self::Disk(durable) => durable.apply(table, op, batch),
+            Self::Disk(durable) => durable.apply(table, op, batch, key),
+        };
+        // the next epoch published holds it
+        let epoch = self.store().epoch() + 1;
+        Receipt { applied, epoch }
+    }
+
+    /// Idempotency keys to keep in a checkpoint (none in memory).
+    fn keys(&mut self) -> Vec<Keyed> {
+        match self {
+            Self::Memory(_) => Vec::new(),
+            Self::Disk(durable) => durable.keys(),
         }
     }
 
@@ -261,6 +279,7 @@ pub fn spawn(
         log.checkpoint_lsn
             .store(durable.recovered_lsn(), Ordering::Relaxed);
     }
+    let recovered = Arc::new(std::sync::Mutex::new(backend.keys()));
     let _ = backend.store().epoch();
     let (epochs_tx, epochs) = watch::channel(first.epoch);
     let snapshot = Arc::new(ArcSwap::from_pointee(first));
@@ -298,6 +317,7 @@ pub fn spawn(
             log,
             rebuild,
             publishing,
+            recovered,
         },
         thread,
     ))
@@ -305,19 +325,19 @@ pub fn spawn(
 
 /// The thread that writes checkpoints, so the writer never waits for one.
 struct Checkpointer {
-    jobs: SyncSender<(Arc<Snapshot>, u64)>,
+    jobs: SyncSender<(Arc<Snapshot>, u64, Vec<Keyed>)>,
     done: Receiver<u64>,
 }
 
 impl Checkpointer {
     fn start(mut checkpoints: Checkpoints, log: Arc<LogStatus>) -> std::io::Result<Self> {
-        let (jobs, todo) = sync_channel::<(Arc<Snapshot>, u64)>(1);
+        let (jobs, todo) = sync_channel::<(Arc<Snapshot>, u64, Vec<Keyed>)>(1);
         let (finished, done) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("tidepool-checkpoint".into())
             .spawn(move || {
-                for (snapshot, lsn) in todo {
-                    match checkpoints.write(&snapshot, lsn) {
+                for (snapshot, lsn, keys) in todo {
+                    match checkpoints.write(&snapshot, lsn, &keys) {
                         Ok(()) => {
                             log.checkpoint_lsn.store(lsn, Ordering::Relaxed);
                             if let Ok(mut at) = log.checkpoint_at.lock() {
@@ -381,9 +401,13 @@ fn run(
             let published = Arc::new(published);
             snapshot.store(Arc::clone(&published));
             let _ = epochs.send(epoch);
+            // every key logged so far is at or below `lsn`
             if let Some(checkpointer) = checkpointer
                 && Instant::now() >= next_checkpoint
-                && checkpointer.jobs.try_send((published, lsn)).is_ok()
+                && checkpointer
+                    .jobs
+                    .try_send((published, lsn, backend.keys()))
+                    .is_ok()
             {
                 next_checkpoint = Instant::now() + config.checkpoint_interval;
             }
@@ -438,10 +462,11 @@ fn run(
                             table,
                             op,
                             batch,
+                            key,
                             reply,
                         } => {
-                            let applied = backend.apply(table, op, &batch);
-                            acks.push((reply, applied));
+                            let receipt = backend.apply(table, op, &batch, key.as_deref());
+                            acks.push((reply, receipt));
                         }
                         Command::ChangeModel { target, reply } => {
                             if building.is_some() {
@@ -520,10 +545,8 @@ fn run(
                 if let (Some(status), Backend::Disk(durable)) = (status, &backend) {
                     status.last_lsn.store(durable.last_lsn(), Ordering::Relaxed);
                 }
-                let epoch = backend.store().epoch() + 1;
-                for (reply, applied) in acks {
-                    // visible from the next epoch on
-                    let _ = reply.send(Receipt { applied, epoch });
+                for (reply, receipt) in acks {
+                    let _ = reply.send(receipt);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -555,7 +578,9 @@ fn run(
 
 impl WriterHandle {
     /// Queue a batch. Resolves once it is applied (not yet visible: see
-    /// [`Receipt::epoch`] and [`WriterHandle::visible`]).
+    /// [`Receipt::epoch`] and [`WriterHandle::visible`]). With a data
+    /// directory, an idempotency `key` is logged with the receipt, so it
+    /// survives a restart ([`WriterHandle::take_recovered_keys`]).
     ///
     /// # Errors
     /// [`Busy`] when the queue is full.
@@ -564,12 +589,14 @@ impl WriterHandle {
         table: TableId,
         op: Op,
         batch: Batch,
+        key: Option<String>,
     ) -> Result<oneshot::Receiver<Receipt>, Busy> {
         let (reply, receipt) = oneshot::channel();
         match self.queue.try_send(Command::Apply {
             table,
             op,
             batch,
+            key,
             reply,
         }) {
             Ok(()) => Ok(receipt),
@@ -646,9 +673,20 @@ impl WriterHandle {
             log: None,
             rebuild: Arc::new(std::sync::Mutex::new(None)),
             publishing: Arc::new(Timing::default()),
+            recovered: Arc::default(),
         };
         // the receiver, kept alive so the queue fills instead of disconnecting
         (handle, DropGuard(commands))
+    }
+
+    /// The idempotency keys the data directory held at startup, written in
+    /// the last day, oldest first; empty after the first call.
+    #[must_use]
+    pub fn take_recovered_keys(&self) -> Vec<Keyed> {
+        self.recovered
+            .lock()
+            .map(|mut keys| std::mem::take(&mut *keys))
+            .unwrap_or_default()
     }
 
     /// The log's state, when data is kept on disk.

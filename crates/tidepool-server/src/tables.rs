@@ -246,7 +246,7 @@ async fn commit(
         }
     };
 
-    let Ok(receipt) = state.writer.apply(table.id, op, batch) else {
+    let Ok(receipt) = state.writer.apply(table.id, op, batch, key.clone()) else {
         abandon();
         let mut response = error(
             StatusCode::SERVICE_UNAVAILABLE,

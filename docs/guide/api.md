@@ -30,7 +30,9 @@ newline-delimited JSON (`application/x-ndjson`) or an Arrow IPC stream
   epoch, which queries and dashboards see.
 - **Backpressure**: a full write queue answers `503` with `Retry-After`.
 - **Idempotency**: an `Idempotency-Key` header makes a retry of the same
-  batch a no-op for 24 hours (per table).
+  batch a no-op for 24 hours (per table): it gets the first response
+  again. With a data directory the keys survive a restart, so a batch
+  whose reply was lost to one can be retried safely.
 
 ```bash
 curl -X POST 'http://127.0.0.1:7070/v1/tables/orders/rows?wait=visible' \

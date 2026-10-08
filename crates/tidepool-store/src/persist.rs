@@ -5,8 +5,12 @@
 //! ├── wal/{first_lsn}.wal              every applied batch and model change since the last checkpoint
 //! ├── dict/{id}[-g{gen}].dict          dictionary values, appended in code order
 //! ├── segments/t{table}/{start}-{rows}-{c|s}[-g{gen}].seg   immutable segments, written once
-//! └── checkpoints/{lsn}.ckpt           what a snapshot holds: the model, segments, deletes, dictionary lengths
+//! └── checkpoints/{lsn}.ckpt           what a snapshot holds: the model, segments, deletes, dictionary lengths, live idempotency keys
 //! ```
+//!
+//! Idempotency keys ([`crate::keys`]) are in the log records of the writes
+//! they were sent with, and a checkpoint lists the ones still live as of
+//! its LSN: recovery takes the checkpoint's and adds the replayed ones.
 //!
 //! A model change can rewrite segments and build dictionaries afresh
 //! (see [`crate::migrate`]); those get a new generation, which is part of
@@ -39,15 +43,18 @@ use crate::batch::Batch;
 use crate::codec::{In, Out, corrupt, frame, sync_dir, unframe, write_atomic};
 use crate::column::{Bits, ColumnData, Packed};
 use crate::dict::{DictSnapshot, DictValue, Dictionary, Key};
+use crate::keys::{self, Keyed, Recent};
 use crate::migrate::{Migration, ModelVersion, Rebuilt, decode_version, encode_version};
 use crate::store::{Applied, DictId, Op, SegmentData, SegmentView, Snapshot, Store};
 use crate::value::Storage;
 use crate::wal::{Entry, Wal};
 
 const SEGMENT_MAGIC: u32 = 0x5450_5347; // "TPSG"
-/// "TPC2": checkpoints that hold their model (M7). The first format,
-/// "TPCK", isn't read: data written before M7 starts over.
-const CHECKPOINT_MAGIC: u32 = 0x5450_4332;
+/// "TPC3": checkpoints that hold their model (M7) and idempotency keys.
+const CHECKPOINT_MAGIC: u32 = 0x5450_4333;
+/// "TPC2": the same without keys, still read. The first format, "TPCK",
+/// isn't: data written before M7 starts over.
+const CHECKPOINT_MAGIC_2: u32 = 0x5450_4332;
 /// Checkpoints kept; files only they reference are kept with them.
 const KEEP: usize = 2;
 
@@ -344,6 +351,8 @@ struct Manifest {
     model: ModelVersion,
     dicts: Vec<DictEntry>,
     tables: Vec<TableEntry>,
+    /// Idempotency keys live as of `lsn`, oldest first.
+    keys: Vec<Keyed>,
 }
 
 fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
@@ -378,6 +387,11 @@ fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
             out.bytes(&deletes);
         }
     }
+    out.len(manifest.keys.len());
+    for keyed in &manifest.keys {
+        out.u32(keyed.table.0);
+        keys::put(&mut out, keyed);
+    }
     let mut framed = Vec::new();
     frame(&out.0, &mut framed);
     Ok(framed)
@@ -386,9 +400,11 @@ fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
 fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
     let (payload, _) = unframe(bytes, 0).ok_or_else(|| corrupt("checkpoint"))?;
     let mut input = In::new(payload);
-    if input.u32()? != CHECKPOINT_MAGIC {
-        return Err(corrupt("checkpoint"));
-    }
+    let with_keys = match input.u32()? {
+        CHECKPOINT_MAGIC => true,
+        CHECKPOINT_MAGIC_2 => false,
+        _ => return Err(corrupt("checkpoint")),
+    };
     let lsn = input.u64()?;
     let epoch = input.u64()?;
     let generation = input.u32()?;
@@ -438,6 +454,13 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
             segments,
         });
     }
+    let mut keys = Vec::new();
+    if with_keys {
+        for _ in 0..input.len()? {
+            let table = TableId(input.u32()?);
+            keys.push(keys::get(&mut input, table)?);
+        }
+    }
     Ok(Manifest {
         lsn,
         epoch,
@@ -445,6 +468,7 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
         model,
         dicts,
         tables,
+        keys,
     })
 }
 
@@ -511,12 +535,13 @@ impl Checkpoints {
         Ok(())
     }
 
-    /// Write `snapshot`, which holds every batch up to `lsn`, then forget
+    /// Write `snapshot`, which holds every batch up to `lsn`, with the
+    /// idempotency keys live as of `lsn` ([`Durable::keys`]), then forget
     /// what no kept checkpoint needs.
     ///
     /// # Errors
     /// A file can't be written; the previous checkpoint stays in charge.
-    pub fn write(&mut self, snapshot: &Snapshot, lsn: u64) -> io::Result<()> {
+    pub fn write(&mut self, snapshot: &Snapshot, lsn: u64, keys: &[Keyed]) -> io::Result<()> {
         // dictionaries: the values added since the last checkpoint
         let dict_dir = self.dir.join("dict");
         std::fs::create_dir_all(&dict_dir)?;
@@ -604,6 +629,7 @@ impl Checkpoints {
             },
             dicts,
             tables,
+            keys: keys.to_vec(),
         };
         let path = self.dir.join("checkpoints").join(format!("{lsn:020}.ckpt"));
         write_atomic(&path, &encode_manifest(&manifest)?)?;
@@ -755,8 +781,9 @@ fn load_one(dir: &Path, path: &Path) -> io::Result<Recovered> {
 }
 
 /// The store with its log: what the writer thread owns when there is a
-/// data directory. Every write is logged before it's applied; [`commit`]
-/// makes everything so far durable.
+/// data directory. Every write is logged as it's applied (with what it did,
+/// when it has an idempotency key); [`commit`] makes everything so far
+/// durable, and nothing is visible or acknowledged before it.
 ///
 /// [`commit`]: Durable::commit
 pub struct Durable {
@@ -764,6 +791,8 @@ pub struct Durable {
     wal: Wal,
     /// The LSN the checkpoint recovered from holds (0: none).
     recovered: u64,
+    /// Idempotency keys logged in the last day.
+    keys: Recent,
 }
 
 /// A recovered store, its first snapshot, and the checkpoint writer.
@@ -787,13 +816,18 @@ impl Durable {
     ) -> io::Result<Opened> {
         std::fs::create_dir_all(dir)?;
         let recovered = load(dir)?;
+        let now = keys::now_ms();
+        let mut recent = Recent::default();
         let (mut store, after, checkpoints) = match recovered {
             None => (
                 Store::with_version(model.clone(), seal_rows),
                 0,
                 Checkpoints::new(dir, None),
             ),
-            Some(recovered) => {
+            Some(mut recovered) => {
+                for keyed in std::mem::take(&mut recovered.manifest.keys) {
+                    recent.push(keyed, now);
+                }
                 let checkpoints = Checkpoints::new(dir, Some(&recovered.manifest));
                 let lsn = recovered.manifest.lsn;
                 let tables = recovered
@@ -818,8 +852,16 @@ impl Durable {
         let fresh = after == 0 && records.is_empty();
         for record in records {
             match record.entry {
-                Entry::Write { table, op, batch } => {
+                Entry::Write {
+                    table,
+                    op,
+                    batch,
+                    key,
+                } => {
                     store.apply(table, op, &batch);
+                    if let Some(keyed) = key {
+                        recent.push(keyed, now);
+                    }
                 }
                 Entry::Model(version) => store.change_model(version),
             }
@@ -837,15 +879,18 @@ impl Durable {
                 store,
                 wal,
                 recovered: after,
+                keys: recent,
             },
             snapshot,
             checkpoints,
         ))
     }
 
-    /// Log and apply a batch (fitted to the table's columns now). Durable
-    /// after the next [`Durable::commit`].
-    pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch) -> Applied {
+    /// Apply and log a batch (fitted to the table's columns now), with its
+    /// idempotency key and what it did. Durable after the next
+    /// [`Durable::commit`]; the batch is visible from the epoch after
+    /// [`Store::epoch`].
+    pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<&str>) -> Applied {
         let Some(fitted) = self.store.fit(table, op, batch) else {
             return Applied {
                 table_gone: true,
@@ -853,10 +898,33 @@ impl Durable {
             };
         };
         let batch = fitted.as_ref().unwrap_or(batch);
-        if batch.rows > 0 {
-            self.wal.append(table, op, batch);
+        // applied first, so the record can say what it did: neither is
+        // seen by anyone before the commit
+        let applied = self.store.apply(table, op, batch);
+        let keyed = key.map(|key| Keyed {
+            table,
+            key: key.to_string(),
+            at: keys::now_ms(),
+            applied,
+            epoch: self.store.epoch() + 1,
+        });
+        if batch.rows > 0 || keyed.is_some() {
+            self.wal.append(table, op, batch, keyed.clone());
         }
-        self.store.apply(table, op, batch)
+        if let Some(keyed) = keyed {
+            let now = keyed.at;
+            self.keys.push(keyed, now);
+        }
+        applied
+    }
+
+    /// The idempotency keys written in the last day, oldest first: what a
+    /// checkpoint taken now keeps, and what a server answers retries from
+    /// after a restart.
+    #[must_use]
+    pub fn keys(&mut self) -> Vec<Keyed> {
+        self.keys.trim(keys::now_ms());
+        self.keys.list()
     }
 
     /// Log a model change and make it (see [`Store::migrate`]). Durable
