@@ -5,6 +5,7 @@
 //! against DuckDB by `tidepool-oracle`, and every optimisation must keep that
 //! green.
 
+mod assoc;
 mod cache;
 mod derived;
 mod exec;
@@ -17,7 +18,7 @@ use tidepool_model::ir::FieldRef;
 use tidepool_store::Snapshot;
 
 pub use query::{
-    Condition, Dim, Order, Query, QueryError, ResultColumn, ResultSet, Role, Selection,
+    Condition, Dim, Order, Query, QueryError, ResultColumn, ResultSet, Role, Selection, ValueSet,
 };
 
 /// Answer `query` from `snapshot`.
@@ -121,6 +122,18 @@ fn values_with(
     selection: &Selection,
     caches: Option<&cache::Caches>,
 ) -> Result<Vec<(Scalar, i64)>, QueryError> {
+    let selection = assoc::Associations::new(snapshot, caches).expand(field.table, selection)?;
+    raw_values(snapshot, field, &selection, caches)
+}
+
+/// [`values_with`] for a selection as given: one-directional, nothing
+/// added for selections flowing both ways.
+pub(crate) fn raw_values(
+    snapshot: &Snapshot,
+    field: &FieldRef,
+    selection: &Selection,
+    caches: Option<&cache::Caches>,
+) -> Result<Vec<(Scalar, i64)>, QueryError> {
     let plan = plan::values(&snapshot.model, field, selection)?;
     let mut rows: Vec<(Scalar, i64)> =
         exec::execute(&snapshot.model, snapshot, &plan, true, caches)
@@ -139,6 +152,10 @@ fn values_with(
 /// # Errors
 /// As [`run`].
 pub fn relevant(snapshot: &Snapshot, query: &Query) -> Result<Selection, QueryError> {
+    // flowing both ways, anything selected anywhere connected can matter
+    if snapshot.model.direction == tidepool_model::ir::Direction::Both {
+        return Ok(query.selection.clone());
+    }
     plan::relevant(&snapshot.model, query)
 }
 
@@ -149,7 +166,10 @@ fn answer(
     caches: Option<&cache::Caches>,
 ) -> Result<ResultSet, QueryError> {
     let model = &snapshot.model;
-    let plan = plan::plan(model, query)?;
+    let associations = assoc::Associations::new(snapshot, caches);
+    let plan = plan::plan(model, query, &|anchor, visible| {
+        associations.expand(anchor, visible)
+    })?;
     let mut columns: Vec<ResultColumn> = query
         .dimensions
         .iter()

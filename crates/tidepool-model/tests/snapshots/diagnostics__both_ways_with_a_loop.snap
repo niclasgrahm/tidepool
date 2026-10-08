@@ -1,0 +1,13 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+assertion_line: 532
+expression: rendered
+---
+error: relationship `billed_to` closes a loop: `orders` and `customers` are already related another way, and with `filter_direction: both` a selection would flow round it
+  --> model.ossie.yaml:40:11
+   |
+40 |   - name: billed_to
+   |           ^^^^^^^^^
+   = help: remove a relationship, or let selections flow one way (`filter_direction: one_to_many`)
+
+1 error, 0 warnings

@@ -297,9 +297,14 @@ pub struct ModelExtension {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterDirection {
-    /// Selections flow from the one side to the many side (plan D5). The only
-    /// value in v1.
+    /// Selections flow from the one side to the many side (plan D5): a
+    /// selected region filters orders, a selected order status doesn't
+    /// filter customers. The default.
     OneToMany,
+    /// Selections flow both ways (plan §5.4): a selected order status also
+    /// narrows customers to those with such orders, and everything
+    /// associated with them. Relationships may not form a loop.
+    Both,
 }
 
 #[derive(

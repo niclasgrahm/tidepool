@@ -37,6 +37,7 @@ pub(super) struct Semantic {
     pub uncertain_from: BTreeSet<TableId>,
     /// A broken relationship whose many side is unknown too.
     pub uncertain_all: bool,
+    pub direction: crate::ir::Direction,
 }
 
 impl Semantic {
@@ -217,6 +218,7 @@ pub(super) fn compile(cx: &mut Cx, tables: &Tables) -> Semantic {
         broken: BTreeSet::new(),
         uncertain_from: BTreeSet::new(),
         uncertain_all: false,
+        direction: crate::ir::Direction::OneToMany,
     };
     let Some(parsed) = cx.set.model.as_ref() else {
         return semantic;
@@ -236,11 +238,17 @@ pub(super) fn compile(cx: &mut Cx, tables: &Tables) -> Semantic {
             .help("Tidepool reads Ossie 0.1 and 0.2 documents"),
         );
     }
-    let _: (ModelExtension, _) = extension(cx, &file, &root, &model.custom_extensions);
+    let (settings, _): (ModelExtension, _) = extension(cx, &file, &root, &model.custom_extensions);
+    if settings.filter_direction == Some(ossie::FilterDirection::Both) {
+        semantic.direction = crate::ir::Direction::Both;
+    }
 
     datasets(cx, tables, &file, model, &mut semantic);
     relationships(cx, tables, &file, model, &mut semantic);
     check_graph(cx, &file, model, &semantic);
+    if semantic.direction == crate::ir::Direction::Both {
+        check_loops(cx, &file, model, &semantic);
+    }
     semantic.key_domains = key_domains(&semantic.relationships);
     semantic
 }
@@ -889,6 +897,51 @@ fn check_graph(cx: &mut Cx, file: &Path, model: &ossie::OssieModel, semantic: &S
     // the path enumeration below would not terminate usefully on a cycle
     if !check_cycles(cx, file, model, semantic) {
         check_ambiguity(cx, file, model, semantic);
+    }
+}
+
+/// With selections flowing both ways, relationships must form a tree
+/// (ignoring their direction): a loop gives a selection two ways round, and
+/// what it narrows would depend on which one is taken. Report the first
+/// relationship that closes one.
+fn check_loops(cx: &mut Cx, file: &Path, model: &ossie::OssieModel, semantic: &Semantic) {
+    fn root(group: &mut BTreeMap<TableId, TableId>, t: TableId) -> TableId {
+        let up = *group.entry(t).or_insert(t);
+        if up == t {
+            return t;
+        }
+        let top = root(group, up);
+        group.insert(t, top);
+        top
+    }
+    let mut group: BTreeMap<TableId, TableId> = BTreeMap::new();
+    for relationship in &semantic.relationships {
+        let (a, b) = (
+            root(&mut group, relationship.from),
+            root(&mut group, relationship.to),
+        );
+        if a == b {
+            let name = |id: TableId| semantic.dataset_name(id).to_string();
+            cx.push(
+                Diagnostic::error(format!(
+                    "relationship `{}` closes a loop: `{}` and `{}` are already related another way, \
+                     and with `filter_direction: both` a selection would flow round it",
+                    relationship.name,
+                    name(relationship.from),
+                    name(relationship.to)
+                ))
+                .at(
+                    file,
+                    YamlPath::root()
+                        .key("relationships")
+                        .index(relationship_index(model, semantic, relationship.id))
+                        .key("name"),
+                )
+                .help("remove a relationship, or let selections flow one way (`filter_direction: one_to_many`)"),
+            );
+            return;
+        }
+        group.insert(a, b);
     }
 }
 

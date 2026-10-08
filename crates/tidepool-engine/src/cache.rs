@@ -113,6 +113,9 @@ struct Inner {
     tick: u64,
     /// (epoch, query) → answer, oldest first; only the newest epoch's.
     results: VecDeque<((u64, String), ResultSet)>,
+    /// Messages along relationships for selections flowing both ways
+    /// (`assoc`), by (relationship, selection); only the newest epoch's.
+    messages: (u64, HashMap<String, Arc<crate::query::ValueSet>>),
 }
 
 /// The engine's caches. Shared by every query; cheap to look up once per
@@ -315,6 +318,23 @@ impl Caches {
             };
             inner.anchors.remove(&oldest);
         }
+    }
+
+    /// A message computed earlier in `epoch`.
+    pub(crate) fn message(&self, epoch: u64, key: &str) -> Option<Arc<crate::query::ValueSet>> {
+        let inner = self.lock();
+        (inner.messages.0 == epoch)
+            .then(|| inner.messages.1.get(key).cloned())
+            .flatten()
+    }
+
+    /// Keep a message for the rest of `epoch`.
+    pub(crate) fn keep_message(&self, epoch: u64, key: String, set: Arc<crate::query::ValueSet>) {
+        let mut inner = self.lock();
+        if inner.messages.0 != epoch {
+            inner.messages = (epoch, HashMap::new());
+        }
+        inner.messages.1.insert(key, set);
     }
 
     /// Bytes held by every cache: join columns and kept answers.

@@ -290,9 +290,19 @@ impl Scope for MetricScope<'_, '_> {
     }
 }
 
+/// The selection a metric anchored on a table sees, given the part of the
+/// query's selection it doesn't ignore: that part as it is, or with what
+/// selections flowing both ways add (`assoc`).
+pub(crate) type SelectionFor<'a> =
+    dyn Fn(TableId, &Selection) -> Result<Selection, QueryError> + 'a;
+
 /// Plan `query` against `model`.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn plan(model: &Model, query: &Query) -> Result<Plan, QueryError> {
+pub(crate) fn plan(
+    model: &Model,
+    query: &Query,
+    selection_for: &SelectionFor,
+) -> Result<Plan, QueryError> {
     // every metric needed: requested ones and everything derived ones use
     let mut needed: Vec<MetricId> = Vec::new();
     let mut stack: Vec<MetricId> = query.metrics.clone();
@@ -334,11 +344,24 @@ pub(crate) fn plan(model: &Model, query: &Query) -> Result<Plan, QueryError> {
             None => None,
             Some(offset) => Some((shift_on(model, &offset.field)?, shift_of(offset))),
         };
-        let fresh = anchor_plan(model, *anchor, query, &ignored, shift)?;
-        let signature = |plan: &AnchorPlan| -> Vec<FieldRef> {
+        let visible = Selection(
+            query
+                .selection
+                .0
+                .iter()
+                .filter(|(f, _)| !ignored(f))
+                .map(|(f, c)| (f.clone(), c.clone()))
+                .collect(),
+        );
+        let seen = Query {
+            selection: selection_for(*anchor, &visible)?,
+            ..Query::default()
+        };
+        let fresh = anchor_plan(model, *anchor, &seen, &|_| false, shift)?;
+        let signature = |plan: &AnchorPlan| -> Vec<String> {
             plan.conditions
                 .iter()
-                .map(|(a, _)| plan.accesses[*a].field.clone())
+                .map(|(a, c)| format!("{:?} {c:?}", plan.accesses[*a].field))
                 .collect()
         };
         let index = if let Some(index) = anchors.iter().position(|a| {
@@ -523,7 +546,7 @@ pub(crate) fn values(
 /// fields some metric's table reaches and doesn't ignore. Sessions whose
 /// selections differ only elsewhere can share one answer.
 pub(crate) fn relevant(model: &Model, query: &Query) -> Result<Selection, QueryError> {
-    let plan = plan(model, query)?;
+    let plan = plan(model, query, &|_, visible| Ok(visible.clone()))?;
     let used: BTreeSet<FieldRef> = plan
         .anchors
         .iter()

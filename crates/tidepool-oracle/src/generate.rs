@@ -91,7 +91,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relationship {
     pub from: String,
     pub fk: String,
@@ -157,6 +157,8 @@ pub struct Schema {
     pub relationships: Vec<Relationship>,
     pub derived: Vec<DerivedField>,
     pub metrics: Vec<Metric>,
+    /// `filter_direction: both`: selections also flow one → many.
+    pub both: bool,
 }
 
 impl Schema {
@@ -392,7 +394,13 @@ pub fn schema(rng: &mut Rng) -> Schema {
             name: "f1".into(),
             upsert: false,
             columns: vec![
-                column("d0_key", "string", "VARCHAR", false, Gen::Ref("d0".into())),
+                column(
+                    "d0_key",
+                    "string",
+                    "VARCHAR",
+                    rng.chance(40),
+                    Gen::Ref("d0".into()),
+                ),
                 column("qty", "int32", "INTEGER", false, Gen::Int(0, 5)),
                 column(
                     "amount",
@@ -702,6 +710,8 @@ pub fn schema(rng: &mut Rng) -> Schema {
         relationships,
         derived: derived_fields,
         metrics,
+        // relationships always form a tree here, so both ways is valid
+        both: rng.chance(50),
     }
 }
 
@@ -776,6 +786,11 @@ pub fn files(schema: &Schema) -> Vec<(String, String)> {
                 "    custom_extensions:\n      - vendor_name: TIDEPOOL\n        data: '{extension}'"
             );
         }
+    }
+    if schema.both {
+        model.push_str(
+            "custom_extensions:\n  - vendor_name: TIDEPOOL\n    data: '{\"filter_direction\": \"both\"}'\n",
+        );
     }
     files.push(("model.ossie.yaml".to_string(), model));
     files

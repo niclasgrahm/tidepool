@@ -1,0 +1,8 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+assertion_line: 269
+expression: "plan_for(&\n[Replace(\"model.ossie.yaml\", r#\"data: '{\"filter_direction\": \"one_to_many\"}'\"#,\nr#\"data: '{\"filter_direction\": \"both\"}'\"#)])"
+---
+1 change (1 safe, 0 rebuild, 0 destructive)
+
+  ~ setting      filter_direction  one_to_many → both  safe

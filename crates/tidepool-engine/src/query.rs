@@ -1,7 +1,8 @@
 //! What a query asks for, and what it answers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use tidepool_config::ossie::TimeGrain;
 use tidepool_expr::{Scalar, Type};
@@ -24,6 +25,77 @@ pub enum Condition {
         from: Option<Scalar>,
         to: Option<Scalar>,
     },
+    /// One of a computed set of values: what a selection elsewhere leaves
+    /// of a key, when selections flow both ways (plan §5.4). Looked up by
+    /// hash, and printed as a fingerprint (it can hold a million keys).
+    Set(Arc<ValueSet>),
+}
+
+/// A set of values for [`Condition::Set`].
+pub struct ValueSet {
+    values: Vec<Scalar>,
+    keys: HashSet<crate::exec::Key>,
+    fingerprint: u64,
+}
+
+impl ValueSet {
+    #[must_use]
+    pub fn new(values: impl IntoIterator<Item = Scalar>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut keys = HashSet::new();
+        let mut kept = Vec::new();
+        for value in values {
+            if !value.is_null() && keys.insert(crate::exec::key(&value)) {
+                kept.push(value);
+            }
+        }
+        let mut sorted: Vec<String> = kept.iter().map(|v| format!("{v:?}")).collect();
+        sorted.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        sorted.hash(&mut hasher);
+        Self {
+            values: kept,
+            keys,
+            fingerprint: hasher.finish(),
+        }
+    }
+
+    #[must_use]
+    pub fn contains(&self, value: &Scalar) -> bool {
+        self.keys.contains(&crate::exec::key(value))
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[Scalar] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+impl fmt::Debug for ValueSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ValueSet({} values, #{:016x})",
+            self.values.len(),
+            self.fingerprint
+        )
+    }
+}
+
+impl PartialEq for ValueSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint && self.keys == other.keys
+    }
 }
 
 impl Condition {
@@ -37,6 +109,7 @@ impl Condition {
             Self::In(values) => values
                 .iter()
                 .any(|v| value.compare(v) == Some(std::cmp::Ordering::Equal)),
+            Self::Set(set) => set.contains(value),
             Self::Range { from, to } => {
                 from.as_ref().is_none_or(|f| {
                     value

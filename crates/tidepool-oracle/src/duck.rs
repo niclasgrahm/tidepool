@@ -6,14 +6,14 @@
 //! the dimension values and compute derived metrics on top. Nothing here
 //! uses Tidepool's planner or evaluator.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use duckdb::Connection;
 use duckdb::types::Value as Duck;
 use serde_json::Value as Json;
 
-use crate::generate::{Cond, Data, Gen, Ignore, MetricKind, Query, Schema, Write};
+use crate::generate::{Cond, Data, Gen, Ignore, MetricKind, Query, Relationship, Schema, Write};
 
 /// A value both sides can be compared as.
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +161,139 @@ fn gen_of<'a>(schema: &'a Schema, table: &str, column: &str) -> Option<&'a Gen> 
         .map(|c| &c.values)
 }
 
+/// One selected field's condition, in SQL.
+fn condition_sql(schema: &Schema, (table, column, cond): &(String, String, Cond)) -> String {
+    let field = format!("{table}.{column}");
+    let source = gen_of(schema, table, column).cloned().unwrap_or(Gen::Float);
+    match cond {
+        Cond::In(values) => {
+            let list: Vec<String> = values.iter().map(|v| literal(v, &source)).collect();
+            format!("{field} IN ({})", list.join(", "))
+        }
+        Cond::Range(from, to) => format!(
+            "{field} >= {} AND {field} < {}",
+            literal(from, &source),
+            literal(to, &source)
+        ),
+    }
+}
+
+/// Tables `from` reaches many → one without crossing `cut`, each with the
+/// relationship it's reached by.
+fn reached(
+    schema: &Schema,
+    from: &str,
+    cut: Option<&Relationship>,
+) -> Vec<(String, Option<Relationship>)> {
+    let mut out: Vec<(String, Option<Relationship>)> = vec![(from.to_string(), None)];
+    let mut i = 0;
+    while i < out.len() {
+        let current = out[i].0.clone();
+        for r in schema
+            .relationships
+            .iter()
+            .filter(|r| r.from == current && Some(*r) != cut)
+        {
+            if !out.iter().any(|(t, _)| *t == r.to) {
+                out.push((r.to.clone(), Some(r.clone())));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `table`'s side of the relationship tree once `cut` is removed.
+fn side(schema: &Schema, table: &str, cut: &Relationship) -> BTreeSet<String> {
+    let mut seen = BTreeSet::from([table.to_string()]);
+    let mut queue = vec![table.to_string()];
+    while let Some(t) = queue.pop() {
+        for r in schema.relationships.iter().filter(|r| *r != cut) {
+            let next = if r.from == t {
+                &r.to
+            } else if r.to == t {
+                &r.from
+            } else {
+                continue;
+            };
+            if seen.insert(next.clone()) {
+                queue.push(next.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// `FROM` for `anchor`: it and what it reaches, `LEFT JOIN`ed.
+fn joined(schema: &Schema, anchor: &str, cut: Option<&Relationship>) -> String {
+    let mut from = anchor.to_string();
+    for (_, via) in reached(schema, anchor, cut) {
+        if let Some(r) = via {
+            let _ = write!(
+                from,
+                " LEFT JOIN {to} ON {from_t}.{fk} = {to}.key",
+                to = r.to,
+                from_t = r.from,
+                fk = r.fk
+            );
+        }
+    }
+    from
+}
+
+/// With selections flowing both ways: the conditions a query on `anchor`
+/// (on its side of `cut`) gets from selections across one → many
+/// relationships. For each table it reaches, each other relationship into
+/// that table whose many side has something selected restricts the table's
+/// key to the foreign keys of that side's passing rows.
+fn upward(
+    schema: &Schema,
+    anchor: &str,
+    cut: Option<&Relationship>,
+    visible: &[&(String, String, Cond)],
+) -> Vec<String> {
+    if !schema.both {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (table, by) in reached(schema, anchor, cut) {
+        for edge in schema
+            .relationships
+            .iter()
+            .filter(|r| r.to == table && Some(*r) != by.as_ref() && Some(*r) != cut)
+        {
+            let on_side = side(schema, &edge.from, edge);
+            if !visible.iter().any(|(t, _, _)| on_side.contains(t)) {
+                continue;
+            }
+            let near: Vec<String> = reached(schema, &edge.from, Some(edge))
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect();
+            let mut conditions: Vec<String> = visible
+                .iter()
+                .filter(|(t, _, _)| near.contains(t))
+                .map(|s| condition_sql(schema, s))
+                .collect();
+            let on_side_visible: Vec<&(String, String, Cond)> = visible
+                .iter()
+                .filter(|(t, _, _)| on_side.contains(t))
+                .copied()
+                .collect();
+            conditions.extend(upward(schema, &edge.from, Some(edge), &on_side_visible));
+            conditions.push(format!("{}.{} IS NOT NULL", edge.from, edge.fk));
+            out.push(format!(
+                "{table}.key IN (SELECT {}.{} FROM {} WHERE {})",
+                edge.from,
+                edge.fk,
+                joined(schema, &edge.from, Some(edge)),
+                conditions.join(" AND ")
+            ));
+        }
+    }
+    out
+}
+
 /// The SQL for `query`, and how many dimension columns it starts with.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::items_after_statements)]
@@ -225,7 +358,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             .iter()
             .enumerate()
             .filter(|(_, (table, column, _))| {
-                reachable.contains(table)
+                (schema.both || reachable.contains(table))
                     && match ignore {
                         Ignore::None => true,
                         Ignore::All => false,
@@ -290,26 +423,19 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
                 column_of.insert(name.clone(), format!("q{q}.m_{name}"));
             }
         }
-        let conditions: Vec<String> = seen
-            .iter()
-            .map(|i| {
-                let (table, column, cond) = &query.selection[*i];
-                let field = format!("{table}.{column}");
-                let source = gen_of(schema, table, column).cloned().unwrap_or(Gen::Float);
-                match cond {
-                    Cond::In(values) => {
-                        let list: Vec<String> =
-                            values.iter().map(|v| literal(v, &source)).collect();
-                        format!("{field} IN ({})", list.join(", "))
-                    }
-                    Cond::Range(from, to) => format!(
-                        "{field} >= {} AND {field} < {}",
-                        literal(from, &source),
-                        literal(to, &source)
-                    ),
-                }
-            })
+        let near: Vec<String> = schema
+            .reachable(anchor)
+            .into_iter()
+            .map(|(t, _)| t)
             .collect();
+        let visible: Vec<&(String, String, Cond)> =
+            seen.iter().map(|i| &query.selection[*i]).collect();
+        let mut conditions: Vec<String> = visible
+            .iter()
+            .filter(|(t, _, _)| near.contains(t))
+            .map(|s| condition_sql(schema, s))
+            .collect();
+        conditions.extend(upward(schema, anchor, None, &visible));
         let mut cte = format!("q{q} AS (SELECT {} FROM {from}", select.join(", "));
         if !conditions.is_empty() {
             let _ = write!(cte, " WHERE {}", conditions.join(" AND "));
@@ -468,38 +594,14 @@ pub fn values_sql(schema: &Schema, table: &str, field: &str, query: &Query) -> S
         .into_iter()
         .map(|(t, _)| t)
         .collect();
-    let mut from = table.to_string();
-    for (_, via) in schema.reachable(table) {
-        if let Some(r) = via {
-            let _ = write!(
-                from,
-                " LEFT JOIN {to} ON {from_t}.{fk} = {to}.key",
-                to = r.to,
-                from_t = r.from,
-                fk = r.fk
-            );
-        }
-    }
-    let conditions: Vec<String> = query
-        .selection
+    let from = joined(schema, table, None);
+    let visible: Vec<&(String, String, Cond)> = query.selection.iter().collect();
+    let mut conditions: Vec<String> = visible
         .iter()
         .filter(|(t, _, _)| reachable.contains(t))
-        .map(|(t, column, cond)| {
-            let name = format!("{t}.{column}");
-            let source = gen_of(schema, t, column).cloned().unwrap_or(Gen::Float);
-            match cond {
-                Cond::In(values) => {
-                    let list: Vec<String> = values.iter().map(|v| literal(v, &source)).collect();
-                    format!("{name} IN ({})", list.join(", "))
-                }
-                Cond::Range(lo, hi) => format!(
-                    "{name} >= {} AND {name} < {}",
-                    literal(lo, &source),
-                    literal(hi, &source)
-                ),
-            }
-        })
+        .map(|s| condition_sql(schema, s))
         .collect();
+    conditions.extend(upward(schema, table, None, &visible));
     let mut sql = format!(
         "SELECT {} AS d0, COUNT(*) AS n FROM {from}",
         field_sql(schema, table, field)

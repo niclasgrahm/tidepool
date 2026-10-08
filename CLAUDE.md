@@ -277,6 +277,14 @@ walks the table to prove it.
   that reads them), and answers per epoch. A new cache must key the same
   way, and get a planted-bug check against the oracle's history replay.
 
+- **Both ways** (`assoc.rs`, `filter_direction: both`): before planning,
+  each anchor's selection gets one `Condition::Set` per relationship into a
+  table it reaches (other than the way it got there) whose many side has
+  something selected: the foreign keys of that side's passing rows,
+  computed recursively and cached per epoch. Relationships form a tree
+  (the compiler checks), so this is exact message passing; the executors
+  never know.
+
 - **Incremental answers** (`Incremental` in `fast.rs`): with an `Engine`,
   each anchor's aggregate state is kept with a row-id high-water mark and
   the deleted rows it accounted for. The next epoch scans only appended
