@@ -1,0 +1,13 @@
+target
+.git
+.github
+.claude
+spikes
+data
+frontend/dist
+docs
+**/*.md
+!licensing.md
+Dockerfile
+.dockerignore
+examples/kayak-demo

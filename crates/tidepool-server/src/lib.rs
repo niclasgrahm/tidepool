@@ -10,6 +10,8 @@ mod endpoints;
 mod handlers;
 mod idempotency;
 mod live;
+mod mcp;
+pub mod metrics;
 mod model;
 pub mod openapi;
 mod query;
@@ -44,6 +46,10 @@ pub struct AppState {
     pub(crate) started: std::time::Instant,
     /// The config files, their versions, and changes waiting for approval.
     pub(crate) config: config::ConfigStore,
+    /// Counts and timings for `/metrics` and the status page.
+    pub(crate) counters: metrics::Counters,
+    /// Browser sessions.
+    pub(crate) sessions: auth::Sessions,
 }
 
 /// A config to run: its directory (written back to and watched), if any,
@@ -154,6 +160,8 @@ impl AppState {
             engine: Arc::new(tidepool_engine::Engine::default()),
             hub: live::Hub::default(),
             started: std::time::Instant::now(),
+            counters: metrics::Counters::default(),
+            sessions: auth::Sessions::default(),
             config: config::ConfigStore::detached(&ModelVersion {
                 version: snapshot.version,
                 model: Arc::clone(&snapshot.model),

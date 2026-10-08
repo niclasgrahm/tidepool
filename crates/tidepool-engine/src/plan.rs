@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use tidepool_config::ossie::TimeGrain;
 use tidepool_expr::syntax::{self, Name};
-use tidepool_expr::temporal::Part;
+use tidepool_expr::temporal::{Part, Shift};
 use tidepool_expr::{AggCall, Expr, Scope, Type, check_aggregation, check_row};
 use tidepool_model::ir::{
     FieldRef, FieldSource, IgnoreSelection, MetricBody, MetricId, Model, TableId, type_of,
@@ -42,6 +42,25 @@ pub(crate) struct Access {
     pub path: Vec<Hop>,
     pub target: Target,
     pub ty: Type,
+    /// Reads moved in time, for a `time_offset` metric.
+    pub shift: Option<AccessShift>,
+}
+
+/// What a `time_offset` moves: one column of one table (so every field
+/// computed from it moves too), or a derived time field's value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShiftOn {
+    Column(TableId, usize),
+    Field(FieldRef),
+}
+
+/// How one access is moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AccessShift {
+    pub by: Shift,
+    /// The column of the access's table that reads moved (a derived
+    /// field's slot); `None`: the access's value itself.
+    pub column: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +83,9 @@ pub(crate) struct MetricPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct AnchorPlan {
     pub table: TableId,
+    /// What every read of which is moved, for `time_offset` metrics: their
+    /// rows are aggregated as if that much later.
+    pub shift: Option<(ShiftOn, Shift)>,
     pub accesses: Vec<Access>,
     pub conditions: Vec<(usize, Condition)>,
     /// (access, truncation) per query dimension.
@@ -173,6 +195,7 @@ impl AnchorBuilder<'_> {
         if let Some(index) = self.plan.accesses.iter().position(|a| a.field == *field) {
             return Ok(Some(index));
         }
+
         let Some(route) = path(self.model, self.plan.table, field.table)? else {
             return Ok(None);
         };
@@ -198,11 +221,31 @@ impl AnchorBuilder<'_> {
                 Target::Derived(check_row(&ast, &ColumnScope { table }).map_err(error)?)
             }
         };
+        let shift = match &self.plan.shift {
+            Some((ShiftOn::Field(f), by)) if f == field => Some(AccessShift {
+                by: *by,
+                column: None,
+            }),
+            Some((ShiftOn::Column(t, c), by)) if *t == field.table => {
+                let reads = match &target {
+                    Target::Column(position) => position == c,
+                    Target::Derived(expr) => expr
+                        .slots()
+                        .contains(&u32::try_from(*c).unwrap_or(u32::MAX)),
+                };
+                reads.then_some(AccessShift {
+                    by: *by,
+                    column: Some(*c),
+                })
+            }
+            _ => None,
+        };
         self.plan.accesses.push(Access {
             field: field.clone(),
             path: route,
             target,
             ty: found.ty,
+            shift,
         });
         Ok(Some(self.plan.accesses.len() - 1))
     }
@@ -260,12 +303,6 @@ pub(crate) fn plan(model: &Model, query: &Query) -> Result<Plan, QueryError> {
         let metric = model
             .metric(id)
             .ok_or_else(|| error(format!("unknown metric {id}")))?;
-        if metric.time_offset.is_some() {
-            return Err(error(format!(
-                "metric `{}` shifts time, which queries don't support yet",
-                metric.name
-            )));
-        }
         needed.push(id);
         if let MetricBody::Derived { inputs, .. } = &metric.body {
             stack.extend(inputs);
@@ -293,17 +330,20 @@ pub(crate) fn plan(model: &Model, query: &Query) -> Result<Plan, QueryError> {
         // One plan per anchor *and* selection it sees: a metric that ignores
         // a selection groups its own rows, exactly as a separate SQL query
         // over that table would.
-        let fresh = anchor_plan(model, *anchor, query, &ignored)?;
+        let shift = match &metric.time_offset {
+            None => None,
+            Some(offset) => Some((shift_on(model, &offset.field)?, shift_of(offset))),
+        };
+        let fresh = anchor_plan(model, *anchor, query, &ignored, shift)?;
         let signature = |plan: &AnchorPlan| -> Vec<FieldRef> {
             plan.conditions
                 .iter()
                 .map(|(a, _)| plan.accesses[*a].field.clone())
                 .collect()
         };
-        let index = if let Some(index) = anchors
-            .iter()
-            .position(|a| a.table == *anchor && signature(a) == signature(&fresh))
-        {
+        let index = if let Some(index) = anchors.iter().position(|a| {
+            a.table == *anchor && a.shift == fresh.shift && signature(a) == signature(&fresh)
+        }) {
             index
         } else {
             anchors.push(fresh);
@@ -445,7 +485,7 @@ pub(crate) fn values(
     };
     let mut builder = AnchorBuilder {
         model,
-        plan: anchor_plan(model, field.table, &query, &|_| false)?,
+        plan: anchor_plan(model, field.table, &query, &|_| false, None)?,
     };
     let access = builder
         .access(field)?
@@ -504,9 +544,56 @@ pub(crate) fn relevant(model: &Model, query: &Query) -> Result<Selection, QueryE
     ))
 }
 
+/// The column a `time_offset`'s field is (or the field, when derived).
+fn shift_on(model: &Model, field: &FieldRef) -> Result<ShiftOn, QueryError> {
+    let found = model
+        .dataset(field.table)
+        .and_then(|d| d.field(&field.field))
+        .ok_or_else(|| error(format!("unknown field `{}`", label(model, field))))?;
+    Ok(match &found.source {
+        FieldSource::Column(id) => ShiftOn::Column(
+            field.table,
+            model
+                .table(field.table)
+                .and_then(|t| t.columns.iter().position(|c| c.id == *id))
+                .ok_or_else(|| error("unknown column"))?,
+        ),
+        FieldSource::Derived { .. } => ShiftOn::Field(field.clone()),
+    })
+}
+
+/// How a `time_offset` moves its field's values: back by the offset reads
+/// as forward, so `-1y` is `+12 months`.
+fn shift_of(offset: &tidepool_model::ir::TimeOffset) -> Shift {
+    let amount = -offset.amount;
+    match offset.unit {
+        TimeGrain::Day => Shift {
+            months: 0,
+            days: amount,
+        },
+        TimeGrain::Week => Shift {
+            months: 0,
+            days: amount.saturating_mul(7),
+        },
+        TimeGrain::Month => Shift {
+            months: amount,
+            days: 0,
+        },
+        TimeGrain::Quarter => Shift {
+            months: amount.saturating_mul(3),
+            days: 0,
+        },
+        TimeGrain::Year => Shift {
+            months: amount.saturating_mul(12),
+            days: 0,
+        },
+    }
+}
+
 fn empty(table: TableId) -> AnchorPlan {
     AnchorPlan {
         table,
+        shift: None,
         accesses: Vec::new(),
         conditions: Vec::new(),
         dims: Vec::new(),
@@ -522,10 +609,14 @@ fn anchor_plan(
     anchor: TableId,
     query: &Query,
     ignored: &dyn Fn(&FieldRef) -> bool,
+    shift: Option<(ShiftOn, Shift)>,
 ) -> Result<AnchorPlan, QueryError> {
     let mut builder = AnchorBuilder {
         model,
-        plan: empty(anchor),
+        plan: AnchorPlan {
+            shift,
+            ..empty(anchor)
+        },
     };
     let mut seen = BTreeSet::new();
     for (field, condition) in &query.selection.0 {

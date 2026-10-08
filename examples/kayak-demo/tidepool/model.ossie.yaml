@@ -1,0 +1,68 @@
+version: "0.2.0"
+name: plant
+datasets:
+  - name: machines
+    source: machines
+    primary_key: [machine_id]
+    fields:
+      - name: name
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: name }] }
+      - name: line
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: line }] }
+      - name: kind
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: kind }] }
+  - name: readings
+    source: readings
+    fields:
+      - name: at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+      - name: minute                       # the live trend's buckets
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: "DATE_TRUNC('minute', at)" }] }
+        datatype: DateTimeTz
+  - name: stoppages
+    source: stoppages
+    fields:
+      - name: started_at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: started_at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+      - name: reason
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: reason }] }
+
+relationships:
+  - name: reading_machine
+    from: readings
+    to: machines
+    from_columns: [machine_id]
+    to_columns: [machine_id]
+  - name: stoppage_machine
+    from: stoppages
+    to: machines
+    from_columns: [machine_id]
+    to_columns: [machine_id]
+
+metrics:
+  - name: produced
+    description: Good and rejected units together
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(readings.produced)" }] }
+  - name: rejected
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(readings.rejected)" }] }
+  - name: scrap_rate
+    description: Rejected units per unit produced
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "rejected / produced" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived"}'
+  - name: avg_temperature
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "AVG(readings.temperature)" }] }
+  - name: peak_vibration
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "MAX(readings.vibration)" }] }
+  - name: stoppage_count
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "stoppages"}'
+  - name: downtime_minutes
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(stoppages.minutes)" }] }

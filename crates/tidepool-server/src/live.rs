@@ -814,7 +814,11 @@ fn start(state: &Arc<AppState>) {
                     let Some(state) = Weak::upgrade(&weak) else { break };
                     // the newest snapshot is read inside: epochs published
                     // meanwhile are skipped, not queued
-                    let _ = tokio::task::spawn_blocking(move || state.hub.refresh_all(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let started = std::time::Instant::now();
+                        state.hub.refresh_all(&state);
+                        state.counters.refresh.record(started.elapsed());
+                    }).await;
                 }
                 _ = status.tick() => {
                     let Some(state) = Weak::upgrade(&weak) else { break };

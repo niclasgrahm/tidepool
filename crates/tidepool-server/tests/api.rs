@@ -426,3 +426,145 @@ async fn status_reports_the_log_when_data_is_kept_on_disk() {
     assert_eq!(status["durability"]["last_lsn"], 2);
     assert_eq!(status["durability"]["checkpoint_lsn"], 0);
 }
+
+#[tokio::test]
+async fn metrics_count_what_happened_in_the_prometheus_format() {
+    let server = ready_state();
+    let body = r#"[{"customer_id": "c1", "name": "Ada", "region": "north"}]"#;
+    let reply = send(
+        Arc::clone(&server),
+        request(
+            HttpMethod::POST,
+            "/v1/tables/customers/rows?wait=visible",
+            &[("content-type", "application/json")],
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let reply = call(Arc::clone(&server), HttpMethod::GET, "/metrics").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(
+        reply
+            .header("content-type")
+            .is_some_and(|t| t.starts_with("text/plain; version=0.0.4"))
+    );
+    let text = reply.text();
+    for wanted in [
+        "tidepool_table_rows{table=\"customers\"} 1",
+        "tidepool_rows_written_total{table=\"customers\"} 1",
+        "tidepool_ingest_requests_total{table=\"customers\",op=\"write\",status=\"200\"} 1",
+        "# TYPE tidepool_epoch_publish_seconds summary",
+    ] {
+        assert!(text.contains(wanted), "no `{wanted}` in:\n{text}");
+    }
+    // every sample: a name, maybe labels, a number
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let (series, value) = line.rsplit_once(' ').unwrap_or_default();
+        assert!(value.parse::<f64>().is_ok(), "not a number in `{line}`");
+        let name = series.split('{').next().unwrap_or_default();
+        assert!(
+            name.starts_with("tidepool_")
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "bad name in `{line}`"
+        );
+    }
+}
+
+fn three_tokens() -> Tokens {
+    Tokens {
+        ingest: Some("ingest-secret".into()),
+        read: Some("read-secret".into()),
+        admin: Some("admin-secret".into()),
+    }
+}
+
+#[tokio::test]
+async fn the_admin_token_is_good_for_every_level() {
+    let server = state(common::retail(), three_tokens(), None);
+    let with = |path: &str, method: HttpMethod, body: &'static str| {
+        let server = Arc::clone(&server);
+        let path = path.to_string();
+        async move {
+            send(
+                server,
+                request(
+                    method,
+                    &path,
+                    &[
+                        ("authorization", "Bearer admin-secret"),
+                        ("content-type", "application/json"),
+                    ],
+                    body,
+                ),
+            )
+            .await
+        }
+    };
+    assert_eq!(
+        with("/v1/tables", HttpMethod::GET, "").await.status,
+        StatusCode::OK
+    );
+    let rows = r#"[{"customer_id": "c1", "name": "Ada", "region": "north"}]"#;
+    let reply = with("/v1/tables/customers/rows", HttpMethod::POST, rows).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+}
+
+#[tokio::test]
+async fn a_token_traded_for_a_session_works_until_signing_out() {
+    let server = state(common::retail(), three_tokens(), None);
+    let start = |token: &'static str| {
+        let server = Arc::clone(&server);
+        async move {
+            send(
+                server,
+                request(
+                    HttpMethod::POST,
+                    "/v1/auth/session",
+                    &[("authorization", &format!("Bearer {token}"))],
+                    "",
+                ),
+            )
+            .await
+        }
+    };
+    let reply = start("read-secret").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({"read": true, "ingest": false, "admin": false})
+    );
+    let set = reply.header("set-cookie").unwrap_or_default();
+    assert!(
+        set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+        "{set}"
+    );
+    let cookie = set.split(';').next().unwrap_or_default().to_string();
+    let with_cookie = |method: HttpMethod, path: &'static str| {
+        let (server, cookie) = (Arc::clone(&server), cookie.clone());
+        async move { send(server, request(method, path, &[("cookie", &cookie)], "")).await }
+    };
+    assert_eq!(
+        with_cookie(HttpMethod::GET, "/v1/tables").await.status,
+        StatusCode::OK
+    );
+    // a read session is a read session
+    assert_eq!(
+        with_cookie(HttpMethod::GET, "/v1/config").await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let me = with_cookie(HttpMethod::GET, "/v1/auth/session").await;
+    assert_eq!(me.json()["read"], true);
+    let out = with_cookie(HttpMethod::DELETE, "/v1/auth/session").await;
+    assert!(
+        out.header("set-cookie")
+            .is_some_and(|c| c.contains("Max-Age=0"))
+    );
+    assert_eq!(
+        with_cookie(HttpMethod::GET, "/v1/tables").await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    // an admin session opens everything; a bad token opens nothing
+    assert_eq!(start("admin-secret").await.json()["admin"], true);
+    assert_eq!(start("nope").await.status, StatusCode::UNAUTHORIZED);
+}

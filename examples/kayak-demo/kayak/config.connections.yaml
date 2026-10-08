@@ -1,0 +1,4 @@
+plant:
+  type: mqtt
+  host: mosquitto
+  port: 1883

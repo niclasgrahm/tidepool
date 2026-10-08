@@ -91,6 +91,14 @@ crash:
 bench-restart *args:
   cargo run --release -p tidepool-bench -- restart {{args}}
 
+# the container image (UI included): tidepool:dev
+docker:
+  docker build -t tidepool:dev .
+
+# the Kayak demo: MQTT → Kayak → Tidepool, a live plant floor (needs Kayak beside this repo, or KAYAK_SRC)
+demo:
+  cd examples/kayak-demo && docker compose up --build
+
 # the DuckDB oracle at depth, release build (args: number of seeds)
 oracle seeds="400":
   TIDEPOOL_ORACLE_SEEDS={{seeds}} cargo test --release -p tidepool-oracle

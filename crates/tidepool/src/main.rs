@@ -4,6 +4,7 @@
 //! the config subcommands.
 
 mod check;
+mod quickstart;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -53,6 +54,26 @@ enum Command {
         #[arg(long)]
         allow_destructive: bool,
     },
+    /// Start a project: the retail example (three tables, a model, a
+    /// dashboard) in a new directory.
+    Init {
+        /// Where to write it.
+        #[arg(default_value = "tidepool-project")]
+        dir: PathBuf,
+    },
+    /// Send sample data to a server running an `init` project: customers,
+    /// products, ninety days of orders, then new orders as they happen.
+    Feed {
+        /// The server.
+        #[arg(long, default_value = "http://127.0.0.1:7070")]
+        server: String,
+        /// New orders a second.
+        #[arg(long, default_value_t = 20)]
+        rate: u64,
+        /// Stop after this many seconds (default: run until stopped).
+        #[arg(long)]
+        seconds: Option<u64>,
+    },
     /// Check a config directory: every file, and how they fit together.
     Validate {
         /// The config directory.
@@ -74,6 +95,19 @@ enum Command {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Validate { config } => check::validate(&config),
+        Command::Init { dir } => quickstart::init(&dir),
+        Command::Feed {
+            server,
+            rate,
+            seconds,
+        } => {
+            // the ingest token, if the server wants one (the admin one works too)
+            let token = std::env::var("TIDEPOOL_INGEST_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("TIDEPOOL_ADMIN_TOKEN").ok())
+                .filter(|t| !t.is_empty());
+            quickstart::feed(&server, rate, token.as_deref(), seconds)
+        }
         Command::Plan { config, base } => check::plan(&config, base.as_deref()),
         Command::Serve {
             config,
@@ -163,6 +197,7 @@ async fn run_server(
         },
         dir: config.map(std::path::Path::to_path_buf),
     };
-    let state = AppState::open(project, writer, ui, Tokens::from_env(), allow_destructive).await?;
+    let tokens = Tokens::from_settings(&model.server.auth);
+    let state = AppState::open(project, writer, ui, tokens, allow_destructive).await?;
     serve(listen, Arc::new(state)).await
 }

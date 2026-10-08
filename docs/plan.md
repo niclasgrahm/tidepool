@@ -81,7 +81,7 @@ The data directory is separate and is the server's internal state (see §4.7). R
 
 ### 3.2 `tidepool.yaml`
 
-As of M7 the server config accepts `listen`, `data_dir`, `epoch_interval`, `memory_budget`, `durability` and `config_writeback`; `auth` and `agents` are added with M8, since unknown keys are rejected.
+As of M8 the server config accepts every key below.
 
 ```yaml
 listen: 0.0.0.0:7070
@@ -91,9 +91,9 @@ memory_budget: 75%               # of system RAM, for data + caches
 cache_budget: 15%                # share of memory_budget reserved for result/partial caches
 durability: fsync                # fsync | async (ack before fsync)
 auth:
-  admin_token_env: TIDEPOOL_ADMIN_TOKEN    # config changes, MCP apply
+  admin_token_env: TIDEPOOL_ADMIN_TOKEN    # config changes, MCP apply; good for every level
   ingest_token_env: TIDEPOOL_INGEST_TOKEN  # ingest endpoints
-  viewer: open                             # open | token
+  read_token_env: TIDEPOOL_READ_TOKEN      # dashboards and queries; unset: open
 config_writeback:
   enabled: true
   git_commit: true               # commit applied changes if config dir is a git repo
@@ -748,7 +748,7 @@ Every applied version is kept under `catalog/versions/`. `GET /v1/config/version
 | UI | `GET /*` → embedded SPA |
 
 **Auth (v1):**
-Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_READ_TOKEN`, `TIDEPOOL_ADMIN_TOKEN`), enforced by middleware built from each endpoint's declared `Access`; a level without a token is open. M8 then ports Kayak's auth stack instead of designing a new one:
+Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_READ_TOKEN`, `TIDEPOOL_ADMIN_TOKEN`), enforced by middleware built from each endpoint's declared `Access`; a level without a token is open. Since M8 the admin token is good for every level, the variables are named in `tidepool.yaml`'s `auth`, and a browser trades a token for an in-memory session (`POST /v1/auth/session`, an `HttpOnly` cookie; the UI does it and drops `?token=` from the address bar). What follows ports Kayak's auth stack instead of designing a new one; of it, M8 did the session cookie, and the rest comes after v0.1 (§12):
 - **Ingest:** bearer token (`TIDEPOOL_INGEST_TOKEN`), constant-time comparison. This is what Kayak's `tidepool` output sends.
 - **Roles:** `viewer` and `admin` (config apply, MCP write tools), declared per endpoint in the endpoint table.
 - **Humans:** HTTP Basic + session cookie, or **JWT** validated against an identity provider's JWKS.
@@ -946,6 +946,8 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
   - the config dir reflects every change, and a fresh `tidepool serve` from it reproduces the same model
 
 ### M8: Agents and v0.1 polish (2–3 wks)
+
+**Status: done 2026-10-08.** MCP at `POST /mcp` (Streamable HTTP, JSON-RPC answered with one JSON body; protocol versions 2025-06-18, 2025-03-26 and 2024-11-05) with the §9.1 tools; each tool is an in-process call of the documented endpoint with the caller's credentials, and `apply_change` applies what `agents.auto_apply` allows (safe by default) and proposes the rest. Auth: token names under `auth:`, the admin token good for every level, browser sessions (`/v1/auth/session`, an `HttpOnly` cookie; the UI trades `?token=` for one and drops it from the address bar; the config pages ask for the admin token). `GET /metrics` in the Prometheus format; epoch publish and live refresh times on the status page. `time_offset` metrics: the time field's column is moved by the offset in the metric's own anchor plan (derived fields over it move too), on the general path and in the fast path as values load; the oracle generates them (400 seeds; a fast path that doesn't move values fails), and the retail KPI shows its year-before comparison. CSV: `POST /v1/query?format=csv`, and a CSV button on every visual (its query under the selection). `tidepool init` writes the retail example; `tidepool feed` sends it ninety days of orders and then live ones; a test runs init → validate → serve → feed → query in about three seconds. A Dockerfile (the UI embedded, 112 MB, non-root, the example as the default project) and `examples/kayak-demo`: a simulated plant on MQTT → Kayak → Tidepool's plant-floor dashboard, from one `docker compose up`. User documentation in `docs/guide/`. Changes from the plan: MCP is hand-written rather than `rmcp` (a few methods; one axum stack); of Kayak's auth stack, the session cookie is in and accounts with passwords, JWT/JWKS and the iframe handshake come after v0.1; the demo uses Kayak's generic `http` output until K1's `tidepool` output exists; the epoch interval now changes live, as §8.2 says it should.
 - MCP endpoint and tools, auth tokens, `/metrics`, status page.
 - `time_offset` metrics, CSV export, documentation, and a quick-start (`tidepool init` creates an example project).
 - **Kayak demo:** `docker compose` with an MQTT/OPC UA source → Kayak → Tidepool → a live dashboard (§15.4).
@@ -973,6 +975,8 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 9. Kayak `tidepool` **input**: subscribe to a live metric query and turn updates into messages (alerting, webhooks), see §15.3
 10. Perspective-based pivot visual
 11. Engine self-metrics exposed as Tidepool tables (`_system.*`), i.e. a dashboard of Tidepool in Tidepool
+12. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
+13. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
 
 ---
 

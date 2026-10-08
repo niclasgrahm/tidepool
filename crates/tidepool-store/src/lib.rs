@@ -22,4 +22,4 @@ pub mod writer;
 pub use batch::{Batch, Rejected, RowError, Shape};
 pub use migrate::{Migration, ModelVersion, Rebuilt};
 pub use store::{Applied, Op, Snapshot, Store, TableSnapshot};
-pub use writer::{Busy, Change, LogStatus, Receipt, WriterConfig, WriterHandle, spawn};
+pub use writer::{Busy, Change, LogStatus, Receipt, Timing, WriterConfig, WriterHandle, spawn};

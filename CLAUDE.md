@@ -29,6 +29,8 @@ just frontend        # build the UI into frontend/dist (trunk)
 just build           # just frontend, then a release binary with the UI embedded
 just test-embed      # tests of the embedded UI; needs `just build` first
 just e2e             # the browser end to end: headless Chrome against the built UI
+just docker          # the container image, UI included (tidepool:dev)
+just demo            # the Kayak demo: MQTT → Kayak → Tidepool (docker compose)
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
@@ -37,6 +39,8 @@ just bench-live      # freshness: 50 WebSocket sessions while ingesting 100k row
 just feed            # keep a running server (`just run`) fed with retail data, to watch it live
 just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
 just crash           # 1,000 crash points and 25 kill -9 cycles (`just test` runs fewer)
+cargo run -p tidepool -- init shop && cargo run -p tidepool -- serve --config shop   # the quick-start
+cargo run -p tidepool -- feed                                 # sample data for an `init` project
 cargo run -p tidepool -- validate --config examples/retail    # check a config directory
 cargo run -p tidepool -- plan --config new/ --base old/       # what changes, and what it costs
 cargo insta review   # accept or reject changed golden snapshots (diagnostics, plans)
@@ -104,7 +108,8 @@ new entry is covered by them automatically.
 `Access` is declared per endpoint and enforced by `auth::authorize` from the
 same entry (see "Ingest over HTTP" below).
 
-Probes live at the root (`/healthz`, `/readyz`); everything else is under `/v1`.
+Probes, metrics and MCP live at the root (`/healthz`, `/readyz`, `/metrics`,
+`/mcp`), where their clients look; everything else is under `/v1`.
 
 ### Config files and diagnostics (`tidepool-config`)
 
@@ -222,8 +227,11 @@ for 24 h (into the WAL in M5).
 
 Access is enforced from the endpoint table: `auth::authorize` wraps every
 route with its declared `Access`, checking the bearer token configured for
-that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`; unset = open).
-`every_protected_endpoint_wants_its_token` walks the table to prove it.
+that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`, names configurable under
+`auth:`; unset = open; the admin token is good for every level) or a
+browser session (`POST /v1/auth/session` trades a token for an `HttpOnly`
+cookie; in memory, like Kayak's). `every_protected_endpoint_wants_its_token`
+walks the table to prove it.
 
 ### The query engine (`tidepool-engine`)
 
@@ -333,6 +341,31 @@ covers it, and check it would catch a planted bug in the new code.
 it (no relationships, other encodings, an extra column), changes the
 model midway with a background build and writes going on, then checks
 every query.
+
+### Agents, metrics, the quick-start
+
+- **MCP** (`mcp.rs`): JSON-RPC at `POST /mcp`, hand-written (no `rmcp`).
+  Every tool is an in-process call of the documented API with the caller's
+  credentials (`tower::ServiceExt::oneshot` on `api_router`), so a tool
+  can't do or answer anything its endpoint wouldn't. The one policy of its
+  own: `apply_change` applies what `agents.auto_apply` allows and proposes
+  the rest. A new tool wraps an endpoint the same way and gets a case in
+  `tests/mcp.rs`.
+- **`/metrics`** (`metrics.rs`): gauges read from the snapshot when
+  scraped, counters (`Counters` in `AppState`) kept as requests come in,
+  timings as `Timing` (`_sum`/`_count`). Names: `tidepool_…`, `_total`,
+  `_seconds`, `_bytes`.
+- **`tidepool init` / `tidepool feed`** (`crates/tidepool/src/quickstart.rs`):
+  the retail example compiled into the binary, and a dependency-free
+  feeder. `tests/quickstart.rs` runs init → validate → serve → feed →
+  query, timed.
+- **`time_offset` metrics** move their time field's *column* (every read of
+  it, including derived fields over it) by the offset, in their own anchor
+  plan (`ShiftOn`, `AccessShift` in `plan.rs`); the fast path shifts values
+  as they load (`move_in_time`). The oracle generates them.
+
+User documentation lives in `docs/guide/`; keep it true when behaviour
+changes (it's what a user reads, unlike the plan).
 
 ### UI serving
 

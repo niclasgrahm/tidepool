@@ -41,7 +41,11 @@ fn current_hash() -> String {
 fn App() -> impl IntoView {
     let live = Live::new();
     provide_context(live);
-    live.connect();
+    // a `?token=` becomes a session first; the socket then rides the cookie
+    leptos::task::spawn_local(async move {
+        api::adopt_token().await;
+        live.connect();
+    });
 
     let route = RwSignal::new(Route::parse(&current_hash()));
     if let Some(window) = web_sys::window() {

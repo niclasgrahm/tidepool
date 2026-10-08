@@ -29,7 +29,7 @@ use roaring::{RoaringBitmap, RoaringTreemap};
 use tidepool_config::types::ColumnType;
 use tidepool_expr::eval::{Row, eval};
 use tidepool_expr::ir::{AggFunc, Expr};
-use tidepool_expr::temporal::{Part, date_from_days, days_from_date, trunc_date};
+use tidepool_expr::temporal::{Part, Shift, date_from_days, days_from_date, trunc_date};
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{Model, TableId};
 use tidepool_store::column::ColumnData;
@@ -73,6 +73,9 @@ struct Read<'s> {
     /// The column the value finally comes from.
     layout: ColumnLayout,
     dict: Option<&'s DictSnapshot>,
+    /// A time read moved by a `time_offset` (dates as days, timestamps as
+    /// microseconds), applied as values are loaded.
+    shift: Option<Shift>,
 }
 
 impl Read<'_> {
@@ -312,6 +315,15 @@ pub(crate) fn prepare<'s>(
             }
             _ => None,
         };
+        // a shifted time column read as itself: stored integers are moved
+        // as they load; anything computed from it takes the general path
+        if access.shift.is_some()
+            && !(kind == Kind::Ints
+                && matches!(access.target, Target::Column(_))
+                && matches!(access.ty, Type::Date | Type::Timestamp | Type::TimestampTz))
+        {
+            return None;
+        }
         reads.push(Read {
             column,
             kind,
@@ -321,6 +333,7 @@ pub(crate) fn prepare<'s>(
             joined,
             layout,
             dict,
+            shift: access.shift.map(|s| s.by),
         });
     }
 
@@ -486,6 +499,43 @@ fn decode_into(column: &ColumnData, rows: Range<usize>, out: &mut Values) {
         Values::Codes(v) => column.decode_codes(rows, v),
         Values::Ints(v, n) => column.decode_i64(rows, v, n),
         Values::Floats(v, n) => column.decode_f64(rows, v, n),
+    }
+}
+
+/// Move stored dates (days) or timestamps (microseconds) by `shift`: every
+/// value, or those at `sel`. Rows of one morsel are mostly a few days, so
+/// the last day's answer is kept. A value past the calendar's range (and a
+/// NULL's placeholder) stays as it is.
+fn move_in_time(shift: Shift, ty: Type, values: &mut [i64], sel: Option<&[u32]>) {
+    const DAY: i64 = 86_400_000_000;
+    let mut last: Option<(i64, i64)> = None;
+    let mut day = |d: i64| -> i64 {
+        match last {
+            Some((from, to)) if from == d => to,
+            _ => {
+                let to = shift.days(d).unwrap_or(d);
+                last = Some((d, to));
+                to
+            }
+        }
+    };
+    let mut one = |v: &mut i64| {
+        *v = if ty == Type::Date {
+            day(*v)
+        } else {
+            let (d, time) = (v.div_euclid(DAY), v.rem_euclid(DAY));
+            day(d).saturating_mul(DAY).saturating_add(time)
+        };
+    };
+    match sel {
+        Some(sel) => {
+            for r in sel {
+                if let Some(v) = values.get_mut(*r as usize) {
+                    one(v);
+                }
+            }
+        }
+        None => values.iter_mut().for_each(one),
     }
 }
 
@@ -1502,6 +1552,10 @@ impl Prepared<'_> {
     ) {
         self.load_codes(view, segment, read, rows.clone(), sel, out);
         let read = &self.reads[read];
+        if let (Some(shift), Values::Ints(values, _)) = (read.shift, &mut *out) {
+            let sparse = sel.len() * SPARSE < rows.len();
+            move_in_time(shift, read.ty, values.as_mut_slice(), sparse.then_some(sel));
+        }
         if let (None, Some(derived), Values::Codes(codes)) = (&read.gathered, &read.derived, out) {
             let to = |code: u32| derived.map.get(code as usize).copied().unwrap_or(0);
             if sel.len() * SPARSE < rows.len() {

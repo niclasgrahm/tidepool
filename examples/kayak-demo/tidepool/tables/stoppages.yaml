@@ -1,0 +1,10 @@
+# A machine stood still: when, for how long, and why.
+name: stoppages
+mode: append
+event_time: started_at
+columns:
+  stoppage_id: { type: string, encoding: plain }
+  machine_id:  { type: string }
+  started_at:  { type: timestamptz }
+  minutes:     { type: float64 }
+  reason:      { type: string }

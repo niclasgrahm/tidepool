@@ -593,9 +593,15 @@ fn the_writer_rebuilds_in_the_background_and_takes_the_new_epoch_interval() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let snapshot = writer.snapshot();
-    assert_eq!(snapshot.version, 2, "the rebuild went live");
+    assert_eq!(writer.snapshot().version, 2, "the rebuild went live");
     assert!(writer.rebuild().is_none());
+    // the batch sent meanwhile may have landed after the swap, when epochs
+    // are an hour apart: publish it now
+    assert!(
+        runtime.block_on(writer.publish()).is_ok(),
+        "the writer stopped"
+    );
+    let snapshot = writer.snapshot();
     check_merged(&snapshot, 5);
     assert_eq!(rows(&snapshot, "orders").len(), 110);
 

@@ -212,6 +212,30 @@ pub fn next_sort(current: Option<&(String, bool)>, column: &str, numeric: bool) 
     }
 }
 
+/// The query behind a visual, under a selection: what its CSV export runs
+/// (the visual's dimensions and metrics, every selected field as a filter).
+#[must_use]
+pub fn export_request(
+    info: &tidepool_protocol::live::VisualInfo,
+    selection: &[tidepool_protocol::live::SelectedField],
+) -> tidepool_protocol::QueryRequest {
+    tidepool_protocol::QueryRequest {
+        metrics: info.metrics.clone(),
+        dimensions: info.dimensions.clone(),
+        filters: selection
+            .iter()
+            .map(|s| tidepool_protocol::QueryFilter {
+                field: s.field.clone(),
+                values: s.values.clone(),
+                from: s.from.clone(),
+                to: s.to.clone(),
+            })
+            .collect(),
+        sort: Vec::new(),
+        limit: None,
+    }
+}
+
 /// The window a filter list should ask for, if the rows on screen
 /// (`first`, `visible` of them) aren't all in the one it has (`have`:
 /// offset and length). Asks for a margin either side, so scrolling a bit
@@ -509,5 +533,39 @@ mod tests {
         assert!(next_sort(Some(&by_name), "revenue", true));
         let by_revenue = ("revenue".to_string(), true);
         assert!(!next_sort(Some(&by_revenue), "revenue", true));
+    }
+
+    #[test]
+    fn an_export_is_the_visual_under_the_selection() {
+        use tidepool_protocol::live::{GridAt, SelectedField, VisualInfo};
+        let info = VisualInfo {
+            id: "by_region".into(),
+            visual_type: "bar".into(),
+            dimensions: vec![tidepool_protocol::QueryDimension {
+                field: "customers.region".into(),
+                grain: None,
+            }],
+            metrics: vec!["revenue".into()],
+            compare: None,
+            on_click: true,
+            on_brush: false,
+            at: GridAt {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+        };
+        let selection = vec![SelectedField {
+            field: "orders.ordered_at".into(),
+            values: None,
+            from: Some(json!("2026-01-01T00:00:00Z")),
+            to: None,
+        }];
+        let request = export_request(&info, &selection);
+        assert_eq!(request.metrics, vec!["revenue".to_string()]);
+        assert_eq!(request.dimensions[0].field, "customers.region");
+        assert_eq!(request.filters[0].field, "orders.ordered_at");
+        assert_eq!(request.filters[0].from, Some(json!("2026-01-01T00:00:00Z")));
     }
 }

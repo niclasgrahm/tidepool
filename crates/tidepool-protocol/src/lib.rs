@@ -289,6 +289,13 @@ pub struct StatusInfo {
     /// A model change being rebuilt in the background.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild: Option<config::RebuildInfo>,
+    /// The last epoch's publish, in milliseconds.
+    #[serde(default)]
+    pub epoch_publish_ms: f64,
+    /// The last refresh of every live session after an epoch, in
+    /// milliseconds.
+    #[serde(default)]
+    pub live_refresh_ms: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -312,4 +319,13 @@ pub struct DurabilityStatus {
     /// Seconds since that checkpoint was written (`None`: none yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_age_seconds: Option<u64>,
+}
+
+/// What a request may do: `GET`/`POST /v1/auth/session`. A level that
+/// needs no token is `true` for everyone.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionInfo {
+    pub read: bool,
+    pub ingest: bool,
+    pub admin: bool,
 }

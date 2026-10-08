@@ -1,0 +1,13 @@
+# One reading per machine per second.
+name: readings
+mode: append
+event_time: at
+retention: 7d
+columns:
+  machine_id:  { type: string }
+  at:          { type: timestamptz }
+  temperature: { type: float64 }
+  vibration:   { type: float64 }
+  speed:       { type: int32 }
+  produced:    { type: int32 }
+  rejected:    { type: int32 }

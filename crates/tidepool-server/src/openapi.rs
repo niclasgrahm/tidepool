@@ -212,6 +212,13 @@ fn content(body: Body) -> Option<Value> {
         }),
         Body::AnyJson => json!({ "type": "object" }),
         Body::Rows => return Some(rows_content("")),
+        Body::JsonOrCsv(name) => {
+            return Some(json!({
+                content_type: { "schema": { "$ref": format!("{COMPONENTS}{name}") } },
+                "text/csv": { "schema": { "type": "string" } },
+            }));
+        }
+        Body::Text => json!({ "type": "string" }),
     };
     Some(json!({ content_type: { "schema": schema } }))
 }

@@ -117,9 +117,22 @@ pub enum MetricKind {
         anchor: String,
         sql: String,
         ignore: Ignore,
+        /// A `time_offset`: the metric is evaluated with this column moved
+        /// by the interval (`table`, `column`, the interval as DuckDB
+        /// writes it, whether the column is a date).
+        shift: Option<Shifted>,
     },
     /// `sql` combines other metrics, written `{name}`.
     Derived { inputs: Vec<String>, sql: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shifted {
+    pub table: String,
+    pub column: String,
+    /// The move as a DuckDB interval: `-1w` reads as `INTERVAL 7 DAY`.
+    pub interval: String,
+    pub date: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,6 +230,7 @@ fn base(
             anchor: anchor.to_string(),
             sql: sql.to_string(),
             ignore,
+            shift: None,
         },
     }
 }
@@ -581,6 +595,43 @@ pub fn schema(rng: &mut Rng) -> Schema {
             "d0",
             None,
             Ignore::None,
+        ),
+        {
+            // the same sum a while ago: a few days, a week, a month or a
+            // quarter, on the day or the timestamp (the data spans ~100 days)
+            let (offset, interval) = *rng.pick(&[
+                ("-3d", "3 DAY"),
+                ("-1w", "7 DAY"),
+                ("-1m", "1 MONTH"),
+                ("-1q", "3 MONTH"),
+                ("2d", "(-2) DAY"),
+            ]);
+            let (column, date) = *rng.pick(&[("day", true), ("seen_at", false)]);
+            let mut metric = base(
+                "f0_amount_before",
+                "SUM(f0.amount)",
+                "SUM(f0.amount)",
+                "f0",
+                Some(format!(
+                    r#"{{"time_offset": "{offset}", "time_field": "f0.{column}"}}"#
+                )),
+                Ignore::None,
+            );
+            if let MetricKind::Base { shift, .. } = &mut metric.kind {
+                *shift = Some(Shifted {
+                    table: "f0".into(),
+                    column: column.into(),
+                    interval: interval.into(),
+                    date,
+                });
+            }
+            metric
+        },
+        derived(
+            "f0_change",
+            &["f0_amount", "f0_amount_before"],
+            "f0_amount - f0_amount_before",
+            "{f0_amount} - {f0_amount_before}",
         ),
         derived(
             "f0_per_qty",

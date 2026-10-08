@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::{
     IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus, QueryRequest, QueryResult,
-    ServerInfo, StatusInfo, TableInfo, config,
+    ServerInfo, SessionInfo, StatusInfo, TableInfo, config,
 };
 
 /// The error body every failing request comes back with.
@@ -99,10 +99,15 @@ pub enum Operation {
     ListChanges,
     ApproveChange,
     RejectChange,
+    Metrics,
+    StartSession,
+    GetSession,
+    EndSession,
+    Mcp,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 22] = [
+pub const OPERATIONS: [Operation; 27] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -125,6 +130,11 @@ pub const OPERATIONS: [Operation; 22] = [
     Operation::ListChanges,
     Operation::ApproveChange,
     Operation::RejectChange,
+    Operation::Metrics,
+    Operation::StartSession,
+    Operation::GetSession,
+    Operation::EndSession,
+    Operation::Mcp,
 ];
 
 impl Operation {
@@ -154,6 +164,11 @@ impl Operation {
             Self::ListChanges => "listChanges",
             Self::ApproveChange => "approveChange",
             Self::RejectChange => "rejectChange",
+            Self::Metrics => "metrics",
+            Self::StartSession => "startSession",
+            Self::GetSession => "getSession",
+            Self::EndSession => "endSession",
+            Self::Mcp => "mcp",
         }
     }
 }
@@ -275,6 +290,11 @@ pub enum Body {
     /// objects, newline-delimited JSON, or an Arrow IPC stream. The OpenAPI
     /// document spells out each table's row shape.
     Rows,
+    /// A JSON object of the named schema, or the same rows as CSV
+    /// (`?format=csv`).
+    JsonOrCsv(&'static str),
+    /// Plain text (the Prometheus exposition format).
+    Text,
 }
 
 impl Body {
@@ -282,8 +302,8 @@ impl Body {
     #[must_use]
     pub fn schema_name(self) -> Option<&'static str> {
         match self {
-            Self::Json(name) | Self::JsonArray(name) => Some(name),
-            Self::None | Self::AnyJson | Self::Rows => None,
+            Self::Json(name) | Self::JsonArray(name) | Self::JsonOrCsv(name) => Some(name),
+            Self::None | Self::AnyJson | Self::Rows | Self::Text => None,
         }
     }
 
@@ -293,9 +313,12 @@ impl Body {
     pub fn content_type(self) -> Option<&'static str> {
         match self {
             Self::None => None,
-            Self::Json(_) | Self::JsonArray(_) | Self::AnyJson | Self::Rows => {
-                Some("application/json")
-            }
+            Self::Json(_)
+            | Self::JsonArray(_)
+            | Self::AnyJson
+            | Self::Rows
+            | Self::JsonOrCsv(_) => Some("application/json"),
+            Self::Text => Some("text/plain"),
         }
     }
 }
@@ -577,7 +600,12 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Queries,
             access: Access::Read,
             params: vec![],
-            query: vec![],
+            query: vec![ParamDoc {
+                name: "format",
+                description: "`csv` for the answer as CSV (a header of column names, then \
+                              the rows), for spreadsheets and exports. JSON otherwise.",
+                example: "json",
+            }],
             request: Some(RequestDoc {
                 description: "What to compute.",
                 body: Body::Json("QueryRequest"),
@@ -586,7 +614,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 ResponseDoc {
                     status: 200,
                     description: "The answer.",
-                    body: Body::Json("QueryResult"),
+                    body: Body::JsonOrCsv("QueryResult"),
                 },
                 ResponseDoc {
                     status: 400,
@@ -873,6 +901,128 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/v1/auth/session",
+            method: Method::Post,
+            operation: Operation::StartSession,
+            summary: "Start a browser session",
+            description: "Trades the token in `Authorization: Bearer <token>` for a session \
+                          cookie (`HttpOnly`, `SameSite=Strict`), good for the levels the \
+                          token is: the UI does this so tokens stay out of URLs and logs. \
+                          Sessions end after 12 idle hours, on sign-out, or when the server \
+                          stops.",
+            tag: Tag::Server,
+            access: Access::Public,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The session's levels; the cookie is set.",
+                    body: Body::Json("SessionInfo"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "No bearer token.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 401,
+                    description: "The token is good for nothing here.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/auth/session",
+            method: Method::Get,
+            operation: Operation::GetSession,
+            summary: "What this request may do",
+            description: "The levels open to this request: by its session cookie, its bearer \
+                          token, or because they need no token.",
+            tag: Tag::Server,
+            access: Access::Public,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The levels.",
+                body: Body::Json("SessionInfo"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/auth/session",
+            method: Method::Delete,
+            operation: Operation::EndSession,
+            summary: "Sign out",
+            description: "Ends this browser's session and clears its cookie.",
+            tag: Tag::Server,
+            access: Access::Public,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "Signed out: what's left open to everyone.",
+                body: Body::Json("SessionInfo"),
+            }],
+        },
+        ApiDoc {
+            path: "/mcp",
+            method: Method::Post,
+            operation: Operation::Mcp,
+            summary: "MCP for agents",
+            description: "The Model Context Protocol over Streamable HTTP: JSON-RPC 2.0 \
+                          messages, each answered with one JSON body. Tools: describe_model, \
+                          preview_table, query_metrics, get_config, plan_change, \
+                          apply_change and ingest_rows. Each tool is the HTTP endpoint it \
+                          wraps, called with the caller's credentials, so tools that change \
+                          the config need the admin token and ingest_rows the ingest token. \
+                          apply_change applies what `agents.auto_apply` allows and proposes \
+                          the rest.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "A JSON-RPC message, or a batch of them.",
+                body: Body::AnyJson,
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The JSON-RPC reply (or replies).",
+                    body: Body::AnyJson,
+                },
+                ResponseDoc {
+                    status: 202,
+                    description: "A notification: nothing to reply.",
+                    body: Body::None,
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/metrics",
+            method: Method::Get,
+            operation: Operation::Metrics,
+            summary: "Prometheus metrics",
+            description: "The server in the Prometheus text format: rows, memory and \
+                          segments per table, ingest requests and rows, epoch publish and \
+                          live refresh times, query times, sessions, the log and \
+                          checkpoints, a running rebuild. At the root, where scrapers look.",
+            tag: Tag::Server,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The metrics.",
+                body: Body::Text,
+            }],
+        },
+        ApiDoc {
             path: "/healthz",
             method: Method::Get,
             operation: Operation::Health,
@@ -1015,6 +1165,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("VersionInfo", of(schema_for!(config::VersionInfo)));
     schemas.insert("ConfigVersion", of(schema_for!(config::ConfigVersion)));
     schemas.insert("PendingChange", of(schema_for!(config::PendingChange)));
+    schemas.insert("SessionInfo", of(schema_for!(SessionInfo)));
     schemas
 }
 
@@ -1093,8 +1244,13 @@ mod tests {
 
     #[test]
     fn versioned_api_lives_under_v1_and_probes_at_the_root() {
+        // probes, Prometheus metrics and the MCP endpoint are where their
+        // clients look for them (plan §9); everything else is versioned
         for endpoint in endpoints() {
-            let probe = matches!(endpoint.operation, Operation::Health | Operation::Ready);
+            let probe = matches!(
+                endpoint.operation,
+                Operation::Health | Operation::Ready | Operation::Metrics | Operation::Mcp
+            );
             assert_eq!(
                 !probe,
                 endpoint.path.starts_with("/v1/"),

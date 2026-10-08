@@ -319,6 +319,8 @@ pub fn Status() -> impl IntoView {
                                 <div><dt>"Table data"</dt><dd>{bytes(data)}</dd></div>
                                 <div><dt>"Dictionaries"</dt><dd>{bytes(s.dictionary_bytes)}</dd></div>
                                 <div><dt>"Caches"</dt><dd>{bytes(s.cache_bytes)}</dd></div>
+                                <div><dt>"Last epoch published in"</dt><dd>{format!("{:.1} ms", s.epoch_publish_ms)}</dd></div>
+                                <div><dt>"Live sessions refreshed in"</dt><dd>{format!("{:.1} ms", s.live_refresh_ms)}</dd></div>
                                 <div><dt>"Config version"</dt><dd><a href=Route::Config(crate::route::ConfigTab::History).href()>{format!("v{}", s.config_version)}</a></dd></div>
                             </dl>
                             {s.rebuild.map(|r| view! {

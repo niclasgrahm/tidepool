@@ -89,6 +89,46 @@ pub struct Busy;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stopped;
 
+/// How long something takes, kept as a count, a total and the last one:
+/// enough for an average, the Prometheus `_sum`/`_count` pair, and a
+/// status page. Lock-free; any thread records.
+#[derive(Debug, Default)]
+pub struct Timing {
+    count: AtomicU64,
+    total_micros: AtomicU64,
+    last_micros: AtomicU64,
+}
+
+impl Timing {
+    pub fn record(&self, took: Duration) {
+        let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total_micros.fetch_add(micros, Ordering::Relaxed);
+        self.last_micros.store(micros, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Seconds in total.
+    #[must_use]
+    pub fn total_seconds(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let total = self.total_micros.load(Ordering::Relaxed) as f64;
+        total / 1e6
+    }
+
+    /// The last one, in milliseconds.
+    #[must_use]
+    pub fn last_ms(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let last = self.last_micros.load(Ordering::Relaxed) as f64;
+        last / 1e3
+    }
+}
+
 /// The way in: cheap to clone, shared by every request handler.
 #[derive(Clone)]
 pub struct WriterHandle {
@@ -97,6 +137,8 @@ pub struct WriterHandle {
     epochs: watch::Receiver<u64>,
     log: Option<Arc<LogStatus>>,
     rebuild: Arc<std::sync::Mutex<Option<Rebuild>>>,
+    /// How long publishing an epoch takes (freezing, sealing, snapshots).
+    publishing: Arc<Timing>,
 }
 
 /// How the log and checkpoints stand, for status pages. Updated by the
@@ -231,6 +273,8 @@ pub fn spawn(
     let status = log.clone();
     let rebuild = Arc::new(std::sync::Mutex::new(None));
     let jobs = Arc::clone(&rebuild);
+    let publishing = Arc::new(Timing::default());
+    let timing = Arc::clone(&publishing);
     let thread = std::thread::Builder::new()
         .name("tidepool-writer".into())
         .spawn(move || {
@@ -243,6 +287,7 @@ pub fn spawn(
                 checkpointer.as_ref(),
                 status.as_deref(),
                 &jobs,
+                &timing,
             );
         })?;
     Ok((
@@ -252,6 +297,7 @@ pub fn spawn(
             epochs,
             log,
             rebuild,
+            publishing,
         },
         thread,
     ))
@@ -314,6 +360,7 @@ fn run(
     checkpointer: Option<&Checkpointer>,
     status: Option<&LogStatus>,
     jobs: &std::sync::Mutex<Option<Rebuild>>,
+    timing: &Timing,
 ) {
     let mut building: Option<Building> = None;
     // the config's, until a model change sets another (plan §8.2: safe)
@@ -324,7 +371,12 @@ fn run(
     let mut publish = |backend: &mut Backend| -> std::io::Result<u64> {
         // what's published is durable first (with a log)
         backend.commit()?;
-        if let Some((published, lsn)) = backend.publish() {
+        let started = Instant::now();
+        let published = backend.publish();
+        if published.is_some() {
+            timing.record(started.elapsed());
+        }
+        if let Some((published, lsn)) = published {
             let epoch = published.epoch;
             let published = Arc::new(published);
             snapshot.store(Arc::clone(&published));
@@ -345,8 +397,12 @@ fn run(
         {
             let job = building.take();
             if let Some(migration) = job.and_then(|j| Arc::try_unwrap(j.migration).ok()) {
-                interval = next_interval(backend.store(), &migration, interval);
-                next_tick = next_tick.min(Instant::now() + interval);
+                let next = next_interval(backend.store(), &migration, interval);
+                if next != interval {
+                    // the new clock starts now: a tick due on the old one doesn't fire
+                    interval = next;
+                    next_tick = Instant::now() + interval;
+                }
                 backend.migrate(migration, rebuilt);
                 if let Err(error) = publish(&mut backend) {
                     tracing::error!("the write-ahead log failed, stopping writes: {error}");
@@ -397,8 +453,12 @@ fn run(
                             let migration = backend.store().plan_migration(target);
                             let rows = migration.rows();
                             if rows == 0 {
-                                interval = next_interval(backend.store(), &migration, interval);
-                                next_tick = next_tick.min(Instant::now() + interval);
+                                let next = next_interval(backend.store(), &migration, interval);
+                                if next != interval {
+                                    // the new clock starts now: a tick due on the old one doesn't fire
+                                    interval = next;
+                                    next_tick = Instant::now() + interval;
+                                }
                                 backend.migrate(migration, Rebuilt::default());
                                 match publish(&mut backend) {
                                     Ok(epoch) => {
@@ -532,6 +592,12 @@ impl WriterHandle {
             .map_err(|_| "the writer has stopped".to_string())?
     }
 
+    /// How long publishing an epoch takes.
+    #[must_use]
+    pub fn publishing(&self) -> &Timing {
+        &self.publishing
+    }
+
     /// The rebuild in progress: (version, rows done, rows), if any.
     #[must_use]
     pub fn rebuild(&self) -> Option<(u64, u64, u64)> {
@@ -579,6 +645,7 @@ impl WriterHandle {
             epochs,
             log: None,
             rebuild: Arc::new(std::sync::Mutex::new(None)),
+            publishing: Arc::new(Timing::default()),
         };
         // the receiver, kept alive so the queue fills instead of disconnecting
         (handle, DropGuard(commands))

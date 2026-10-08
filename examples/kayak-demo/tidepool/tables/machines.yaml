@@ -1,0 +1,10 @@
+# Machines on the floor: the publisher announces them on startup (retained),
+# so this table fills before the first reading arrives.
+name: machines
+mode: upsert
+primary_key: [machine_id]
+columns:
+  machine_id: { type: string }
+  name:       { type: string, encoding: plain }
+  line:       { type: string }
+  kind:       { type: string }

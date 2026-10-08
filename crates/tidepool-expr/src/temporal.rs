@@ -149,8 +149,84 @@ pub fn trunc_micros(part: Part, micros: i64) -> i64 {
     micros.div_euclid(unit) * unit
 }
 
+/// A move in time: whole calendar months, then days. What a metric's
+/// `time_offset` does to its time field (plan §3.4): a value of that field
+/// is read as if it were this much later, so `-1y` (a year back) is read
+/// as `+12 months` and last year's rows land in this year's periods.
+///
+/// Months are added as SQL's `+ INTERVAL` does: a day past the end of the
+/// target month becomes its last day (2024-02-29 plus a year is 2025-02-28).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Shift {
+    pub months: i32,
+    pub days: i32,
+}
+
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+impl Shift {
+    /// `days` (since 1970-01-01) moved; `None` past the calendar's range.
+    #[must_use]
+    pub fn days(self, days: i64) -> Option<i64> {
+        let moved = if self.months == 0 {
+            days
+        } else {
+            let date = date_from_days(i32::try_from(days).ok()?)?;
+            let months = chrono::Months::new(self.months.unsigned_abs());
+            let date = if self.months > 0 {
+                date.checked_add_months(months)?
+            } else {
+                date.checked_sub_months(months)?
+            };
+            i64::from(days_from_date(date))
+        };
+        moved.checked_add(i64::from(self.days))
+    }
+
+    /// Microseconds moved: the day as [`Shift::days`], the time of day kept.
+    #[must_use]
+    pub fn micros(self, micros: i64) -> Option<i64> {
+        let (day, time) = (
+            micros.div_euclid(MICROS_PER_DAY),
+            micros.rem_euclid(MICROS_PER_DAY),
+        );
+        self.days(day)?
+            .checked_mul(MICROS_PER_DAY)?
+            .checked_add(time)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shifts_move_by_calendar_months_and_clamp_to_the_month_end() {
+        let day = |y, m, d| {
+            i64::from(days_from_date(
+                NaiveDate::from_ymd_opt(y, m, d).unwrap_or(EPOCH),
+            ))
+        };
+        let year = Shift {
+            months: 12,
+            days: 0,
+        };
+        assert_eq!(year.days(day(2024, 2, 29)), Some(day(2025, 2, 28)));
+        assert_eq!(year.days(day(2025, 3, 31)), Some(day(2026, 3, 31)));
+        let back = Shift {
+            months: -1,
+            days: 0,
+        };
+        assert_eq!(back.days(day(2026, 3, 31)), Some(day(2026, 2, 28)));
+        let week = Shift { months: 0, days: 7 };
+        assert_eq!(week.days(day(2026, 12, 28)), Some(day(2027, 1, 4)));
+        // times of day stay, before 1970 too
+        let micros = day(1969, 12, 31) * MICROS_PER_DAY + 3_600_000_000;
+        assert_eq!(
+            year.micros(micros),
+            Some(day(1970, 12, 31) * MICROS_PER_DAY + 3_600_000_000)
+        );
+    }
+
     use super::*;
 
     #[test]

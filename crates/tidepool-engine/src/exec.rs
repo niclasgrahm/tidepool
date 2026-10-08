@@ -94,6 +94,8 @@ struct TableRow<'a> {
     table: &'a TableSnapshot,
     segment: &'a SegmentView,
     offset: usize,
+    /// A column read moved in time (a `time_offset` metric's).
+    moved: Option<(usize, tidepool_expr::temporal::Shift)>,
 }
 
 impl Row for TableRow<'_> {
@@ -105,8 +107,26 @@ impl Row for TableRow<'_> {
         ) else {
             return Scalar::Null;
         };
-        scalar(self.snapshot.decode(layout, column.get(self.offset)))
+        let value = scalar(self.snapshot.decode(layout, column.get(self.offset)));
+        match self.moved {
+            Some((at, by)) if at == index => shifted(by, value),
+            _ => value,
+        }
     }
+}
+
+/// A date or timestamp moved by `shift`; anything else (NULL) as it is.
+fn shifted(shift: tidepool_expr::temporal::Shift, value: Scalar) -> Scalar {
+    let moved = match value {
+        Scalar::Date(days) => shift
+            .days(i64::from(days))
+            .and_then(|d| i32::try_from(d).ok())
+            .map(Scalar::Date),
+        Scalar::Timestamp(micros) => shift.micros(micros).map(Scalar::Timestamp),
+        Scalar::TimestampTz(micros) => shift.micros(micros).map(Scalar::TimestampTz),
+        other => Some(other),
+    };
+    moved.unwrap_or(Scalar::Null)
 }
 
 /// The value of `access` for a row whose related row doesn't exist: as in
@@ -120,8 +140,20 @@ fn missing(access: &Access) -> Scalar {
 }
 
 impl Reader<'_> {
-    /// The value of `access` for an anchor row.
+    /// The value of `access` for an anchor row, moved in time if the access
+    /// is shifted (a `time_offset` metric's time field).
     fn value(&self, anchor: &TableSnapshot, at: RowRef, access: &Access) -> Scalar {
+        let value = self.stored(anchor, at, access);
+        match access.shift {
+            // a derived field over the moved column moved its input instead
+            Some(shift) if matches!(access.target, Target::Column(_)) || shift.column.is_none() => {
+                shifted(shift.by, value)
+            }
+            _ => value,
+        }
+    }
+
+    fn stored(&self, anchor: &TableSnapshot, at: RowRef, access: &Access) -> Scalar {
         let mut table = anchor;
         let mut row = at;
         for hop in &access.path {
@@ -158,6 +190,7 @@ impl Reader<'_> {
                     table,
                     segment,
                     offset: row.offset as usize,
+                    moved: access.shift.and_then(|s| s.column.map(|c| (c, s.by))),
                 },
             ),
         }

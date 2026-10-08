@@ -240,3 +240,43 @@ async fn status_counts_rows_per_table() {
     // in memory only
     assert!(status.get("durability").is_none());
 }
+
+#[tokio::test]
+async fn an_answer_comes_as_csv_on_request() {
+    let state = loaded().await;
+    let body = json!({
+        "metrics": ["revenue"],
+        "dimensions": [{"field": "customers.region"}],
+        "sort": [{"column": "customers.region"}],
+    });
+    let reply = post(&state, "/v1/query?format=csv", &body).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        reply.header("content-type").as_deref(),
+        Some("text/csv; charset=utf-8")
+    );
+    assert_eq!(
+        reply.text(),
+        "customers.region,revenue\r\nnorth,14.50\r\nsouth,7.25\r\n"
+    );
+    let reply = post(&state, "/v1/query?format=xml", &body).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_time_shifted_metric_reads_the_selection_a_year_back() {
+    let state = loaded().await;
+    // February 2027's year before is February 2026: o2 and o3
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({
+            "metrics": ["revenue", "revenue_prev_year"],
+            "filters": [{"field": "orders.ordered_at",
+                         "from": "2027-02-01T00:00:00Z", "to": "2027-03-01T00:00:00Z"}],
+        }),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.json()["rows"], json!([[null, "11.25"]]));
+}

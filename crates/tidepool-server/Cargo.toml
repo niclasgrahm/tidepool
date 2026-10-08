@@ -12,6 +12,9 @@ publish = false
 workspace = true
 
 [dependencies]
+http-body-util.workspace = true
+tower.workspace = true
+getrandom = "0.3"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 tidepool-config.workspace = true
 tidepool-engine.workspace = true

@@ -1,0 +1,7 @@
+listen: 0.0.0.0:7070
+data_dir: /data
+epoch_interval: 200ms
+durability: fsync
+# the demo's files are a mount: changes made in the UI are written back to
+# them, not committed
+config_writeback: { enabled: true, git_commit: false }

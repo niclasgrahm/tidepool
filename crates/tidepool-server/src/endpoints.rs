@@ -18,7 +18,7 @@ use axum::routing::{MethodRouter, delete, get, post, put};
 use tidepool_protocol::api_docs::{ApiDoc, Body, Method, Operation, endpoints};
 
 use crate::AppState;
-use crate::{config, handlers, live, model, query, tables};
+use crate::{auth, config, handlers, live, mcp, metrics, model, query, tables};
 
 /// The documented JSON surface, without the UI fallback.
 pub fn api_router(state: Arc<AppState>) -> Router {
@@ -41,7 +41,7 @@ fn guarded(doc: &ApiDoc, state: &Arc<AppState>) -> MethodRouter<Arc<AppState>> {
     let mut route = handler_for(doc).route_layer(axum::middleware::from_fn(
         move |request: Request, next: Next| {
             let state = Arc::clone(&state);
-            async move { crate::auth::authorize(access, &state.tokens, request, next).await }
+            async move { crate::auth::authorize(access, &state, request, next).await }
         },
     ));
     if doc.request.is_some_and(|r| r.body == Body::Rows) {
@@ -79,6 +79,11 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::ListChanges => route_of(method, config::list_changes),
         Operation::ApproveChange => route_of(method, config::approve_change),
         Operation::RejectChange => route_of(method, config::reject_change),
+        Operation::Metrics => route_of(method, metrics::metrics),
+        Operation::StartSession => route_of(method, auth::start_session),
+        Operation::GetSession => route_of(method, auth::session),
+        Operation::EndSession => route_of(method, auth::end_session),
+        Operation::Mcp => route_of(method, mcp::mcp),
     }
 }
 

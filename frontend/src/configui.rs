@@ -116,9 +116,7 @@ fn Banner(shared: Shared) -> impl IntoView {
     move || {
         shared.config.with(|c| match c {
             None => view! { <p class="quiet">"Loading…"</p> }.into_any(),
-            Some(Err(err)) => view! {
-                <p class="problem">{format!("Can't read the config: {err}. Config pages need the admin token (open the page with ?token=…).")}</p>
-            }.into_any(),
+            Some(Err(err)) => view! { <SignIn shared=shared problem=err.clone() /> }.into_any(),
             Some(Ok(state)) => {
                 let rebuild = state.rebuild.clone().map(|r| {
                     #[allow(clippy::cast_precision_loss)]
@@ -155,6 +153,38 @@ fn Banner(shared: Shared) -> impl IntoView {
                 }.into_any()
             }
         })
+    }
+}
+
+/// The config pages need the admin level: a field for the admin token,
+/// traded for a session.
+#[component]
+fn SignIn(shared: Shared, problem: String) -> impl IntoView {
+    let token = RwSignal::new(String::new());
+    let failed = RwSignal::new(None::<String>);
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let value = token.get_untracked();
+        spawn_local(async move {
+            match crate::api::start_session(&value).await {
+                Ok(()) => {
+                    failed.set(None);
+                    shared.refresh();
+                }
+                Err(err) => failed.set(Some(err)),
+            }
+        });
+    };
+    view! {
+        <form class="sign-in" on:submit=submit>
+            <p>{format!("The config needs the admin token ({problem}).")}</p>
+            <label>"Admin token "
+                <input type="password" autocomplete="current-password" prop:value=move || token.get()
+                    on:input=move |ev| token.set(event_target_value(&ev)) />
+            </label>
+            <button type="submit">"Sign in"</button>
+            {move || failed.get().map(|e| view! { <p class="problem">{e}</p> })}
+        </form>
     }
 }
 

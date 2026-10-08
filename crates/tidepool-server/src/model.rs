@@ -179,5 +179,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusInfo> {
         durability,
         config_version: snapshot.version,
         rebuild: crate::config::rebuild_info(&state),
+        epoch_publish_ms: state.writer.publishing().last_ms(),
+        live_refresh_ms: state.counters.refresh.last_ms(),
     })
 }

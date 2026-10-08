@@ -327,3 +327,13 @@ button.link { border: 0; background: none; padding: 0; color: var(--tide); text-
   .plan { position: static; }
   .code-editor { min-height: 40vh; }
 }
+
+/* a visual's title and its export */
+.visual-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.visual-head h2 { margin-bottom: 8px; }
+.export { border: 0; background: none; color: var(--ink-soft); font-size: 12px; cursor: pointer; padding: 0; opacity: 0.6; }
+.visual:hover .export, .export:focus-visible { opacity: 1; }
+.sign-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-left: 3px solid var(--anemone); padding: 8px 14px; }
+.sign-in p { flex-basis: 100%; margin: 0; }
+.sign-in input { padding: 4px 8px; border: 1px solid var(--sand); border-radius: 4px; background: var(--surface); color: var(--ink); }
+.sign-in button { border: 1px solid var(--sand); background: transparent; border-radius: 4px; padding: 4px 12px; cursor: pointer; }

@@ -196,13 +196,25 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         })
         .collect();
 
-    // group base metrics by (anchor, selections they see)
-    let mut groups: BTreeMap<(String, Vec<usize>), Vec<String>> = BTreeMap::new();
+    // group base metrics by (anchor, selections they see, time shift)
+    type Group = (String, Vec<usize>, Option<String>);
+    let mut groups: BTreeMap<Group, Vec<String>> = BTreeMap::new();
+    let mut shifts: BTreeMap<String, crate::generate::Shifted> = BTreeMap::new();
     for name in &bases {
-        let Some(MetricKind::Base { anchor, ignore, .. }) = schema.metric(name).map(|m| &m.kind)
+        let Some(MetricKind::Base {
+            anchor,
+            ignore,
+            shift,
+            ..
+        }) = schema.metric(name).map(|m| &m.kind)
         else {
             continue;
         };
+        let shift_key = shift.as_ref().map(|s| {
+            let key = format!("{}.{} {}", s.table, s.column, s.interval);
+            shifts.insert(key.clone(), s.clone());
+            key
+        });
         let reachable: Vec<String> = schema
             .reachable(anchor)
             .into_iter()
@@ -223,20 +235,44 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             .map(|(i, _)| i)
             .collect();
         groups
-            .entry((anchor.clone(), seen))
+            .entry((anchor.clone(), seen, shift_key))
             .or_default()
             .push(name.clone());
     }
 
     let mut ctes = Vec::new();
     let mut column_of: BTreeMap<String, String> = BTreeMap::new();
-    for (q, ((anchor, seen), metrics)) in groups.iter().enumerate() {
-        let mut from = anchor.clone();
+    for (q, ((anchor, seen, shift), metrics)) in groups.iter().enumerate() {
+        // a time-shifted metric reads its table with the column moved
+        let shifted = shift.as_ref().and_then(|k| shifts.get(k));
+        let source = |table: &str| match shifted.filter(|s| s.table == table) {
+            Some(s) => {
+                let moved = format!(
+                    "{t}.{c} + INTERVAL {i}",
+                    t = s.table,
+                    c = s.column,
+                    i = s.interval
+                );
+                let moved = if s.date {
+                    format!("CAST({moved} AS DATE)")
+                } else {
+                    moved
+                };
+                format!(
+                    "(SELECT * REPLACE ({moved} AS {c}) FROM {t}) AS {t}",
+                    c = s.column,
+                    t = s.table
+                )
+            }
+            None => table.to_string(),
+        };
+        let mut from = source(anchor);
         for (_, via) in schema.reachable(anchor) {
             if let Some(r) = via {
                 let _ = write!(
                     from,
-                    " LEFT JOIN {to} ON {from_t}.{fk} = {to}.key",
+                    " LEFT JOIN {joined} ON {from_t}.{fk} = {to}.key",
+                    joined = source(&r.to),
                     to = r.to,
                     from_t = r.from,
                     fk = r.fk

@@ -107,7 +107,7 @@ pub async fn ingest_rows(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    write(&state, &table, Op::Write, &query, &headers, body).await
+    counted(&state, &table, Op::Write, &query, &headers, body).await
 }
 
 /// `DELETE /v1/tables/{table}/rows`
@@ -118,7 +118,7 @@ pub async fn delete_rows(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    write(&state, &table, Op::Delete, &query, &headers, body).await
+    counted(&state, &table, Op::Delete, &query, &headers, body).await
 }
 
 async fn write(
@@ -142,6 +142,21 @@ async fn write(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     commit(state, &table, op, batch, wait, key).await
+}
+
+/// [`write`], counted for `/metrics`.
+async fn counted(
+    state: &AppState,
+    name: &str,
+    op: Op,
+    query: &WriteQuery,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Response {
+    let response = write(state, name, op, query, headers, body).await;
+    let label = if op == Op::Delete { "delete" } else { "write" };
+    state.counters.request(name, label, response.status());
+    response
 }
 
 /// Everything about the request that can be checked before reading the body:
@@ -267,6 +282,10 @@ async fn commit(
         );
     }
 
+    state.counters.rows(
+        &table.name,
+        (receipt.applied.written + receipt.applied.replaced) as u64,
+    );
     let response = IngestResponse {
         written: receipt.applied.written as u64,
         replaced: receipt.applied.replaced as u64,

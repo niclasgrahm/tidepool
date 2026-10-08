@@ -345,8 +345,8 @@ async fn a_kpi_carries_its_comparison_under_the_selection() {
 }
 
 #[tokio::test]
-async fn a_comparison_that_cant_be_computed_yet_is_left_out() {
-    // the example compares with a time-shifted metric, which arrives in M8
+async fn the_example_kpi_compares_with_the_year_before_the_selected_dates() {
+    // `revenue_prev_year` is revenue with the time selection a year back
     let (_state, url) = server().await;
     let mut socket = connect(&url).await;
     say(&mut socket, json!({"type": "hello"})).await;
@@ -356,10 +356,18 @@ async fn a_comparison_that_cant_be_computed_yet_is_left_out() {
     )
     .await;
     let frame = next(&mut socket, "frame").await;
+    // no time selection: every row, shifted or not
     assert_eq!(rows(&frame, "kpi_revenue"), json!([["15.00"]]));
-    assert!(
-        visual(&frame, "kpi_revenue")
-            .get("compare")
-            .is_none_or(Value::is_null)
-    );
+    assert_eq!(visual(&frame, "kpi_revenue")["compare"], "15.00");
+
+    // 2027 has no orders; its year before (2026) has them all
+    say(
+        &mut socket,
+        json!({"type": "select_range", "field": "orders.ordered_at",
+               "from": "2027-01-01T00:00:00Z", "to": "2028-01-01T00:00:00Z"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([[null]]));
+    assert_eq!(visual(&frame, "kpi_revenue")["compare"], "15.00");
 }

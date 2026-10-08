@@ -296,11 +296,63 @@ pub(crate) fn result(request: &QueryRequest, answer: &ResultSet, epoch: u64) -> 
     }
 }
 
+/// A query result as CSV (RFC 4180): a header of column names, then one
+/// line per row. NULL is an empty field; text with a comma, a quote or a
+/// line break is quoted.
+#[must_use]
+pub fn csv(result: &QueryResult) -> String {
+    fn field(out: &mut String, text: &str) {
+        if text.contains([',', '"', '\n', '\r']) || text.starts_with(' ') || text.ends_with(' ') {
+            out.push('"');
+            out.push_str(&text.replace('"', "\"\""));
+            out.push('"');
+        } else {
+            out.push_str(text);
+        }
+    }
+    let mut out = String::new();
+    let mut line = |fields: Vec<String>| {
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            field(&mut out, f);
+        }
+        out.push_str("\r\n");
+    };
+    line(result.columns.iter().map(|c| c.name.clone()).collect());
+    for row in &result.rows {
+        line(
+            row.iter()
+                .map(|v| match v {
+                    serde_json::Value::Null => String::new(),
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// `?format=` of the query endpoint.
+#[derive(serde::Deserialize, Default)]
+pub struct Format {
+    #[serde(default)]
+    format: Option<String>,
+}
+
 /// Run a query. See `Operation::Query` in the endpoint table.
 pub async fn query(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(format): axum::extract::Query<Format>,
     Json(request): Json<QueryRequest>,
 ) -> Response {
+    let as_csv = match format.format.as_deref() {
+        None | Some("json") => false,
+        Some("csv") => true,
+        Some(other) => return bad_request(format!("unknown format `{other}`: json or csv")),
+    };
     let snapshot = state.writer.snapshot();
     let query = match resolve(&snapshot.model, &request) {
         Ok(query) => query,
@@ -309,8 +361,21 @@ pub async fn query(
     // scans are CPU-bound and parallel: keep them off the async workers
     let epoch = snapshot.epoch;
     let engine = Arc::clone(&state.engine);
+    let started = std::time::Instant::now();
     let answer = tokio::task::spawn_blocking(move || engine.run(&snapshot, &query)).await;
+    state.counters.queries.record(started.elapsed());
+    if matches!(answer, Ok(Err(_))) {
+        state
+            .counters
+            .query_errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     match answer {
+        Ok(Ok(answer)) if as_csv => (
+            [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+            csv(&result(&request, &answer, epoch)),
+        )
+            .into_response(),
         Ok(Ok(answer)) => Json(result(&request, &answer, epoch)).into_response(),
         Ok(Err(error)) => bad_request(error.to_string()),
         Err(_) => (
@@ -320,5 +385,33 @@ pub async fn query(
             }),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_protocol::QueryColumn;
+
+    #[test]
+    fn csv_quotes_what_needs_it_and_leaves_nulls_empty() {
+        let column = |name: &str| QueryColumn {
+            name: name.into(),
+            ty: "string".into(),
+            role: "dimension".into(),
+        };
+        let result = QueryResult {
+            columns: vec![column("customers.name"), column("revenue")],
+            rows: vec![
+                vec![serde_json::json!("Ada, Ltd"), serde_json::json!("10.50")],
+                vec![serde_json::json!("say \"hi\""), serde_json::Value::Null],
+                vec![serde_json::json!("plain"), serde_json::json!(3)],
+            ],
+            epoch: 1,
+        };
+        assert_eq!(
+            csv(&result),
+            "customers.name,revenue\r\n\"Ada, Ltd\",10.50\r\n\"say \"\"hi\"\"\",\r\nplain,3\r\n"
+        );
     }
 }

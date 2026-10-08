@@ -8,7 +8,8 @@ use leptos::prelude::*;
 use serde_json::{Value, json};
 use tidepool_protocol::live::{FilterFrame, FilterInfo, ValueState, VisualFrame, VisualInfo};
 
-use crate::board::{display, next_period, next_sort, number, wanted_window};
+use crate::api::{post_text, save_file};
+use crate::board::{display, export_request, next_period, next_sort, number, wanted_window};
 use crate::charts::{bar, line, palette};
 use crate::echarts::{Click, EChart};
 use crate::live::Live;
@@ -274,7 +275,7 @@ fn Visual(info: VisualInfo) -> AnyView {
         };
         return view! {
             <article class=class style=place>
-                <h2>{title}</h2>
+                <header class="visual-head"><h2>{title.clone()}</h2>{export_button(live, &info)}</header>
                 {note}
                 {content}
             </article>
@@ -283,7 +284,7 @@ fn Visual(info: VisualInfo) -> AnyView {
     }
     view! {
         <article class=class style=place>
-            <h2>{title}</h2>
+            <header class="visual-head"><h2>{title.clone()}</h2>{export_button(live, &info)}</header>
             {move || match frame.get() {
                 None => view! { <p class="quiet">"Waiting for data"</p> }.into_any(),
                 Some(VisualFrame { error: Some(error), .. }) => {
@@ -297,6 +298,28 @@ fn Visual(info: VisualInfo) -> AnyView {
         </article>
     }
     .into_any()
+}
+
+/// "CSV": the visual's query under the current selection, downloaded.
+fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
+    let info = info.clone();
+    let failed = RwSignal::new(None::<String>);
+    let export = move |_| {
+        let request = live.selection.with_untracked(|s| export_request(&info, s));
+        let name = format!("{}.csv", info.id);
+        leptos::task::spawn_local(async move {
+            let outcome = match post_text("/v1/query?format=csv", &request).await {
+                Ok((200, text)) => save_file(&name, &text, "text/csv"),
+                Ok((status, text)) => Err(format!("the server answered {status}: {text}")),
+                Err(err) => Err(err),
+            };
+            failed.set(outcome.err());
+        });
+    };
+    view! {
+        <button class="export" title="Download this visual's data as CSV, under the current selection" on:click=export>"CSV"</button>
+        {move || failed.get().map(|e| view! { <span class="problem" role="alert">{e}</span> })}
+    }
 }
 
 /// A visual's content, by type.

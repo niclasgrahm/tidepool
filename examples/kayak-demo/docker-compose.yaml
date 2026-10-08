@@ -1,0 +1,49 @@
+# The Kayak demo (plan §15.4): a simulated plant publishes to MQTT, Kayak
+# moves the messages into Tidepool, and the plant-floor dashboard follows
+# them live.
+#
+#   docker compose up --build
+#   open http://localhost:7070/#/d/plant      (Tidepool)
+#        http://localhost:6767                (Kayak's pipeline canvas)
+#
+# Kayak is built from its repository: set KAYAK_SRC if it isn't a sibling
+# of this one at ../../../../rust/kayak.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./plant/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  plant:
+    image: eclipse-mosquitto:2
+    depends_on: [mosquitto]
+    entrypoint: ["/bin/sh", "/plant/publish.sh"]
+    environment:
+      MQTT_HOST: mosquitto
+    volumes:
+      - ./plant/publish.sh:/plant/publish.sh:ro
+
+  tidepool:
+    build:
+      context: ../..
+    image: tidepool:demo
+    command: ["serve", "--config", "/demo", "--data", "/data", "--listen", "0.0.0.0:7070"]
+    ports: ["7070:7070"]
+    volumes:
+      - ./tidepool:/demo
+      - tidepool-data:/data
+
+  kayak:
+    build:
+      context: ${KAYAK_SRC:-../../../../rust/kayak}
+    image: kayak:demo
+    depends_on: [mosquitto, tidepool]
+    command: ["--config", "/pipelines/config.yaml"]
+    environment:
+      LEPTOS_SITE_ADDR: 0.0.0.0:6767
+    ports: ["6767:6767"]
+    volumes:
+      - ./kayak:/pipelines
+
+volumes:
+  tidepool-data:
