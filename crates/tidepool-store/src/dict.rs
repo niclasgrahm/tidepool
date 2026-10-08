@@ -274,6 +274,12 @@ impl DictSnapshot {
         }
     }
 
+    /// Approximate memory held by the values.
+    #[must_use]
+    pub fn value_bytes(&self) -> usize {
+        self.full.iter().map(|b| b.bytes()).sum::<usize>() + self.partial.bytes()
+    }
+
     /// Every code, ordered by value (strings by bytes, floats by total order,
     /// everything else numerically). For ordered filter lists and sorted
     /// output.

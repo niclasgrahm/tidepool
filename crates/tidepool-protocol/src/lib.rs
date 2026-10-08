@@ -202,3 +202,107 @@ pub struct QueryColumn {
     /// `dimension` or `metric`.
     pub role: String,
 }
+
+/// The semantic model as the UI shows it (`GET /v1/model`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelInfo {
+    pub datasets: Vec<DatasetInfo>,
+    pub relationships: Vec<RelationshipInfo>,
+    pub metrics: Vec<MetricInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DatasetInfo {
+    pub name: String,
+    /// The table it reads.
+    pub table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub fields: Vec<FieldInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FieldInfo {
+    pub name: String,
+    /// `string`, `int`, `decimal(2)`, `date`, …
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// The expression, for a derived field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    pub is_time: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipInfo {
+    pub name: String,
+    /// The many side.
+    pub from: String,
+    pub from_columns: Vec<String>,
+    /// The one side.
+    pub to: String,
+    pub to_columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MetricInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The SQL expression.
+    pub expression: String,
+    /// `base` (aggregates rows) or `derived` (combines other metrics).
+    pub kind: String,
+    /// The table whose rows a base metric aggregates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// Fields whose selection it ignores (`*` for all).
+    pub ignores: Vec<String>,
+    /// E.g. `-1 year on orders.ordered_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_offset: Option<String>,
+    /// Dashboards that show it.
+    pub dashboards: Vec<String>,
+}
+
+/// What the server is doing (`GET /v1/status`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StatusInfo {
+    pub epoch: u64,
+    pub uptime_seconds: u64,
+    pub tables: Vec<TableStatus>,
+    /// Memory held by dictionary values.
+    pub dictionary_bytes: u64,
+    /// Memory held by the engine's caches (join columns, kept answers).
+    pub cache_bytes: u64,
+    /// Live dashboard sessions.
+    pub sessions: usize,
+    /// `None` when data lives in memory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TableStatus {
+    pub name: String,
+    pub rows: u64,
+    pub bytes: u64,
+    pub segments: usize,
+    pub rows_per_second: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DurabilityStatus {
+    pub data_dir: String,
+    /// `fsync` or `async`.
+    pub mode: String,
+    /// The last write logged.
+    pub last_lsn: u64,
+    /// The last write the newest checkpoint holds.
+    pub checkpoint_lsn: u64,
+    /// Seconds since that checkpoint was written (`None`: none yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_age_seconds: Option<u64>,
+}

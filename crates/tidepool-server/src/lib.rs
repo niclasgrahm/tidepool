@@ -9,6 +9,7 @@ mod endpoints;
 mod handlers;
 mod idempotency;
 mod live;
+mod model;
 pub mod openapi;
 mod query;
 mod tables;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub(crate) engine: Arc<tidepool_engine::Engine>,
     /// Live sessions on `/v1/ws`.
     pub(crate) hub: live::Hub,
+    pub(crate) started: std::time::Instant,
 }
 
 impl AppState {
@@ -69,6 +71,7 @@ impl AppState {
             keys: idempotency::Keys::default(),
             engine: Arc::new(tidepool_engine::Engine::default()),
             hub: live::Hub::default(),
+            started: std::time::Instant::now(),
         }
     }
 

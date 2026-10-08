@@ -10,6 +10,12 @@ Kayak.
 
 Copyright © 2026 Niclas Grahm.
 
+## third-party code shipped with the UI
+
+`frontend/vendor/echarts-6.1.0.min.js` is [Apache ECharts](https://echarts.apache.org)
+6.1.0, unmodified, under the Apache License 2.0 (`frontend/vendor/echarts-LICENSE.txt`).
+It is copied into the built UI as is, with its licence notice in the file header.
+
 ## why the server is AGPL
 
 Self-hosting Tidepool, modifying it, running it inside a company, embedding it

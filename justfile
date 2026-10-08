@@ -48,6 +48,10 @@ test-embed:
   cargo clippy -p tidepool-server --features embed-assets --all-targets -- -D warnings
   cargo test -p tidepool-server --features embed-assets --test embed
 
+# the browser end to end: headless Chrome against the built UI (TIDEPOOL_CHROME=path if Chrome isn't found)
+e2e: frontend
+  TIDEPOOL_E2E=1 cargo test -p tidepool --test e2e
+
 # a debug server on :{{port}} with the retail example, serving the UI from frontend/dist
 run: frontend
   cargo run -p tidepool -- serve --config examples/retail --listen 127.0.0.1:{{port}} --ui-dir frontend/dist

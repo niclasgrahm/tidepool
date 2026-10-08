@@ -198,3 +198,45 @@ async fn derived_fields_group_like_columns() {
     .await;
     assert_eq!(reply.json()["rows"], json!([[1]]));
 }
+
+#[tokio::test]
+async fn the_model_lists_metrics_with_where_they_are_shown() {
+    let state = loaded().await;
+    let reply = common::call(Arc::clone(&state), Method::GET, "/v1/model").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let model = reply.json();
+    let revenue = model["metrics"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["name"] == "revenue"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(revenue["expression"], "SUM(orders.amount)");
+    assert_eq!(revenue["anchor"], "orders");
+    assert_eq!(revenue["dashboards"], json!(["sales"]));
+    let prev = model["metrics"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["name"] == "revenue_prev_year"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(prev["time_offset"], "-1 year on orders.ordered_at");
+    assert_eq!(
+        model["relationships"][0],
+        json!({"name": "order_customer", "from": "orders", "from_columns": ["customer_id"], "to": "customers", "to_columns": ["customer_id"]})
+    );
+}
+
+#[tokio::test]
+async fn status_counts_rows_per_table() {
+    let state = loaded().await;
+    let reply = common::call(Arc::clone(&state), Method::GET, "/v1/status").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let status = reply.json();
+    let orders = status["tables"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["name"] == "orders"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(orders["rows"], 3);
+    // in memory only
+    assert!(status.get("durability").is_none());
+}

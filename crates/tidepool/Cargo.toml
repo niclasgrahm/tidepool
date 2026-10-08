@@ -29,6 +29,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
+# the e2e test's DevTools client (tests/e2e.rs)
+tungstenite = "0.30"
 
 [features]
 default = []

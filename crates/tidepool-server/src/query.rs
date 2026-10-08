@@ -238,7 +238,7 @@ pub(crate) fn resolve(model: &Model, request: &QueryRequest) -> Result<Query, St
     })
 }
 
-fn type_name(ty: Type) -> String {
+pub(crate) fn type_name(ty: Type) -> String {
     match ty {
         Type::Null => "null".into(),
         Type::Bool => "bool".into(),

@@ -58,6 +58,44 @@ pub fn retail() -> Arc<Model> {
     }
 }
 
+/// The retail example's model with one edit: `from` replaced by `to` in
+/// the file at `path` (relative to the example).
+pub fn retail_with(path: &str, from: &str, to: &str) -> Arc<Model> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/retail");
+    let mut files = Vec::new();
+    for sub in ["", "tables", "dashboards"] {
+        let entries = match std::fs::read_dir(dir.join(sub)) {
+            Ok(entries) => entries,
+            Err(err) => panic!("reading the example: {err}"),
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if sub.is_empty() {
+                name
+            } else {
+                format!("{sub}/{name}")
+            };
+            if !std::path::Path::new(&relative)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("yaml"))
+            {
+                continue;
+            }
+            let mut text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            if relative == path {
+                assert!(text.contains(from), "{path} has no `{from}` to replace");
+                text = text.replace(from, to);
+            }
+            files.push((relative, text));
+        }
+    }
+    let (set, _) = ConfigSet::from_files(files);
+    match compile(&set, &Catalog::default()) {
+        (Some(compiled), _) => Arc::new(compiled.model),
+        (None, d) => panic!("the edited example should compile: {d:?}"),
+    }
+}
+
 /// A model with no tables.
 pub fn empty() -> Arc<Model> {
     match compile(&ConfigSet::default(), &Catalog::default()) {

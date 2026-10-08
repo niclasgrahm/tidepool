@@ -90,6 +90,12 @@ impl Engine {
         values_with(snapshot, field, selection, Some(&self.caches))
     }
 
+    /// Bytes held by the caches (join columns and kept answers).
+    #[must_use]
+    pub fn cache_bytes(&self) -> usize {
+        self.caches.bytes()
+    }
+
     /// Bytes held by materialized join columns.
     #[must_use]
     pub fn join_bytes(&self) -> usize {

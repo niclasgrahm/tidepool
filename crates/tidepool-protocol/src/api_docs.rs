@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    IngestError, IngestResponse, Preview, ProbeStatus, QueryRequest, QueryResult, ServerInfo,
-    TableInfo,
+    IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus, QueryRequest, QueryResult,
+    ServerInfo, StatusInfo, TableInfo,
 };
 
 /// The error body every failing request comes back with.
@@ -89,10 +89,12 @@ pub enum Operation {
     PreviewTable,
     Query,
     Live,
+    GetModel,
+    GetStatus,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 12] = [
+pub const OPERATIONS: [Operation; 14] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -105,6 +107,8 @@ pub const OPERATIONS: [Operation; 12] = [
     Operation::PreviewTable,
     Operation::Query,
     Operation::Live,
+    Operation::GetModel,
+    Operation::GetStatus,
 ];
 
 impl Operation {
@@ -124,6 +128,8 @@ impl Operation {
             Self::PreviewTable => "previewTable",
             Self::Query => "query",
             Self::Live => "live",
+            Self::GetModel => "getModel",
+            Self::GetStatus => "getStatus",
         }
     }
 }
@@ -574,6 +580,43 @@ pub fn endpoints() -> Vec<ApiDoc> {
             }],
         },
         ApiDoc {
+            path: "/v1/model",
+            method: Method::Get,
+            operation: Operation::GetModel,
+            summary: "The semantic model",
+            description: "Datasets and their fields, relationships, and metrics with their \
+                          SQL, anchor table and the dashboards that show them: what the model \
+                          browser shows.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The model.",
+                body: Body::Json("ModelInfo"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/status",
+            method: Method::Get,
+            operation: Operation::GetStatus,
+            summary: "What the server is doing",
+            description: "Epoch, memory per table and for caches, live sessions, and the \
+                          write-ahead log and checkpoints when data is kept on disk.",
+            tag: Tag::Server,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The status.",
+                body: Body::Json("StatusInfo"),
+            }],
+        },
+        ApiDoc {
             path: "/healthz",
             method: Method::Get,
             operation: Operation::Health,
@@ -706,6 +749,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("Preview", of(schema_for!(Preview)));
     schemas.insert("QueryRequest", of(schema_for!(QueryRequest)));
     schemas.insert("QueryResult", of(schema_for!(QueryResult)));
+    schemas.insert("ModelInfo", of(schema_for!(ModelInfo)));
+    schemas.insert("StatusInfo", of(schema_for!(StatusInfo)));
     schemas
 }
 

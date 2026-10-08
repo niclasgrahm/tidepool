@@ -386,3 +386,38 @@ async fn the_token_may_come_in_the_query_string() {
     .await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn status_reports_the_log_when_data_is_kept_on_disk() {
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("{err}"),
+    };
+    let config = tidepool_store::WriterConfig {
+        data: Some(dir.path().to_path_buf()),
+        epoch_interval: std::time::Duration::from_millis(10),
+        ..tidepool_store::WriterConfig::default()
+    };
+    let server = match AppState::new(common::retail(), config, None, Tokens::default()) {
+        Ok(state) => Arc::new(state),
+        Err(err) => panic!("{err}"),
+    };
+    let body = r#"[{"customer_id": "c1", "name": "Ada", "region": "north"}]"#;
+    let reply = send(
+        Arc::clone(&server),
+        request(
+            HttpMethod::POST,
+            "/v1/tables/customers/rows",
+            &[("content-type", "application/json")],
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let status = call(Arc::clone(&server), HttpMethod::GET, "/v1/status")
+        .await
+        .json();
+    assert_eq!(status["durability"]["mode"], "fsync");
+    assert_eq!(status["durability"]["last_lsn"], 1);
+    assert_eq!(status["durability"]["checkpoint_lsn"], 0);
+}

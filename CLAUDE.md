@@ -28,6 +28,7 @@ just miri            # the store's unsafe code under Miri (needs nightly + miri)
 just frontend        # build the UI into frontend/dist (trunk)
 just build           # just frontend, then a release binary with the UI embedded
 just test-embed      # tests of the embedded UI; needs `just build` first
+just e2e             # the browser end to end: headless Chrome against the built UI
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
@@ -73,17 +74,17 @@ resolves names in expressions.)
 
 | crate | licence | what | status |
 |---|---|---|---|
-| `tidepool-protocol` | Apache-2.0 | wire types and the **endpoint table** (`api_docs.rs`) | M0 |
+| `tidepool-protocol` | Apache-2.0 | wire types and the **endpoint table** (`api_docs.rs`) | M0–M6 ✓ |
 | `tidepool-config` | Apache-2.0 | serde types for every config file, JSON Schemas, diagnostics with `file:line:col` | M1 ✓ |
 | `tidepool-expr` | AGPL | SQL expressions: syntax + reference analysis (M1 ✓); type-check, kernels (M3) | M1/M3 |
 | `tidepool-model` | AGPL | compiled Model IR, cross-file validation, catalog of stable ids, diff → plan | M1 ✓ |
 | `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders, WAL and checkpoints | M2 ✓ / M5 ✓ |
 | `tidepool-engine` | AGPL | selection engine, aggregation, caches, incremental answers | M3 ✓ / M4 ✓ |
-| `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, lifecycle | M0 |
+| `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, live sessions, model/status | M0–M6 ✓ |
 | `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 ✓ / M4 ✓ |
-| `tidepool` | AGPL | the binary: CLI and wiring | M0 |
+| `tidepool` | AGPL | the binary: CLI and wiring; crash and browser e2e tests | M0–M6 ✓ |
 | `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
-| `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M0 shell, M6 |
+| `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M6 ✓ |
 
 The licence split is enforced by `crates/tidepool/tests/licensing.rs`; see
 [licensing.md](licensing.md). A permissive crate must never depend on a
@@ -314,18 +315,30 @@ output under `assets/` (`data-target-path` in `index.html`) so the server's
 immutable-cache rule applies to them. It depends on `tidepool-protocol`
 directly: request and response types are shared, never generated or copied.
 
-Since M4 it shows a dashboard live: it connects to `/v1/ws` (keeping a
-`?token=` from the page URL), applies frames to a `Board`, and renders
-filter lists with Qlik's states plus simple KPI, bar, line and table
-visuals. Each filter and visual reads its own entry through a `Memo`: one
-that re-rendered on every frame would swallow clicks. `board.rs` holds the
-logic that needs no DOM. `just run` plus `just feed` shows it working.
+Pages (hash routes, `route.rs`): the dashboard list, dashboards, the model
+browser (tables with an ingest `curl`, a relationship diagram, the metric
+catalog; from `GET /v1/model`) and a status page (`GET /v1/status`, polled).
+One `Live` (`live.rs`, in context) owns the WebSocket to `/v1/ws` (keeping
+a `?token=` from the page URL) and the signals its messages feed; frames
+are applied to a `Board`. Rules the dashboard follows:
 
-It is a workspace member, so `just ci` lints and tests it natively. Keep logic
-that can be tested (state transitions, formatting, frame handling) in plain
-functions that `cargo test` reaches; anything that needs a DOM goes through
-`wasm-bindgen-test`. When charts arrive (M6), start from the spike's
-`echarts.rs` and read the spike README's list of interop pitfalls first.
+- **Nothing that receives clicks is rebuilt per frame.** Each filter and
+  visual reads its own entry through a `Memo`; charts are one `EChart` for
+  the visual's life, fed a derived option signal (re-created, a chart
+  replays its intro and loses the click in flight). State that must outlive
+  a frame (a table's sort) lives in `Live`, not in the rebuilt view.
+- **Options are plain JSON built in `charts.rs`**, where `cargo test`
+  reaches them; `echarts.rs` (from the spike: read its README's interop
+  pitfalls before changing it) only hands them over. ECharts is vendored in
+  `frontend/vendor/` with its licence.
+- Logic without a DOM goes in `board.rs`, `charts.rs` or `route.rs` and
+  gets a plain test. The browser path is covered by `just e2e`
+  (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
+  protocol against the built UI, clicking a bar, watching a live update,
+  going back. It needs Chrome, so it isn't in `just ci`; run it after UI
+  changes.
+
+It is a workspace member, so `just ci` lints and tests it natively.
 
 ## Notes
 

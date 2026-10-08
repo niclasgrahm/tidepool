@@ -315,6 +315,21 @@ impl Caches {
         }
     }
 
+    /// Bytes held by every cache: join columns and kept answers.
+    pub(crate) fn bytes(&self) -> usize {
+        let inner = self.lock();
+        inner
+            .joins
+            .values()
+            .map(|e| e.column.bytes())
+            .sum::<usize>()
+            + inner
+                .anchors
+                .values()
+                .map(|(_, k)| k.bytes())
+                .sum::<usize>()
+    }
+
     /// Bytes held by join columns, for status pages and tests.
     pub(crate) fn join_bytes(&self) -> usize {
         self.lock().joins.values().map(|e| e.column.bytes()).sum()

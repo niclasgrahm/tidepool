@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
-use common::{ready_state, request, send};
+use common::{ready_state, request, retail_with, send, state};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tidepool_server::AppState;
@@ -40,7 +40,11 @@ fn order(id: &str, customer: &str, status: &str, amount: &str) -> Value {
 
 /// A server on a free port with the retail data loaded, and its address.
 async fn server() -> (Arc<AppState>, String) {
-    let state = ready_state();
+    server_for(ready_state()).await
+}
+
+/// [`server`] for a state of its own (an edited model).
+async fn server_for(state: Arc<AppState>) -> (Arc<AppState>, String) {
     post(
         &state,
         "/v1/tables/customers/rows?wait=visible",
@@ -270,4 +274,92 @@ async fn unknown_names_are_errors_and_the_session_carries_on() {
     )
     .await;
     let _ = next(&mut socket, "frame").await;
+}
+
+#[tokio::test]
+async fn a_session_can_sort_a_visual_its_own_way() {
+    let (_state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "by_region"),
+        json!([["north", "10.00"], ["south", "5.00"]])
+    );
+    say(
+        &mut socket,
+        json!({"type": "sort", "visual": "by_region", "column": "revenue"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "by_region"),
+        json!([["south", "5.00"], ["north", "10.00"]])
+    );
+    say(
+        &mut socket,
+        json!({"type": "sort", "visual": "by_region", "column": "nope"}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert_eq!(error["message"], "visual `by_region` has no column `nope`");
+}
+
+#[tokio::test]
+async fn a_kpi_carries_its_comparison_under_the_selection() {
+    let model = retail_with(
+        "dashboards/sales.yaml",
+        "compare: revenue_prev_year",
+        "compare: paid_revenue",
+    );
+    let (state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([order("o3", "c1", "pending", "7.00")]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([["22.00"]]));
+    assert_eq!(visual(&frame, "kpi_revenue")["compare"], "15.00");
+
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["north"]}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([["17.00"]]));
+    assert_eq!(visual(&frame, "kpi_revenue")["compare"], "10.00");
+}
+
+#[tokio::test]
+async fn a_comparison_that_cant_be_computed_yet_is_left_out() {
+    // the example compares with a time-shifted metric, which arrives in M8
+    let (_state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([["15.00"]]));
+    assert!(
+        visual(&frame, "kpi_revenue")
+            .get("compare")
+            .is_none_or(Value::is_null)
+    );
 }

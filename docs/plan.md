@@ -779,7 +779,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
   - a virtualised list component for filter lists (spike: `vlist.rs`)
   - a small dashboard grid (CSS grid from the YAML layout, read-only in v1)
   - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor, through the same kind of thin wrapper as ECharts
-  - Arrow frames decoded with arrow-rs compiled to wasm, or a lighter frame format if bundle size says so (decide in M4)
+  - frames are JSON (decided in M4: small, and serde on both sides); Arrow if frame size ever says so
 - **State:**
   - signals hold `{model, selection, frames by epoch}`; a frame is applied to all of them at once (D11)
   - charts are updated through their option signals, so ECharts merges the new data and animates the change itself
@@ -812,7 +812,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 
 **Model browser**
 - Tables: columns, types, encodings, row counts, ingest rate, preview of the latest rows.
-- Relationship diagram: auto layout (elkjs), read-only.
+- Relationship diagram: auto layout (a small layered layout; elkjs if models outgrow it), read-only.
 - Metric catalog: description, SQL, anchor table, which dashboards use it.
 - Ingest docs per table: endpoint, example `curl` with sample JSON, link to the OpenAPI spec.
 
@@ -846,7 +846,7 @@ Correctness is the main risk of an incremental engine. A bug shows up as **plaus
    - `criterion` microbenchmarks for kernels, packing and merge.
    - `tidepool-bench` (a workspace crate, like `kayak-bench`; `just bench`, not part of `just ci`): a synthetic retail generator at a configurable scale and ingest rate, plus N simulated sessions clicking randomly. It reports the §2.3 metrics.
    - Benchmark results are tracked per commit on a fixed machine (later).
-9. **Frontend:** plain `cargo test` for the frontend's pure logic (state transitions, frame application, formatting); `wasm-bindgen-test` where the DOM is needed. Playwright e2e for: open dashboard → click bar → selection applied → live update arrives → back.
+9. **Frontend:** plain `cargo test` for the frontend's pure logic (state transitions, frame application, formatting); `wasm-bindgen-test` where the DOM is needed. A browser e2e (`just e2e`: headless Chrome over its debugging protocol, from a Rust test) for: open dashboard → click bar → selection applied → live update arrives → back.
 
 ---
 
@@ -926,8 +926,11 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** no acknowledged row is ever lost across 1,000 random crash points; restart of the 100M-row reference in < 10 s.
 
 ### M6: Frontend v1 (4–6 wks; parallel from M2)
+
+**Status: done 2026-10-07.** Dashboard list and dashboards on the YAML grid: KPI tiles with a comparison and delta, bar charts (horizontal past six bars) and line/area charts with a second axis, both on one ECharts instance per visual fed a derived option (vendored ECharts 6.1 with its licence); tables sorted by the server per session, with the sort kept across frames. Filter lists with the three states, search and a window the server fills as you scroll; a date range. Click or Ctrl/Cmd-click on a bar, table row or list value selects; brushing the time axis selects a half-open range; chips, back, forward, clear. Live strip ("updated … ago", epoch, ingest rate), pause with an "N updates waiting" badge, a brief highlight on changed cells. Model browser from the new `GET /v1/model`: tables (columns, encodings, rows, an ingest `curl` with a sample row, a preview), a relationship diagram, the metric catalog. Status page from the new `GET /v1/status` (epoch, uptime, sessions, memory by table, dictionaries and caches, log and checkpoint). Hash routes, light and dark, usable at phone width. The e2e (`just e2e`) opens the retail dashboard in headless Chrome, clicks a bar, checks the chip, the list and the KPI, posts orders and sees the KPI follow under the selection, and goes back; a click handler broken on purpose fails it. Changes from the plan: the e2e drives Chrome over its debugging protocol from a Rust test instead of Playwright (no node toolchain, CLAUDE.md), and isn't in `just ci` because it needs Chrome; the relationship diagram is a small layered layout, not elkjs; legends hold metrics, not values, so they don't select; KPI comparisons with `time_offset` metrics are left out until M8 schedules them; the status page has no epoch timings or background jobs yet (jobs arrive with M7's rebuilds); no `wasm-bindgen-test`, as the DOM paths are what the e2e covers.
+
 - Everything in §10.2 except the config section.
-- Playwright e2e.
+- Browser e2e.
 - **Exit:** the retail demo works end to end in the browser, with a live data generator running.
 
 ### M7: Live config (3–4 wks)

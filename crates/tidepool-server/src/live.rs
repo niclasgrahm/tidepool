@@ -73,6 +73,8 @@ struct SessionState {
     dashboard: Option<String>,
     paused: bool,
     windows: HashMap<String, Window>,
+    /// Sort overrides by visual: (result column, descending).
+    sorts: HashMap<String, (String, bool)>,
     /// What was last sent per visual or filter (a hash of it).
     sent: HashMap<String, u64>,
     out: Option<mpsc::Sender<ServerMessage>>,
@@ -215,6 +217,14 @@ impl Hub {
         }
     }
 
+    /// Sessions with a connection.
+    pub(crate) fn live_sessions(&self) -> usize {
+        self.sessions()
+            .iter()
+            .filter(|s| s.lock().out.is_some())
+            .count()
+    }
+
     /// Drop a session's connection (it can resume with its id).
     #[allow(clippy::unused_self)]
     pub(crate) fn disconnect(&self, session: &Session) {
@@ -354,6 +364,36 @@ fn apply(
                 frame: true,
             }
         }
+        ClientMessage::Sort {
+            visual,
+            column,
+            desc,
+        } => {
+            let found = model
+                .dashboards
+                .iter()
+                .flat_map(|d| &d.visuals)
+                .find(|v| v.id == visual)
+                .ok_or_else(|| format!("no visual `{visual}`"))?;
+            let request = request(model, found);
+            let columns: Vec<String> = request
+                .dimensions
+                .iter()
+                .map(|d| match &d.grain {
+                    Some(grain) => format!("{}:{grain}", d.field),
+                    None => d.field.clone(),
+                })
+                .chain(request.metrics.iter().cloned())
+                .collect();
+            if !columns.contains(&column) {
+                return Err(format!("visual `{visual}` has no column `{column}`"));
+            }
+            inner.sorts.insert(visual, (column, desc));
+            Changed {
+                selection: false,
+                frame: true,
+            }
+        }
         ClientMessage::Pause => {
             inner.paused = true;
             Changed::default()
@@ -441,6 +481,10 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                 visual_type: name(&serde_json::to_value(v.visual_type).unwrap_or_default()),
                 dimensions: request(model, v).dimensions,
                 metrics: request(model, v).metrics,
+                compare: v
+                    .compare
+                    .and_then(|id| model.metric(id))
+                    .map(|m| m.name.clone()),
                 on_click: v.on_click,
                 on_brush: v.on_brush,
                 at: GridAt {
@@ -505,7 +549,7 @@ fn hash_of(value: &impl serde::Serialize) -> u64 {
 /// Send a session what changed on its dashboard as of `snapshot`, as one
 /// frame. Nothing when paused, without a dashboard, or when nothing changed.
 fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
-    let (dashboard, selection, windows) = {
+    let (dashboard, selection, windows, sorts) = {
         let inner = session.lock();
         if inner.paused || inner.out.is_none() {
             return;
@@ -513,7 +557,12 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
         let Some(dashboard) = inner.dashboard.clone() else {
             return;
         };
-        (dashboard, inner.selection(), inner.windows.clone())
+        (
+            dashboard,
+            inner.selection(),
+            inner.windows.clone(),
+            inner.sorts.clone(),
+        )
     };
     let model = &snapshot.model;
     let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
@@ -522,7 +571,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     let visuals: Vec<VisualFrame> = dashboard
         .visuals
         .iter()
-        .map(|v| visual_frame(state, snapshot, v, &selection))
+        .map(|v| visual_frame(state, snapshot, v, &selection, sorts.get(&v.id)))
         .collect();
     let filters: Vec<FilterFrame> = dashboard
         .filters
@@ -562,36 +611,59 @@ fn visual_frame(
     snapshot: &Snapshot,
     visual: &tidepool_model::ir::Visual,
     selection: &Selection,
+    sort: Option<&(String, bool)>,
 ) -> VisualFrame {
-    let request = request(&snapshot.model, visual);
-    let answer = resolve(&snapshot.model, &request)
-        .map_err(tidepool_engine::QueryError)
-        .and_then(|query| {
-            // only what can change the answer: sessions that differ
-            // elsewhere share it
-            let query = Query {
-                selection: selection.clone(),
-                ..query
-            };
-            let relevant = tidepool_engine::relevant(snapshot, &query)?;
-            state.engine.run(
-                snapshot,
-                &Query {
-                    selection: relevant,
+    let mut request = request(&snapshot.model, visual);
+    if let Some((column, desc)) = sort {
+        request.sort = vec![QuerySort {
+            column: column.clone(),
+            desc: *desc,
+        }];
+    }
+    let run = |request: &QueryRequest| {
+        resolve(&snapshot.model, request)
+            .map_err(tidepool_engine::QueryError)
+            .and_then(|query| {
+                // only what can change the answer: sessions that differ
+                // elsewhere share it
+                let query = Query {
+                    selection: selection.clone(),
                     ..query
-                },
-            )
+                };
+                let relevant = tidepool_engine::relevant(snapshot, &query)?;
+                state.engine.run(
+                    snapshot,
+                    &Query {
+                        selection: relevant,
+                        ..query
+                    },
+                )
+            })
+    };
+    // a KPI's comparison: shown when its metric can be computed
+    let compare = visual
+        .compare
+        .and_then(|id| snapshot.model.metric(id))
+        .and_then(|metric| {
+            let answer = run(&QueryRequest {
+                metrics: vec![metric.name.clone()],
+                ..QueryRequest::default()
+            })
+            .ok()?;
+            answer.rows.first()?.first().map(json)
         });
-    match answer {
+    match run(&request) {
         Ok(answer) => VisualFrame {
             id: visual.id.clone(),
             result: Some(result(&request, &answer, snapshot.epoch)),
             error: None,
+            compare,
         },
         Err(error) => VisualFrame {
             id: visual.id.clone(),
             result: None,
             error: Some(error.0),
+            compare: None,
         },
     }
 }

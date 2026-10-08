@@ -63,6 +63,13 @@ pub enum ClientMessage {
         #[serde(default)]
         search: Option<String>,
     },
+    /// Sort a visual by one of its result columns, for this session.
+    Sort {
+        visual: String,
+        column: String,
+        #[serde(default)]
+        desc: bool,
+    },
     /// Stop live updates for this session; the last frame stays.
     Pause,
     Resume,
@@ -147,6 +154,9 @@ pub struct VisualInfo {
     pub visual_type: String,
     pub dimensions: Vec<QueryDimension>,
     pub metrics: Vec<String>,
+    /// A KPI's comparison metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare: Option<String>,
     /// Clicking a value selects it.
     pub on_click: bool,
     /// Brushing a range selects it.
@@ -184,6 +194,9 @@ pub struct VisualFrame {
     /// Why the visual has no result (a metric the engine can't run yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A KPI's comparison value, when its metric can be computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare: Option<Value>,
 }
 
 /// A filter list's window: Qlik's states, per value.
