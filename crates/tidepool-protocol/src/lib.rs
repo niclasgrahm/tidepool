@@ -6,6 +6,7 @@
 //! engine, no runtime and no network code, only types and descriptions.
 
 pub mod api_docs;
+pub mod config;
 pub mod live;
 
 use schemars::JsonSchema;
@@ -282,6 +283,12 @@ pub struct StatusInfo {
     /// `None` when data lives in memory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<DurabilityStatus>,
+    /// The config version the server runs.
+    #[serde(default)]
+    pub config_version: u64,
+    /// A model change being rebuilt in the background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild: Option<config::RebuildInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -3485,6 +3485,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema 60.0.0",
  "axum",
+ "chrono",
  "futures-util",
  "http-body-util",
  "rust-embed",

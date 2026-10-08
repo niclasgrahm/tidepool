@@ -71,3 +71,18 @@ pub async fn schema(Path(kind): Path<String>) -> Result<Json<Value>, (StatusCode
             )
         })
 }
+
+/// An error response with the standard body.
+pub(crate) fn api_error(
+    status: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        status,
+        Json(tidepool_protocol::api_docs::ApiError {
+            error: message.into(),
+        }),
+    )
+        .into_response()
+}

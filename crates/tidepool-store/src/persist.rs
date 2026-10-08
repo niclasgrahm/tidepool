@@ -2,11 +2,16 @@
 //!
 //! ```text
 //! data/
-//! ├── wal/{first_lsn}.wal              every applied batch since the last checkpoint
-//! ├── dict/{id}.dict                   dictionary values, appended in code order
-//! ├── segments/t{table}/{start}-{rows}-{c|s}.seg   immutable segments, written once
-//! └── checkpoints/{lsn}.ckpt           what a snapshot holds: segments, deletes, dictionary lengths
+//! ├── wal/{first_lsn}.wal              every applied batch and model change since the last checkpoint
+//! ├── dict/{id}[-g{gen}].dict          dictionary values, appended in code order
+//! ├── segments/t{table}/{start}-{rows}-{c|s}[-g{gen}].seg   immutable segments, written once
+//! └── checkpoints/{lsn}.ckpt           what a snapshot holds: the model, segments, deletes, dictionary lengths
 //! ```
+//!
+//! A model change can rewrite segments and build dictionaries afresh
+//! (see [`crate::migrate`]); those get a new generation, which is part of
+//! their file names, so a rewrite never replaces a file an older checkpoint
+//! still lists. Files of generation 0 keep the plain names.
 //!
 //! A checkpoint is a published [`Snapshot`] written down, plus the LSN of
 //! the last batch it contains. Segments are immutable, so each file is
@@ -28,19 +33,21 @@ use std::sync::Arc;
 
 use roaring::RoaringBitmap;
 use tidepool_config::server::Durability;
-use tidepool_model::Model;
 use tidepool_model::ir::{ColumnId, DomainId, TableId};
 
 use crate::batch::Batch;
 use crate::codec::{In, Out, corrupt, frame, sync_dir, unframe, write_atomic};
 use crate::column::{Bits, ColumnData, Packed};
 use crate::dict::{DictSnapshot, DictValue, Dictionary, Key};
+use crate::migrate::{Migration, ModelVersion, Rebuilt, decode_version, encode_version};
 use crate::store::{Applied, DictId, Op, SegmentData, SegmentView, Snapshot, Store};
 use crate::value::Storage;
-use crate::wal::Wal;
+use crate::wal::{Entry, Wal};
 
 const SEGMENT_MAGIC: u32 = 0x5450_5347; // "TPSG"
-const CHECKPOINT_MAGIC: u32 = 0x5450_434b; // "TPCK"
+/// "TPC2": checkpoints that hold their model (M7). The first format,
+/// "TPCK", isn't read: data written before M7 starts over.
+const CHECKPOINT_MAGIC: u32 = 0x5450_4332;
 /// Checkpoints kept; files only they reference are kept with them.
 const KEEP: usize = 2;
 
@@ -65,10 +72,15 @@ fn storage_of(tag: u8) -> io::Result<Storage> {
     })
 }
 
-fn dict_name(id: DictId) -> String {
-    match id {
-        DictId::Column(ColumnId(n)) => format!("c{n}.dict"),
-        DictId::Domain(DomainId(ColumnId(n))) => format!("d{n}.dict"),
+fn dict_name(id: DictId, generation: u32) -> String {
+    let base = match id {
+        DictId::Column(ColumnId(n)) => format!("c{n}"),
+        DictId::Domain(DomainId(ColumnId(n))) => format!("d{n}"),
+    };
+    if generation == 0 {
+        format!("{base}.dict")
+    } else {
+        format!("{base}-g{generation}.dict")
     }
 }
 
@@ -93,13 +105,13 @@ fn get_dict_id(input: &mut In) -> io::Result<DictId> {
     })
 }
 
-fn segment_name(data: &SegmentData) -> String {
-    format!(
-        "{}-{}-{}.seg",
-        data.start,
-        data.rows,
-        if data.sealed { "s" } else { "c" }
-    )
+fn segment_name(start: u64, rows: u32, sealed: bool, generation: u32) -> String {
+    let kind = if sealed { "s" } else { "c" };
+    if generation == 0 {
+        format!("{start}-{rows}-{kind}.seg")
+    } else {
+        format!("{start}-{rows}-{kind}-g{generation}.seg")
+    }
 }
 
 fn put_bits(out: &mut Out, bits: Option<&Bits>) {
@@ -142,7 +154,7 @@ fn encode_segment(data: &SegmentData) -> Vec<u8> {
     out.u8(u8::from(data.sealed));
     out.len(data.columns.len());
     for column in &data.columns {
-        match column {
+        match &**column {
             ColumnData::Codes(codes) => {
                 out.u8(0);
                 out.u32s(codes);
@@ -195,6 +207,11 @@ fn encode_segment(data: &SegmentData) -> Vec<u8> {
                 out.u32s(offsets);
                 put_bits(&mut out, nulls.as_ref());
             }
+            ColumnData::Null { rows, dict } => {
+                out.u8(7);
+                out.u32(*rows);
+                out.u8(u8::from(*dict));
+            }
         }
     }
     let mut framed = Vec::with_capacity(out.0.len() + 8);
@@ -202,7 +219,7 @@ fn encode_segment(data: &SegmentData) -> Vec<u8> {
     framed
 }
 
-fn decode_segment(bytes: &[u8]) -> io::Result<SegmentData> {
+fn decode_segment(bytes: &[u8], generation: u32) -> io::Result<SegmentData> {
     let (payload, _) = unframe(bytes, 0).ok_or_else(|| corrupt("segment"))?;
     let mut input = In::new(payload);
     if input.u32()? != SEGMENT_MAGIC {
@@ -214,7 +231,7 @@ fn decode_segment(bytes: &[u8]) -> io::Result<SegmentData> {
     let count = input.len()?;
     let mut columns = Vec::with_capacity(count);
     for _ in 0..count {
-        columns.push(match input.u8()? {
+        columns.push(Arc::<ColumnData>::from(match input.u8()? {
             0 => ColumnData::Codes(input.u32s()?),
             1 => {
                 let packed = get_packed(&mut input)?;
@@ -257,14 +274,19 @@ fn decode_segment(bytes: &[u8]) -> io::Result<SegmentData> {
                 offsets: input.u32s()?,
                 nulls: get_bits(&mut input)?,
             },
+            7 => ColumnData::Null {
+                rows: input.u32()?,
+                dict: input.u8()? != 0,
+            },
             _ => return Err(corrupt("segment")),
-        });
+        }));
     }
     Ok(SegmentData {
         start,
         rows,
         columns,
         sealed,
+        generation,
     })
 }
 
@@ -285,33 +307,43 @@ struct SegmentEntry {
     start: u64,
     rows: u32,
     sealed: bool,
+    generation: u32,
     version: u64,
     deletes: RoaringBitmap,
 }
 
+impl SegmentEntry {
+    fn name(&self) -> String {
+        segment_name(self.start, self.rows, self.sealed, self.generation)
+    }
+}
+
 struct TableEntry {
     id: TableId,
-    /// The table's columns as stored: a changed config doesn't fit.
-    layout: String,
     live_rows: u64,
     written_total: u64,
     segments: Vec<SegmentEntry>,
+}
+
+/// One dictionary in a checkpoint: values, and the file's length in bytes.
+struct DictEntry {
+    id: DictId,
+    generation: u32,
+    storage: Storage,
+    len: u32,
+    bytes: u64,
 }
 
 /// One checkpoint file's content.
 struct Manifest {
     lsn: u64,
     epoch: u64,
-    /// Dictionaries: storage, values, and the file's length in bytes.
-    dicts: Vec<(DictId, Storage, u32, u64)>,
+    /// The store's generation.
+    generation: u32,
+    /// The model the data is in.
+    model: ModelVersion,
+    dicts: Vec<DictEntry>,
     tables: Vec<TableEntry>,
-}
-
-fn layout_of(snapshot: &Snapshot, table: TableId) -> String {
-    snapshot
-        .table(table)
-        .map(|t| format!("{:?}", t.layouts))
-        .unwrap_or_default()
 }
 
 fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
@@ -319,17 +351,19 @@ fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
     out.u32(CHECKPOINT_MAGIC);
     out.u64(manifest.lsn);
     out.u64(manifest.epoch);
+    out.u32(manifest.generation);
+    out.bytes(&encode_version(&manifest.model));
     out.len(manifest.dicts.len());
-    for (id, storage, len, bytes) in &manifest.dicts {
-        put_dict_id(&mut out, *id);
-        out.u8(storage_tag(*storage));
-        out.u32(*len);
-        out.u64(*bytes);
+    for dict in &manifest.dicts {
+        put_dict_id(&mut out, dict.id);
+        out.u32(dict.generation);
+        out.u8(storage_tag(dict.storage));
+        out.u32(dict.len);
+        out.u64(dict.bytes);
     }
     out.len(manifest.tables.len());
     for table in &manifest.tables {
         out.u32(table.id.0);
-        out.bytes(table.layout.as_bytes());
         out.u64(table.live_rows);
         out.u64(table.written_total);
         out.len(table.segments.len());
@@ -337,6 +371,7 @@ fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
             out.u64(segment.start);
             out.u32(segment.rows);
             out.u8(u8::from(segment.sealed));
+            out.u32(segment.generation);
             out.u64(segment.version);
             let mut deletes = Vec::new();
             segment.deletes.serialize_into(&mut deletes)?;
@@ -356,19 +391,26 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
     }
     let lsn = input.u64()?;
     let epoch = input.u64()?;
+    let generation = input.u32()?;
+    let model = decode_version(input.bytes()?)?;
     let count = input.len()?;
     let mut dicts = Vec::with_capacity(count);
     for _ in 0..count {
         let id = get_dict_id(&mut input)?;
+        let generation = input.u32()?;
         let storage = storage_of(input.u8()?)?;
-        dicts.push((id, storage, input.u32()?, input.u64()?));
+        dicts.push(DictEntry {
+            id,
+            generation,
+            storage,
+            len: input.u32()?,
+            bytes: input.u64()?,
+        });
     }
     let count = input.len()?;
     let mut tables = Vec::with_capacity(count);
     for _ in 0..count {
         let id = TableId(input.u32()?);
-        let layout =
-            String::from_utf8(input.bytes()?.to_vec()).map_err(|_| corrupt("checkpoint"))?;
         let live_rows = input.u64()?;
         let written_total = input.u64()?;
         let n = input.len()?;
@@ -377,19 +419,20 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
             let start = input.u64()?;
             let rows = input.u32()?;
             let sealed = input.u8()? != 0;
+            let generation = input.u32()?;
             let version = input.u64()?;
             let deletes = RoaringBitmap::deserialize_from(input.bytes()?)?;
             segments.push(SegmentEntry {
                 start,
                 rows,
                 sealed,
+                generation,
                 version,
                 deletes,
             });
         }
         tables.push(TableEntry {
             id,
-            layout,
             live_rows,
             written_total,
             segments,
@@ -398,6 +441,8 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
     Ok(Manifest {
         lsn,
         epoch,
+        generation,
+        model,
         dicts,
         tables,
     })
@@ -428,8 +473,8 @@ fn checkpoints(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
 /// Writes checkpoints, and remembers how far each dictionary file goes.
 pub struct Checkpoints {
     dir: PathBuf,
-    /// Per dictionary: values written, and bytes.
-    written: HashMap<DictId, (u32, u64)>,
+    /// Per dictionary file (id and generation): values written, and bytes.
+    written: HashMap<(DictId, u32), (u32, u64)>,
     /// Test hook: fail (as if the process died) after this many files.
     crash_after: Option<usize>,
 }
@@ -442,7 +487,7 @@ impl Checkpoints {
                 .map(|m| {
                     m.dicts
                         .iter()
-                        .map(|(id, _, len, bytes)| (*id, (*len, *bytes)))
+                        .map(|d| ((d.id, d.generation), (d.len, d.bytes)))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -475,19 +520,20 @@ impl Checkpoints {
         // dictionaries: the values added since the last checkpoint
         let dict_dir = self.dir.join("dict");
         std::fs::create_dir_all(&dict_dir)?;
-        let mut dicts: Vec<(DictId, Storage, u32, u64)> = Vec::new();
+        let mut dicts: Vec<DictEntry> = Vec::new();
         let mut ids: Vec<&DictId> = snapshot.dicts.keys().collect();
         ids.sort();
         for id in ids {
             let dict: &DictSnapshot = &snapshot.dicts[id];
-            let (done, bytes) = self.written.get(id).copied().unwrap_or((0, 0));
+            let file = (*id, dict.generation());
+            let (done, bytes) = self.written.get(&file).copied().unwrap_or((0, 0));
             let mut size = bytes;
             if dict.len() > done {
                 let mut out = Vec::new();
                 for code in done + 1..=dict.len() {
                     put_value(&mut out, dict.get(code));
                 }
-                let path = dict_dir.join(dict_name(*id));
+                let path = dict_dir.join(dict_name(*id, dict.generation()));
                 let mut file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -499,7 +545,13 @@ impl Checkpoints {
                 size = bytes + out.len() as u64;
                 self.wrote()?;
             }
-            dicts.push((*id, dict.storage(), dict.len(), size));
+            dicts.push(DictEntry {
+                id: *id,
+                generation: dict.generation(),
+                storage: dict.storage(),
+                len: dict.len(),
+                bytes: size,
+            });
         }
         sync_dir(&dict_dir)?;
 
@@ -513,7 +565,13 @@ impl Checkpoints {
             std::fs::create_dir_all(&seg_dir)?;
             let mut segments = Vec::new();
             for view in table.segments.iter() {
-                let path = seg_dir.join(segment_name(&view.data));
+                let data = &view.data;
+                let path = seg_dir.join(segment_name(
+                    data.start,
+                    data.rows,
+                    data.sealed,
+                    data.generation,
+                ));
                 if !path.exists() {
                     write_atomic(&path, &encode_segment(&view.data))?;
                     self.wrote()?;
@@ -522,13 +580,13 @@ impl Checkpoints {
                     start: view.data.start,
                     rows: view.data.rows,
                     sealed: view.data.sealed,
+                    generation: view.data.generation,
                     version: view.version,
                     deletes: (*view.deletes).clone(),
                 });
             }
             tables.push(TableEntry {
                 id: *id,
-                layout: layout_of(snapshot, *id),
                 live_rows: table.live_rows,
                 written_total: table.written_total,
                 segments,
@@ -538,14 +596,24 @@ impl Checkpoints {
         let manifest = Manifest {
             lsn,
             epoch: snapshot.epoch,
+            generation: snapshot.generation,
+            model: ModelVersion {
+                version: snapshot.version,
+                model: Arc::clone(&snapshot.model),
+                catalog: Arc::clone(&snapshot.catalog),
+            },
             dicts,
             tables,
         };
         let path = self.dir.join("checkpoints").join(format!("{lsn:020}.ckpt"));
         write_atomic(&path, &encode_manifest(&manifest)?)?;
-        for (id, _, len, bytes) in &manifest.dicts {
-            self.written.insert(*id, (*len, *bytes));
-        }
+        // only what this checkpoint lists goes on: anything else was
+        // replaced, and its file goes when no kept checkpoint lists it
+        self.written = manifest
+            .dicts
+            .iter()
+            .map(|d| ((d.id, d.generation), (d.len, d.bytes)))
+            .collect();
         // the hook was for this checkpoint only
         self.crash_after = None;
         self.collect()
@@ -556,25 +624,35 @@ impl Checkpoints {
     fn collect(&self) -> io::Result<()> {
         let all = checkpoints(&self.dir)?;
         let mut keep: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut unreadable = false;
         for (_, path) in all.iter().take(KEEP) {
             let Ok(manifest) = std::fs::read(path).and_then(|b| decode_manifest(&b)) else {
+                unreadable = true;
                 continue;
             };
             for table in &manifest.tables {
                 let dir = self.dir.join("segments").join(format!("t{}", table.id.0));
                 for s in &table.segments {
-                    let name = format!(
-                        "{}-{}-{}.seg",
-                        s.start,
-                        s.rows,
-                        if s.sealed { "s" } else { "c" }
-                    );
-                    keep.insert(dir.join(name));
+                    keep.insert(dir.join(s.name()));
                 }
+            }
+            for d in &manifest.dicts {
+                keep.insert(self.dir.join("dict").join(dict_name(d.id, d.generation)));
             }
         }
         for (_, path) in all.iter().skip(KEEP) {
             std::fs::remove_file(path)?;
+        }
+        // dictionary files no kept checkpoint lists: replaced by a model
+        // change (an unreadable kept checkpoint might list some: keep all)
+        let dicts = self.dir.join("dict");
+        if dicts.exists() && !unreadable {
+            for file in std::fs::read_dir(&dicts)? {
+                let path = file?.path();
+                if path.extension().is_some_and(|e| e == "dict") && !keep.contains(&path) {
+                    std::fs::remove_file(&path)?;
+                }
+            }
         }
         let segments = self.dir.join("segments");
         if segments.exists() {
@@ -620,12 +698,13 @@ fn load(dir: &Path) -> io::Result<Option<Recovered>> {
 fn load_one(dir: &Path, path: &Path) -> io::Result<Recovered> {
     let manifest = decode_manifest(&std::fs::read(path)?)?;
     let mut dicts = HashMap::new();
-    for (id, storage, len, bytes) in &manifest.dicts {
-        let raw = std::fs::read(dir.join("dict").join(dict_name(*id)))?;
+    for entry in &manifest.dicts {
+        let (id, storage, len) = (&entry.id, &entry.storage, &entry.len);
+        let raw = std::fs::read(dir.join("dict").join(dict_name(*id, entry.generation)))?;
         let raw = raw
-            .get(..usize::try_from(*bytes).map_err(|_| corrupt("dictionary"))?)
+            .get(..usize::try_from(entry.bytes).map_err(|_| corrupt("dictionary"))?)
             .ok_or_else(|| corrupt("dictionary (short)"))?;
-        let mut dict = Dictionary::new(*storage);
+        let mut dict = Dictionary::new(*storage).with_generation(entry.generation);
         let mut input = In::new(raw);
         for _ in 0..*len {
             match storage {
@@ -653,13 +732,10 @@ fn load_one(dir: &Path, path: &Path) -> io::Result<Recovered> {
         let mut views = Vec::with_capacity(table.segments.len());
         let seg_dir = dir.join("segments").join(format!("t{}", table.id.0));
         for entry in &table.segments {
-            let name = format!(
-                "{}-{}-{}.seg",
-                entry.start,
-                entry.rows,
-                if entry.sealed { "s" } else { "c" }
-            );
-            let data = decode_segment(&std::fs::read(seg_dir.join(name))?)?;
+            let data = decode_segment(
+                &std::fs::read(seg_dir.join(entry.name()))?,
+                entry.generation,
+            )?;
             if data.start != entry.start || data.rows != entry.rows {
                 return Err(corrupt("segment (not the one listed)"));
             }
@@ -694,14 +770,17 @@ pub struct Durable {
 pub type Opened = (Durable, Snapshot, Checkpoints);
 
 impl Durable {
-    /// Open (or create) the data directory `dir` for `model`: recover the
-    /// newest checkpoint and replay the log after it.
+    /// Open (or create) the data directory `dir`: recover the newest
+    /// checkpoint and replay the log after it. The data comes back in the
+    /// model it was written in, which may not be `model`: a config that
+    /// changed while the server was down is a model change the caller makes
+    /// (plan §8.1, startup). `model` is what a new data directory starts
+    /// with.
     ///
     /// # Errors
-    /// Files can't be read or written, the checkpoint is corrupt, or the
-    /// config no longer fits the data (a table's columns changed).
+    /// Files can't be read or written, or the checkpoint is corrupt.
     pub fn open(
-        model: Arc<Model>,
+        model: ModelVersion,
         dir: &Path,
         seal_rows: usize,
         durability: Durability,
@@ -710,26 +789,11 @@ impl Durable {
         let recovered = load(dir)?;
         let (mut store, after, checkpoints) = match recovered {
             None => (
-                Store::with_seal_rows(Arc::clone(&model), seal_rows),
+                Store::with_version(model.clone(), seal_rows),
                 0,
                 Checkpoints::new(dir, None),
             ),
             Some(recovered) => {
-                let probe = Snapshot::empty(Arc::clone(&model));
-                let empty = Store::with_seal_rows(Arc::clone(&model), seal_rows)
-                    .publish()
-                    .unwrap_or(probe);
-                for table in &recovered.manifest.tables {
-                    let now = layout_of(&empty, table.id);
-                    if now != table.layout {
-                        return Err(io::Error::other(format!(
-                            "table {} in {} was written with other columns than the config now has; \
-                             changing a table's columns over existing data needs the config pipeline (M7)",
-                            table.id.0,
-                            dir.display()
-                        )));
-                    }
-                }
                 let checkpoints = Checkpoints::new(dir, Some(&recovered.manifest));
                 let lsn = recovered.manifest.lsn;
                 let tables = recovered
@@ -739,9 +803,10 @@ impl Durable {
                     .map(|t| (t.id, (t.live_rows, t.written_total)))
                     .collect();
                 let store = Store::restore(
-                    model,
+                    recovered.manifest.model.clone(),
                     seal_rows,
                     recovered.manifest.epoch,
+                    recovered.manifest.generation,
                     recovered.dicts,
                     recovered.segments,
                     &tables,
@@ -749,9 +814,20 @@ impl Durable {
                 (store, lsn, checkpoints)
             }
         };
-        let (wal, records) = Wal::open(&dir.join("wal"), after, durability)?;
-        for record in &records {
-            store.apply(record.table, record.op, &record.batch);
+        let (mut wal, records) = Wal::open(&dir.join("wal"), after, durability)?;
+        let fresh = after == 0 && records.is_empty();
+        for record in records {
+            match record.entry {
+                Entry::Write { table, op, batch } => {
+                    store.apply(table, op, &batch);
+                }
+                Entry::Model(version) => store.change_model(version),
+            }
+        }
+        if fresh {
+            // the log says what model its first batches are in
+            wal.log(&Entry::Model(model));
+            wal.flush()?;
         }
         let snapshot = store
             .publish()
@@ -767,12 +843,27 @@ impl Durable {
         ))
     }
 
-    /// Log and apply a batch. Durable after the next [`Durable::commit`].
+    /// Log and apply a batch (fitted to the table's columns now). Durable
+    /// after the next [`Durable::commit`].
     pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch) -> Applied {
+        let Some(fitted) = self.store.fit(table, op, batch) else {
+            return Applied {
+                table_gone: true,
+                ..Applied::default()
+            };
+        };
+        let batch = fitted.as_ref().unwrap_or(batch);
         if batch.rows > 0 {
             self.wal.append(table, op, batch);
         }
         self.store.apply(table, op, batch)
+    }
+
+    /// Log a model change and make it (see [`Store::migrate`]). Durable
+    /// after the next [`Durable::commit`].
+    pub fn migrate(&mut self, migration: Migration, rebuilt: Rebuilt) {
+        self.wal.log(&Entry::Model(migration.target().clone()));
+        self.store.migrate(migration, rebuilt);
     }
 
     /// Make everything applied so far durable.
@@ -880,16 +971,22 @@ mod tests {
                 builder.push(v);
             }
             let frozen = builder.freeze();
-            parts.push(frozen.clone());
-            parts.push(seal(&[&frozen, &frozen], storage, dict));
+            parts.push(Arc::new(frozen.clone()));
+            parts.push(Arc::new(seal(&[&frozen, &frozen], storage, dict)));
         }
+        parts.push(Arc::new(ColumnData::Null {
+            rows: 3,
+            dict: true,
+        }));
+        {}
         let data = SegmentData {
             start: 40,
             rows: 3,
             columns: parts,
             sealed: true,
+            generation: 4,
         };
-        let back = decode_segment(&encode_segment(&data)).unwrap_or_else(|e| panic!("{e}"));
+        let back = decode_segment(&encode_segment(&data), 4).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(back.columns, data.columns);
         assert_eq!((back.start, back.rows, back.sealed), (40, 3, true));
         let _ = Parsed::Bool(true);

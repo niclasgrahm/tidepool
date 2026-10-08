@@ -18,7 +18,7 @@ use axum::routing::{MethodRouter, delete, get, post, put};
 use tidepool_protocol::api_docs::{ApiDoc, Body, Method, Operation, endpoints};
 
 use crate::AppState;
-use crate::{handlers, live, model, query, tables};
+use crate::{config, handlers, live, model, query, tables};
 
 /// The documented JSON surface, without the UI fallback.
 pub fn api_router(state: Arc<AppState>) -> Router {
@@ -71,6 +71,14 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::Live => route_of(method, live::socket),
         Operation::GetModel => route_of(method, model::model),
         Operation::GetStatus => route_of(method, model::status),
+        Operation::GetConfig => route_of(method, config::get_config),
+        Operation::PlanConfig => route_of(method, config::plan_config),
+        Operation::ApplyConfig => route_of(method, config::apply_config),
+        Operation::ListVersions => route_of(method, config::list_versions),
+        Operation::GetVersion => route_of(method, config::get_version),
+        Operation::ListChanges => route_of(method, config::list_changes),
+        Operation::ApproveChange => route_of(method, config::approve_change),
+        Operation::RejectChange => route_of(method, config::reject_change),
     }
 }
 

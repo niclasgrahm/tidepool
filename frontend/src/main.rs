@@ -8,11 +8,13 @@
 mod api;
 mod board;
 mod charts;
+mod configui;
 mod dashboard;
 mod echarts;
 mod live;
 mod pages;
 mod route;
+mod textdiff;
 
 use leptos::prelude::*;
 use serde_json::json;
@@ -22,7 +24,7 @@ use wasm_bindgen::prelude::Closure;
 
 use crate::board::{ago, display, range_label};
 use crate::live::{Live, now};
-use crate::route::{Route, Tab};
+use crate::route::{ConfigTab, Route, Tab};
 
 /// The line the footer shows for a server.
 fn describe(info: &ServerInfo) -> String {
@@ -64,6 +66,7 @@ fn App() -> impl IntoView {
             <nav class="main-nav" aria-label="Sections">
                 <a href=Route::Home.href() class:current=move || matches!(route.get(), Route::Home | Route::Dashboard(_))>"Dashboards"</a>
                 <a href=Route::Model(Tab::Tables).href() class:current=move || matches!(route.get(), Route::Model(_) | Route::Table(_))>"Model"</a>
+                <a href=Route::Config(ConfigTab::Edit).href() class:current=move || matches!(route.get(), Route::Config(_))>"Config"</a>
                 <a href=Route::Status.href() class:current=move || route.get() == Route::Status>"Status"</a>
             </nav>
             <Pulse on_dashboard=Signal::derive(on_dashboard) />
@@ -85,6 +88,7 @@ fn App() -> impl IntoView {
             Route::Model(tab) => view! { <pages::Model tab=tab /> }.into_any(),
             Route::Table(name) => view! { <pages::TablePage name=name /> }.into_any(),
             Route::Status => view! { <pages::Status /> }.into_any(),
+            Route::Config(tab) => view! { <configui::Config tab=tab /> }.into_any(),
         }}
         <footer>
             <Suspense fallback=|| view! { <span>"…"</span> }>

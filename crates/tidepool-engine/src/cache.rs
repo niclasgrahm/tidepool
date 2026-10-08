@@ -104,7 +104,9 @@ struct Inner {
     joins: HashMap<(usize, usize), JoinEntry>,
     /// Derived dictionaries per (base dictionary, expression). Codes never
     /// change, so an entry stays valid; it is extended as its base grows.
-    derived: HashMap<(DictId, String), Arc<DerivedDict>>,
+    /// Keyed by the dictionary's generation too: a model change can build
+    /// a new dictionary under an old id.
+    derived: HashMap<(DictId, u32, String), Arc<DerivedDict>>,
     /// Anchor answers kept to be brought up to date, by plan, with the
     /// tick they were last used at.
     anchors: HashMap<String, (u64, Incremental)>,
@@ -191,7 +193,7 @@ impl Caches {
         layout: &ColumnLayout,
         dict: &DictSnapshot,
     ) -> Arc<DerivedDict> {
-        let key = (id, format!("{expr:?}"));
+        let key = (id, dict.generation(), format!("{expr:?}"));
         let known = self.lock().derived.get(&key).cloned();
         if let Some(known) = &known
             && known.covers(dict)

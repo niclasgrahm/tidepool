@@ -249,6 +249,16 @@ async fn commit(
             "the server is shutting down",
         );
     };
+    if receipt.applied.table_gone {
+        abandon();
+        return error(
+            StatusCode::CONFLICT,
+            format!(
+                "`{}` was removed by a config change while this request was on its way",
+                table.name
+            ),
+        );
+    }
     if wait && state.writer.visible(receipt.epoch).await.is_err() {
         abandon();
         return error(

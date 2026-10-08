@@ -319,7 +319,12 @@ pub fn Status() -> impl IntoView {
                                 <div><dt>"Table data"</dt><dd>{bytes(data)}</dd></div>
                                 <div><dt>"Dictionaries"</dt><dd>{bytes(s.dictionary_bytes)}</dd></div>
                                 <div><dt>"Caches"</dt><dd>{bytes(s.cache_bytes)}</dd></div>
+                                <div><dt>"Config version"</dt><dd><a href=Route::Config(crate::route::ConfigTab::History).href()>{format!("v{}", s.config_version)}</a></dd></div>
                             </dl>
+                            {s.rebuild.map(|r| view! {
+                                <h2>"Background work"</h2>
+                                <p>{format!("Rebuilding data for config version {}: {} of {} rows.", r.version, display(&json!(r.rows_done)), display(&json!(r.rows)))}</p>
+                            })}
                             <h2>"Tables"</h2>
                             <table class="listing">
                                 <thead><tr><th>"Table"</th><th class="num">"Rows"</th><th class="num">"Segments"</th><th class="num">"Rows/s"</th><th class="num">"Memory"</th></tr></thead>

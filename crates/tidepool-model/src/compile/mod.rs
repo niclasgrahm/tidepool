@@ -26,8 +26,8 @@ pub struct Compiled {
 
 /// Compile a config set, assigning ids against `previous`.
 ///
-/// Returns the model only if there were no errors; the diagnostics may hold
-/// warnings either way.
+/// Returns the model only if there were no errors and every file parsed;
+/// the diagnostics may hold warnings either way.
 #[must_use]
 pub fn compile(set: &ConfigSet, previous: &Catalog) -> (Option<Compiled>, Diagnostics) {
     let mut cx = Cx {
@@ -60,7 +60,9 @@ pub fn compile(set: &ConfigSet, previous: &Catalog) -> (Option<Compiled>, Diagno
     } = cx;
     let mut diagnostics = diagnostics;
     diagnostics.sort(&set.files);
-    if diagnostics.has_errors() {
+    // a file that didn't parse (reported by whoever parsed it) is missing
+    // from everything above, which can look fine without it
+    if diagnostics.has_errors() || !set.unparsed.is_empty() {
         return (None, diagnostics);
     }
 

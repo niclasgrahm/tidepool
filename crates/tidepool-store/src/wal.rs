@@ -6,6 +6,10 @@
 //! whose dictionaries are restored to the checkpoint's lengths, gives the
 //! same codes and row ids again.
 //!
+//! A model change is a record too ([`Entry::Model`]), logged when the new
+//! model takes over: batches after it are in its tables' columns, and replay
+//! changes the model at the same point.
+//!
 //! Appends are buffered; [`Wal::sync`] writes them out and (with
 //! [`Durability::Fsync`]) fsyncs: the writer calls it once per burst of
 //! batches and acknowledges them after (group commit). A crash can tear the
@@ -21,32 +25,52 @@ use tidepool_model::ir::TableId;
 
 use crate::batch::Batch;
 use crate::codec::{In, Out, corrupt, frame, sync_dir, unframe};
+use crate::migrate::{ModelVersion, decode_version, encode_version};
 use crate::store::Op;
 use crate::value::Parsed;
 
 /// A file is closed and a new one started past this size.
 const ROLL: u64 = 64 << 20;
 
-/// One logged write.
-#[derive(Clone, Debug, PartialEq)]
+/// One logged change.
+#[derive(Clone, Debug)]
 pub struct Record {
     pub lsn: u64,
-    pub table: TableId,
-    pub op: Op,
-    pub batch: Batch,
+    pub entry: Entry,
 }
 
-fn encode(record: &Record) -> Vec<u8> {
+#[derive(Clone, Debug)]
+pub enum Entry {
+    /// A batch, in the table's columns as of when it was logged.
+    Write {
+        table: TableId,
+        op: Op,
+        batch: Batch,
+    },
+    /// The model changed to this version.
+    Model(ModelVersion),
+}
+
+fn encode(lsn: u64, entry: &Entry) -> Vec<u8> {
     let mut out = Out::default();
-    out.u64(record.lsn);
-    out.u32(record.table.0);
-    out.u8(match record.op {
+    out.u64(lsn);
+    let (table, op, batch) = match entry {
+        Entry::Model(version) => {
+            out.u32(0);
+            out.u8(2);
+            out.bytes(&encode_version(version));
+            return out.0;
+        }
+        Entry::Write { table, op, batch } => (table, op, batch),
+    };
+    out.u32(table.0);
+    out.u8(match op {
         Op::Write => 0,
         Op::Delete => 1,
     });
-    out.len(record.batch.rows);
-    out.len(record.batch.columns.len());
-    for column in &record.batch.columns {
+    out.len(batch.rows);
+    out.len(batch.columns.len());
+    for column in &batch.columns {
         for value in column {
             match value {
                 None => out.u8(0),
@@ -83,6 +107,12 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
     let op = match input.u8()? {
         0 => Op::Write,
         1 => Op::Delete,
+        2 => {
+            return Ok(Record {
+                lsn,
+                entry: Entry::Model(decode_version(input.bytes()?)?),
+            });
+        }
         _ => return Err(corrupt("record")),
     };
     let rows = input.len()?;
@@ -107,9 +137,15 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
     }
     Ok(Record {
         lsn,
-        table,
-        op,
-        batch: Batch { rows, columns },
+        entry: Entry::Write {
+            table,
+            op,
+            batch: Batch {
+                rows,
+                columns,
+                shape: Vec::new(),
+            },
+        },
     })
 }
 
@@ -225,15 +261,18 @@ impl Wal {
 
     /// Log a write; durable after the next [`Wal::sync`]. Returns its LSN.
     pub fn append(&mut self, table: TableId, op: Op, batch: &Batch) -> u64 {
-        let lsn = self.next;
-        self.next += 1;
-        let payload = encode(&Record {
-            lsn,
+        self.log(&Entry::Write {
             table,
             op,
             batch: batch.clone(),
-        });
-        frame(&payload, &mut self.pending);
+        })
+    }
+
+    /// Log any entry; durable after the next [`Wal::sync`]. Returns its LSN.
+    pub fn log(&mut self, entry: &Entry) -> u64 {
+        let lsn = self.next;
+        self.next += 1;
+        frame(&encode(lsn, entry), &mut self.pending);
         lsn
     }
 
@@ -328,6 +367,7 @@ mod tests {
                 vec![Some(Parsed::Str(format!("k{n}"))), None],
                 vec![Some(Parsed::I64(n)), Some(Parsed::F64(0.5))],
             ],
+            shape: Vec::new(),
         }
     }
 
@@ -358,7 +398,10 @@ mod tests {
             records.iter().map(|r| r.lsn).collect::<Vec<_>>(),
             vec![2, 3]
         );
-        assert_eq!(records[0].batch, batch(1));
+        match &records[0].entry {
+            Entry::Write { batch: b, .. } => assert_eq!(*b, batch(1)),
+            Entry::Model(_) => panic!("expected the second write"),
+        }
         assert_eq!(std::fs::metadata(&path).map_or(0, |m| m.len()), synced);
         // appends continue the sequence
         assert_eq!(wal.append(TableId(7), Op::Delete, &batch(9)), 4);

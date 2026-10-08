@@ -9,6 +9,12 @@
 //! equal the acknowledged writes replayed into a fresh in-memory store:
 //! nothing acknowledged lost, nothing unacknowledged invented.
 //!
+//! Model changes are part of the stream (M7): every so often the model
+//! moves to a version that drops or adds back a relationship over populated
+//! tables (which rewrites one side's codes) and a column, sometimes built
+//! from a snapshot the way the writer's background rebuild does. They are
+//! acknowledged like writes, at the next commit.
+//!
 //! `TIDEPOOL_CRASH_SEEDS` sets how many seeds run, ten crashes each:
 //! default 20 for every `just ci`; `just crash` runs the M5 exit
 //! criterion's 1,000 crash points.
@@ -21,22 +27,63 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tidepool_config::ConfigSet;
 use tidepool_config::server::Durability;
+use tidepool_model::compile;
 use tidepool_model::ir::Model;
-use tidepool_model::{Catalog, compile};
 use tidepool_store::batch::{Shape, json_array};
+use tidepool_store::migrate::build;
 use tidepool_store::persist::Durable;
-use tidepool_store::{Batch, Op, Snapshot, Store};
+use tidepool_store::{Batch, ModelVersion, Op, Rebuilt, Snapshot, Store};
 
-fn model() -> Arc<Model> {
+/// The retail example (without dashboards), or the variant without the
+/// orders → customers relationship and with an extra column, as the
+/// version after `previous`.
+fn version(previous: Option<&ModelVersion>, variant: bool) -> ModelVersion {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/retail");
-    let (set, _) = match ConfigSet::load_dir(&dir) {
-        Ok(loaded) => loaded,
-        Err(err) => panic!("reading the example: {err}"),
-    };
-    match compile(&set, &Catalog::default()) {
-        (Some(compiled), _) => Arc::new(compiled.model),
+    let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap_or_default();
+    let mut files = vec![
+        ("tidepool.yaml".to_string(), read("tidepool.yaml")),
+        ("model.ossie.yaml".to_string(), read("model.ossie.yaml")),
+        ("tables/orders.yaml".to_string(), read("tables/orders.yaml")),
+        (
+            "tables/customers.yaml".to_string(),
+            read("tables/customers.yaml"),
+        ),
+        (
+            "tables/products.yaml".to_string(),
+            read("tables/products.yaml"),
+        ),
+    ];
+    if variant {
+        files[1].1 = files[1].1.replace(
+            "  - name: order_customer
+    from: orders                         # many side
+    to: customers                        # one side
+    from_columns: [customer_id]
+    to_columns: [customer_id]
+",
+            "",
+        );
+        files[2]
+            .1
+            .push_str("  channel:     { type: string, nullable: true }\n");
+    }
+    let (set, _) = ConfigSet::from_files(files);
+    let catalog = previous.map(|p| (*p.catalog).clone()).unwrap_or_default();
+    match compile(&set, &catalog) {
+        (Some(compiled), _) => ModelVersion {
+            version: previous.map_or(1, |p| p.version + 1),
+            model: Arc::new(compiled.model),
+            catalog: Arc::new(compiled.catalog),
+        },
         (None, d) => panic!("the example should compile: {d:?}"),
     }
+}
+
+/// A write, or a model change, in the order they were acknowledged.
+#[derive(Clone)]
+enum Event {
+    Write(Write_),
+    Model(ModelVersion),
 }
 
 /// `SplitMix64`.
@@ -137,24 +184,30 @@ fn contents(snapshot: &Snapshot) -> BTreeMap<String, Vec<String>> {
     out
 }
 
-fn expected(model: &Arc<Model>, acked: &[Write_]) -> BTreeMap<String, Vec<String>> {
-    let mut store = Store::with_seal_rows(Arc::clone(model), 1 << 20);
-    for write in acked {
-        let (table, batch) = decode(model, write);
-        store.apply(table, write.1, &batch);
+fn expected(first: &ModelVersion, acked: &[Event]) -> BTreeMap<String, Vec<String>> {
+    let mut store = Store::with_version(first.clone(), 1 << 20);
+    for event in acked {
+        match event {
+            Event::Write(write) => {
+                let model = Arc::clone(store.model());
+                let (table, batch) = decode(&model, write);
+                store.apply(table, write.1, &batch);
+            }
+            Event::Model(version) => store.change_model(version.clone()),
+        }
     }
     let snapshot = store
         .publish()
-        .unwrap_or_else(|| Snapshot::empty(Arc::clone(model)));
+        .unwrap_or_else(|| Snapshot::empty(Arc::clone(store.model())));
     contents(&snapshot)
 }
 
 fn open(
-    model: &Arc<Model>,
+    first: &ModelVersion,
     dir: &Path,
     seal: usize,
 ) -> (Durable, Snapshot, tidepool_store::persist::Checkpoints) {
-    match Durable::open(Arc::clone(model), dir, seal, Durability::Fsync) {
+    match Durable::open(first.clone(), dir, seal, Durability::Fsync) {
         Ok(mut opened) => {
             // small log files, so checkpoints get to drop some
             opened.0.roll_log_at(4096);
@@ -165,13 +218,15 @@ fn open(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one scenario, start to end
 fn nothing_acknowledged_is_lost_across_random_crashes() {
     let seeds: u64 = std::env::var("TIDEPOOL_CRASH_SEEDS")
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(20);
-    let model = model();
+    let first = version(None, false);
     let mut crash_points = 0;
+    let mut changes = 0;
     for seed in 0..seeds {
         let mut rng = Rng(seed);
         let dir = match tempfile::tempdir() {
@@ -179,9 +234,11 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
             Err(err) => panic!("{err}"),
         };
         let seal = 8 + usize::try_from(rng.below(64)).unwrap_or(8);
-        let (mut durable, _, mut checkpoints) = open(&model, dir.path(), seal);
-        let mut acked: Vec<Write_> = Vec::new();
-        let mut pending: Vec<Write_> = Vec::new();
+        let (mut durable, _, mut checkpoints) = open(&first, dir.path(), seal);
+        let mut acked: Vec<Event> = Vec::new();
+        let mut pending: Vec<Event> = Vec::new();
+        // the newest version made, acknowledged or not: the next follows it
+        let mut newest = first.clone();
         let mut serial = seed * 1_000_000;
         // a checkpoint's LSN whose log isn't forgotten yet
         let mut late: Option<u64> = None;
@@ -197,10 +254,28 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                     }
                     late = None;
                 }
+                if rng.chance(4) {
+                    // a model change, sometimes built from a snapshot first
+                    let current = durable.store().model_version();
+                    let variant = current.model.relationships.len() == 2;
+                    let next = version(Some(&newest), variant);
+                    newest = next.clone();
+                    let migration = durable.store().plan_migration(next.clone());
+                    let rebuilt = match durable.publish() {
+                        Some((snapshot, _)) if rng.chance(50) => {
+                            build(&migration, &snapshot, &std::sync::atomic::AtomicU64::new(0))
+                        }
+                        _ => Rebuilt::default(),
+                    };
+                    durable.migrate(migration, rebuilt);
+                    pending.push(Event::Model(next));
+                    changes += 1;
+                }
                 let write = random_write(&mut rng, &mut serial);
+                let model = Arc::clone(durable.store().model());
                 let (table, batch) = decode(&model, &write);
                 durable.apply(table, write.1, &batch);
-                pending.push(write);
+                pending.push(Event::Write(write));
                 if rng.chance(30) {
                     if let Err(err) = durable.commit() {
                         panic!("seed {seed}: committing: {err}");
@@ -247,10 +322,19 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 let _ = file.write_all(&torn);
             }
 
-            let (recovered, snapshot, fresh) = open(&model, dir.path(), seal);
+            let (recovered, snapshot, fresh) = open(&first, dir.path(), seal);
+            // a model change that wasn't acknowledged is gone: the next
+            // follows the recovered one
+            newest = match acked.iter().rev().find_map(|e| match e {
+                Event::Model(v) => Some(v.clone()),
+                Event::Write(_) => None,
+            }) {
+                Some(v) if v.version >= newest.version => v,
+                _ => newest,
+            };
             assert_eq!(
                 contents(&snapshot),
-                expected(&model, &acked),
+                expected(&first, &acked),
                 "seed {seed}, crash {crash} (in a checkpoint: {died_in_checkpoint}): \
                  the recovered store isn't the acknowledged writes"
             );
@@ -260,5 +344,9 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
             crash_points += 1;
         }
     }
-    println!("{crash_points} crash points recovered exactly");
+    assert!(
+        seeds == 0 || changes > 0,
+        "the stream should change the model"
+    );
+    println!("{crash_points} crash points recovered exactly, {changes} model changes made");
 }

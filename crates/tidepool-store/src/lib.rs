@@ -12,6 +12,7 @@ pub mod batch;
 mod codec;
 pub mod column;
 pub mod dict;
+pub mod migrate;
 pub mod persist;
 pub mod store;
 pub mod value;
@@ -19,5 +20,6 @@ pub mod wal;
 pub mod writer;
 
 pub use batch::{Batch, Rejected, RowError, Shape};
+pub use migrate::{Migration, ModelVersion, Rebuilt};
 pub use store::{Applied, Op, Snapshot, Store, TableSnapshot};
-pub use writer::{Busy, LogStatus, Receipt, WriterConfig, WriterHandle, spawn};
+pub use writer::{Busy, Change, LogStatus, Receipt, WriterConfig, WriterHandle, spawn};

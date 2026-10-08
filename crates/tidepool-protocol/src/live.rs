@@ -103,6 +103,10 @@ pub enum ServerMessage {
     /// The dashboards there are; sent on connect.
     Model {
         dashboards: Vec<DashboardInfo>,
+        /// The config version: sent again whenever the model changes, so
+        /// clients reload what they show of it.
+        #[serde(default)]
+        version: u64,
     },
     /// The session's selection, after every change.
     Selection {

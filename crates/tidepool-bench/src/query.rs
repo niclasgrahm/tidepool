@@ -39,6 +39,7 @@ fn batch(
     Batch {
         rows: usize::try_from(rows.end - rows.start).unwrap_or(0),
         columns,
+        shape: Vec::new(),
     }
 }
 
@@ -329,7 +330,7 @@ pub fn measure_restart(model: &Arc<Model>, orders: u64, dir: &std::path::Path) {
     let (store, snapshot) = build(model, orders);
     drop(store);
     let (durable, _, mut checkpoints) = Durable::open(
-        Arc::clone(model),
+        tidepool_store::ModelVersion::initial(Arc::clone(model)),
         dir,
         tidepool_store::store::DEFAULT_SEAL_ROWS,
         Durability::Fsync,
@@ -349,7 +350,7 @@ pub fn measure_restart(model: &Arc<Model>, orders: u64, dir: &std::path::Path) {
 
     let started = Instant::now();
     let (_durable, recovered, _) = Durable::open(
-        Arc::clone(model),
+        tidepool_store::ModelVersion::initial(Arc::clone(model)),
         dir,
         tidepool_store::store::DEFAULT_SEAL_ROWS,
         Durability::Fsync,

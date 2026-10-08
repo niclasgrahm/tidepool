@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 use serde_json::value::RawValue;
-use tidepool_model::ir::Table;
+use tidepool_config::types::ColumnType;
+use tidepool_model::ir::{ColumnId, Table};
 
 use crate::value::{Parsed, parse_json};
 
@@ -23,13 +24,18 @@ pub const MAX_ERRORS: usize = 100;
 pub struct Batch {
     pub rows: usize,
     pub columns: Vec<Vec<Option<Parsed>>>,
+    /// The column each vector is for, with its type when decoded. A batch
+    /// decoded before a model change is fitted to the new columns by id
+    /// when it is applied. Empty: the columns are the table's as it is.
+    pub shape: Vec<(ColumnId, ColumnType)>,
 }
 
 impl Batch {
-    fn new(columns: usize) -> Self {
+    fn new(columns: &[(usize, &tidepool_model::ir::Column)]) -> Self {
         Self {
             rows: 0,
-            columns: vec![Vec::new(); columns],
+            columns: vec![Vec::new(); columns.len()],
+            shape: columns.iter().map(|(_, c)| (c.id, c.column_type)).collect(),
         }
     }
 }
@@ -124,7 +130,7 @@ fn decode_rows<'a>(
     rows: impl Iterator<Item = Option<&'a str>>,
 ) -> Result<Batch, Rejected> {
     let columns = wanted(table, shape);
-    let mut batch = Batch::new(columns.len());
+    let mut batch = Batch::new(&columns);
     let mut rejected = Rejected::default();
     let mut row = 0;
     for text in rows {
@@ -196,7 +202,7 @@ pub(crate) fn rejected_body(message: impl Into<String>) -> Rejected {
     Rejected::body(message)
 }
 
-pub(crate) fn new_batch(columns: usize) -> Batch {
+pub(crate) fn new_batch(columns: &[(usize, &tidepool_model::ir::Column)]) -> Batch {
     Batch::new(columns)
 }
 

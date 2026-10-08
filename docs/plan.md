@@ -81,7 +81,7 @@ The data directory is separate and is the server's internal state (see §4.7). R
 
 ### 3.2 `tidepool.yaml`
 
-As of M1 the server config accepts `listen`, `data_dir`, `epoch_interval`, `memory_budget` and `durability`; `auth`, `config_writeback` and `agents` are added with the milestones that implement them (M7, M8), since unknown keys are rejected.
+As of M7 the server config accepts `listen`, `data_dir`, `epoch_interval`, `memory_budget`, `durability` and `config_writeback`; `auth` and `agents` are added with M8, since unknown keys are rejected.
 
 ```yaml
 listen: 0.0.0.0:7070
@@ -694,7 +694,7 @@ source: startup │ file watcher │ PUT /v1/config │ UI editor │ MCP propos
 ```
 
 - **Optimistic concurrency:** a change whose `base_version` isn't current is rejected with `409` plus the fresh plan input.
-- **File watcher** (`notify`): the server ignores its own writes by comparing content hashes. External edits become a proposed change from source `files`. If the change is safe it's auto-applied. Otherwise it goes to the approval queue and the UI shows "config dir has unapplied changes".
+- **File watcher** (since M7 a one-second poll of the directory, read under the pipeline's lock, so the server's own writes are never mistaken for edits). External edits become a proposed change from source `files`. If the change is safe it's auto-applied. Otherwise it goes to the approval queue and the UI shows "config dir has unapplied changes".
 - **Startup** is the same path. The source is `startup`, and it's compared with the last applied version in the catalog. Destructive changes refuse to start without `--allow-destructive`.
 
 ### 8.2 Change classes
@@ -822,6 +822,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 - Version history with diffs and revert.
 - Pending changes queue (approve/reject).
 - Banner when the config dir has unapplied external edits.
+- (M7: a text editor with the server checking as you type, rather than Monaco.)
 
 **System**
 - Status page: memory use by table/cache, epoch timing, WAL/checkpoint status, background jobs (sealing, rebuilds) with progress.
@@ -934,6 +935,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 - **Exit:** the retail demo works end to end in the browser, with a live data generator running.
 
 ### M7: Live config (3–4 wks)
+
+**Status: done 2026-10-08.** One pipeline for every change (`tidepool-server::config`): a change is files to set or remove against a `base_version`, compiled against the catalog, planned, checked against policy (destructive needs `approve`; `propose` and unsafe edits in the config directory go to the approval queue), handed to the writer, recorded as a version, written back to the config directory with `renamed_from` hints removed, and committed when the directory is in a git repository. Endpoints: `GET /v1/config`, `POST /v1/config/plan`, `POST /v1/config/apply`, `GET /v1/config/versions[/{v}]`, `GET /v1/changes`, `POST /v1/changes/{id}/approve|reject`. In the store, a model change re-shapes tables by column id: unchanged columns are shared (`Arc` per column), a new nullable column is a virtual all-NULL column holding nothing, removed tables and columns are dropped, and dictionaries are re-keyed. Joining populated tables builds one new dictionary per key domain and maps each source's codes into it; encoding and type changes convert values (exactly, or NULL where a value doesn't fit). That rewrite runs on its own thread from a snapshot while the old model serves and ingest carries on; the writer then catches up with what arrived meanwhile and swaps the model in at an epoch. Batches decoded under the old model are fitted to the new columns by id. The model is logged in the WAL at the swap and kept in checkpoints, rewritten segments and rebuilt dictionaries get a generation in their file names, and startup reconciles the config directory with the data's model (destructive only with `--allow-destructive`). Sessions get the model again on a change; selections on removed fields are dropped and a removed dashboard is closed. The config UI edits the files with the plan checked as you type (problems located, click to jump), applies or proposes, shows the history with diffs and reverts, and the approval queue. Tests: migration tests per kind of change, the crash suite with model changes in the stream, a migration oracle (data written under an earlier version of each random project, a background build with writes going on, then every query against DuckDB on all three paths; 400 seeds; a planted remap bug fails at seed 0), the pipeline over HTTP including the exit criterion and a restart, and an e2e of the config editor. Changes from the plan: the watcher polls the directory every second rather than using `notify` (no new dependency, deterministic in tests); the editor is a plain text area with server-side checking, not Monaco (which needs a node toolchain); a second change waits while a rebuild runs rather than queueing behind it; rebuild progress is rows rewritten, without a time estimate.
+
 - Apply pipeline in the running server; background rebuild jobs (dictionary merge for new relationships, type widening).
 - Write-back with git commits; file watcher; approval queue; version history and revert.
 - Config UI (editor, plan, apply, history, pending queue). Clients follow model version changes.

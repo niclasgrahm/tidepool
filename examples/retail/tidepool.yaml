@@ -2,3 +2,6 @@ listen: 127.0.0.1:7070
 epoch_interval: 200ms
 memory_budget: 75%
 durability: fsync
+# changes applied through the API or the UI are written back here; this
+# example lives in Tidepool's own repository, so they aren't committed
+config_writeback: { enabled: true, git_commit: false }

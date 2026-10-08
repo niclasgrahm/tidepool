@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::{
     IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus, QueryRequest, QueryResult,
-    ServerInfo, StatusInfo, TableInfo,
+    ServerInfo, StatusInfo, TableInfo, config,
 };
 
 /// The error body every failing request comes back with.
@@ -91,10 +91,18 @@ pub enum Operation {
     Live,
     GetModel,
     GetStatus,
+    GetConfig,
+    PlanConfig,
+    ApplyConfig,
+    ListVersions,
+    GetVersion,
+    ListChanges,
+    ApproveChange,
+    RejectChange,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 14] = [
+pub const OPERATIONS: [Operation; 22] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -109,6 +117,14 @@ pub const OPERATIONS: [Operation; 14] = [
     Operation::Live,
     Operation::GetModel,
     Operation::GetStatus,
+    Operation::GetConfig,
+    Operation::PlanConfig,
+    Operation::ApplyConfig,
+    Operation::ListVersions,
+    Operation::GetVersion,
+    Operation::ListChanges,
+    Operation::ApproveChange,
+    Operation::RejectChange,
 ];
 
 impl Operation {
@@ -130,6 +146,14 @@ impl Operation {
             Self::Live => "live",
             Self::GetModel => "getModel",
             Self::GetStatus => "getStatus",
+            Self::GetConfig => "getConfig",
+            Self::PlanConfig => "planConfig",
+            Self::ApplyConfig => "applyConfig",
+            Self::ListVersions => "listConfigVersions",
+            Self::GetVersion => "getConfigVersion",
+            Self::ListChanges => "listChanges",
+            Self::ApproveChange => "approveChange",
+            Self::RejectChange => "rejectChange",
         }
     }
 }
@@ -141,12 +165,19 @@ impl Operation {
 pub enum Tag {
     Tables,
     Queries,
+    Config,
     Server,
     Reference,
 }
 
 /// Every tag, in the order pages list them.
-pub const TAGS: [Tag; 4] = [Tag::Tables, Tag::Queries, Tag::Server, Tag::Reference];
+pub const TAGS: [Tag; 5] = [
+    Tag::Tables,
+    Tag::Queries,
+    Tag::Config,
+    Tag::Server,
+    Tag::Reference,
+];
 
 impl Tag {
     #[must_use]
@@ -154,6 +185,7 @@ impl Tag {
         match self {
             Self::Tables => "tables",
             Self::Queries => "queries",
+            Self::Config => "config",
             Self::Server => "server",
             Self::Reference => "reference",
         }
@@ -170,6 +202,12 @@ impl Tag {
             Self::Queries => {
                 "Asking the model: metrics grouped by fields, under a selection. \
                  Names are the semantic layer's (`model.ossie.yaml`), not tables'."
+            }
+            Self::Config => {
+                "Changing what the server runs while it runs: the config files, plans \
+                 of what a change does, applying it, the versions so far and changes \
+                 waiting for approval. Every change goes through the same pipeline, and \
+                 is written back to the config directory."
             }
             Self::Server => {
                 "The process itself: probes for orchestrators, and what server this is."
@@ -378,7 +416,8 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 },
                 ResponseDoc {
                     status: 409,
-                    description: "A request with the same `Idempotency-Key` is still being processed.",
+                    description: "A request with the same `Idempotency-Key` is still being processed, \
+                                  or the table was removed by a config change meanwhile.",
                     body: Body::Json("ApiError"),
                 },
                 ResponseDoc {
@@ -432,6 +471,11 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 ResponseDoc {
                     status: 404,
                     description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "The table was removed by a config change meanwhile.",
                     body: Body::Json("ApiError"),
                 },
                 ResponseDoc {
@@ -617,6 +661,218 @@ pub fn endpoints() -> Vec<ApiDoc> {
             }],
         },
         ApiDoc {
+            path: "/v1/config",
+            method: Method::Get,
+            operation: Operation::GetConfig,
+            summary: "The config",
+            description: "Every config file of the current version, the version the server \
+                          runs (behind while a change is rebuilt), and edits in the config \
+                          directory that aren't applied.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The config.",
+                body: Body::Json("ConfigState"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/config/plan",
+            method: Method::Post,
+            operation: Operation::PlanConfig,
+            summary: "What a change would do",
+            description: "Compiles the config with the change and compares it with the \
+                          current one: every problem, located, and every change with its \
+                          class (safe, rebuild, destructive). Changes nothing.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "Files to set or remove, against a version.",
+                body: Body::Json("ConfigChange"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The plan (also when the config has errors: `valid` says).",
+                    body: Body::Json("PlanInfo"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "`base_version` isn't the current version.",
+                    body: Body::Json("ConfigError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/config/apply",
+            method: Method::Post,
+            operation: Operation::ApplyConfig,
+            summary: "Apply a change",
+            description: "Plans the change and applies it: safe changes are live at the next \
+                          epoch, rebuilds when their background rebuild is done (the old \
+                          version serves until then). A destructive change needs `approve`. \
+                          With `propose` it waits in the approval queue instead. Applied \
+                          changes are written back to the config directory, and committed \
+                          when it is a git repository.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "Files to set or remove, against a version.",
+                body: Body::Json("ConfigChange"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Applied, rebuilding, queued, or nothing to change.",
+                    body: Body::Json("ApplyResult"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "`base_version` isn't current, the change destroys data and \
+                                  isn't approved, or a rebuild is still running.",
+                    body: Body::Json("ConfigError"),
+                },
+                ResponseDoc {
+                    status: 422,
+                    description: "The config doesn't compile with the change.",
+                    body: Body::Json("ConfigError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/config/versions",
+            method: Method::Get,
+            operation: Operation::ListVersions,
+            summary: "Versions so far",
+            description: "Every applied version, newest first: who, when, from where, and \
+                          what changed. Reverting is applying an old version's files.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The versions.",
+                body: Body::JsonArray("VersionInfo"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/config/versions/{version}",
+            method: Method::Get,
+            operation: Operation::GetVersion,
+            summary: "One version's files",
+            description: "The files of an applied version, to compare or revert to.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![ParamDoc {
+                name: "version",
+                description: "The version number.",
+                example: "1",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The version.",
+                    body: Body::Json("ConfigVersion"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such version.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/changes",
+            method: Method::Get,
+            operation: Operation::ListChanges,
+            summary: "Changes waiting for approval",
+            description: "Proposed changes, and edits in the config directory that aren't \
+                          safe to apply on their own, with their plans.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The pending changes.",
+                body: Body::JsonArray("PendingChange"),
+            }],
+        },
+        ApiDoc {
+            path: "/v1/changes/{id}/approve",
+            method: Method::Post,
+            operation: Operation::ApproveChange,
+            summary: "Approve a pending change",
+            description: "Applies it, destructive or not. It must still be against the \
+                          current version.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![ParamDoc {
+                name: "id",
+                description: "The pending change.",
+                example: "1",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Applied or rebuilding.",
+                    body: Body::Json("ApplyResult"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such pending change.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "It was made against an older version, or a rebuild is running.",
+                    body: Body::Json("ConfigError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/changes/{id}/reject",
+            method: Method::Post,
+            operation: Operation::RejectChange,
+            summary: "Reject a pending change",
+            description: "Drops it from the queue.",
+            tag: Tag::Config,
+            access: Access::Admin,
+            params: vec![ParamDoc {
+                name: "id",
+                description: "The pending change.",
+                example: "1",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The change, now dropped.",
+                    body: Body::Json("PendingChange"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such pending change.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/healthz",
             method: Method::Get,
             operation: Operation::Health,
@@ -751,6 +1007,14 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("QueryResult", of(schema_for!(QueryResult)));
     schemas.insert("ModelInfo", of(schema_for!(ModelInfo)));
     schemas.insert("StatusInfo", of(schema_for!(StatusInfo)));
+    schemas.insert("ConfigState", of(schema_for!(config::ConfigState)));
+    schemas.insert("ConfigChange", of(schema_for!(config::ConfigChange)));
+    schemas.insert("PlanInfo", of(schema_for!(config::PlanInfo)));
+    schemas.insert("ApplyResult", of(schema_for!(config::ApplyResult)));
+    schemas.insert("ConfigError", of(schema_for!(config::ConfigError)));
+    schemas.insert("VersionInfo", of(schema_for!(config::VersionInfo)));
+    schemas.insert("ConfigVersion", of(schema_for!(config::ConfigVersion)));
+    schemas.insert("PendingChange", of(schema_for!(config::PendingChange)));
     schemas
 }
 

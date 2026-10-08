@@ -21,6 +21,9 @@ pub fn now() -> f64 {
 #[derive(Clone, Copy)]
 pub struct Live {
     pub dashboards: RwSignal<Vec<DashboardInfo>>,
+    /// The config version the server runs: pages showing the model reload
+    /// when it changes.
+    pub model_version: RwSignal<u64>,
     /// The dashboard the server sends frames for.
     pub open: RwSignal<Option<String>>,
     pub board: RwSignal<Board>,
@@ -47,6 +50,7 @@ impl Live {
     pub fn new() -> Self {
         Self {
             dashboards: RwSignal::new(Vec::new()),
+            model_version: RwSignal::new(0),
             open: RwSignal::new(None),
             board: RwSignal::new(Board::default()),
             selection: RwSignal::new(Vec::new()),
@@ -108,7 +112,15 @@ impl Live {
                     self.send(&json!({"type": "open_dashboard", "id": slug}));
                 }
             }
-            ServerMessage::Model { dashboards } => self.dashboards.set(dashboards),
+            ServerMessage::Model {
+                dashboards,
+                version,
+            } => {
+                self.dashboards.set(dashboards);
+                if self.model_version.get_untracked() != version {
+                    self.model_version.set(version);
+                }
+            }
             ServerMessage::Selection {
                 fields,
                 can_back,

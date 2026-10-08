@@ -236,3 +236,94 @@ footer { padding: 8px 24px; font-size: 12px; color: var(--ink-soft); border-top:
   .toolbar h1, .selection { flex-basis: 100%; }
   .hint { display: none; }
 }
+
+/* the config pages: files, editor, plan side by side */
+.page-single.wide { max-width: none; }
+.config-edit { display: grid; grid-template-columns: 220px minmax(0, 1fr) minmax(260px, 360px); gap: 18px; align-items: start; }
+.files ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.files .file {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  text-align: left;
+  font: 13px var(--mono);
+  cursor: pointer;
+}
+.files .file.current { border-left-color: var(--tide); background: var(--surface); }
+.file-state { font: 12px var(--text); color: var(--ink-soft); }
+.file-state.removed { color: var(--anemone); }
+.new-file { display: flex; gap: 6px; margin-top: 12px; }
+.new-file input { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--sand); border-radius: 4px; background: var(--surface); color: var(--ink); font: 13px var(--mono); }
+.editor-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.code-editor {
+  width: 100%;
+  min-height: 65vh;
+  padding: 12px 14px;
+  border: 1px solid var(--sand);
+  border-left: 3px solid var(--tide);
+  background: var(--surface);
+  color: var(--ink);
+  font: 13px/1.5 var(--mono);
+  tab-size: 2;
+  resize: vertical;
+}
+.plan { position: sticky; top: 12px; }
+.plan-head { display: flex; justify-content: space-between; align-items: baseline; }
+.plan h2 { margin: 0 0 8px; }
+.plan h3 { margin: 16px 0 6px; font: 500 15px/1.2 var(--display); }
+.plan ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.problems li.error { border-left: 3px solid var(--problem); padding-left: 8px; }
+.problems li.warning, .warnings li { border-left: 3px solid var(--sand); padding-left: 8px; }
+.changes .op { color: var(--ink-soft); }
+.class-badge { display: inline-block; padding: 0 7px; margin-right: 6px; border-radius: 999px; font-size: 12px; border: 1px solid var(--sand); }
+.class-badge.safe { border-color: var(--tide); color: var(--tide); }
+.class-badge.rebuild { background: var(--kelp); }
+.class-badge.destructive { background: var(--anemone); border-color: var(--anemone); color: #fff; }
+.actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.actions button, .plan-head button, .editor-head button, .new-file button {
+  border: 1px solid var(--sand);
+  background: transparent;
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.actions button.primary { background: var(--tide); border-color: var(--tide); color: var(--paper); }
+button.link { border: 0; background: none; padding: 0; color: var(--tide); text-decoration: underline; cursor: pointer; font: inherit; }
+.confirm { display: block; margin-top: 12px; font-size: 14px; }
+.ok { color: var(--tide); }
+.notice { border-left: 3px solid var(--anemone); padding: 4px 12px; margin: 10px 0; }
+.rebuild progress { width: 100%; max-width: 480px; accent-color: var(--tide); }
+.versions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.versions .version {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-left: 3px solid var(--sand);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+.versions .version .quiet { grid-column: 2 / -1; font-size: 13px; }
+.versions li.open .version { border-left-color: var(--tide); }
+.version-detail { padding: 6px 0 14px 14px; }
+.version-detail h4 { margin: 12px 0 4px; font-weight: 400; }
+.diff { font: 13px/1.45 var(--mono); background: var(--surface); padding: 6px 0; overflow-x: auto; }
+.diff div { padding: 0 12px; white-space: pre; }
+.diff .added { background: color-mix(in srgb, var(--tide) 16%, transparent); }
+.diff .removed { background: color-mix(in srgb, var(--anemone) 16%, transparent); }
+.diff .gap { color: var(--ink-soft); }
+.pending { background: var(--surface); padding: 12px 16px; margin-bottom: 12px; border-top: 3px solid var(--sand); }
+.pending h3 { margin: 0 0 4px; font: 500 16px/1.2 var(--display); }
+@media (max-width: 1000px) {
+  .config-edit { grid-template-columns: 1fr; }
+  .plan { position: static; }
+  .code-editor { min-height: 40vh; }
+}

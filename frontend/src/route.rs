@@ -12,6 +12,18 @@ pub enum Route {
     /// One table in the model browser.
     Table(String),
     Status,
+    /// The config pages, on one of their tabs.
+    Config(ConfigTab),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigTab {
+    /// The files, edited, with their plan.
+    Edit,
+    /// The versions so far.
+    History,
+    /// Changes waiting for approval.
+    Changes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +46,9 @@ impl Route {
             ["model", "metrics"] => Self::Model(Tab::Metrics),
             ["model", "tables", name] => Self::Table((*name).to_string()),
             ["status"] => Self::Status,
+            ["config"] => Self::Config(ConfigTab::Edit),
+            ["config", "history"] => Self::Config(ConfigTab::History),
+            ["config", "changes"] => Self::Config(ConfigTab::Changes),
             _ => Self::Home,
         }
     }
@@ -49,6 +64,9 @@ impl Route {
             Self::Model(Tab::Metrics) => "#/model/metrics".into(),
             Self::Table(name) => format!("#/model/tables/{name}"),
             Self::Status => "#/status".into(),
+            Self::Config(ConfigTab::Edit) => "#/config".into(),
+            Self::Config(ConfigTab::History) => "#/config/history".into(),
+            Self::Config(ConfigTab::Changes) => "#/config/changes".into(),
         }
     }
 }
@@ -67,6 +85,9 @@ mod tests {
             Route::Model(Tab::Metrics),
             Route::Table("orders".into()),
             Route::Status,
+            Route::Config(ConfigTab::Edit),
+            Route::Config(ConfigTab::History),
+            Route::Config(ConfigTab::Changes),
         ] {
             assert_eq!(Route::parse(&route.href()), route);
         }

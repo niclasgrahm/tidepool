@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tidepool_server::{AppState, Assets, DirAssets, Tokens, serve, ui};
+use tidepool_server::{AppState, Assets, DirAssets, Project, Tokens, serve, ui};
 use tidepool_store::WriterConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -47,6 +47,11 @@ enum Command {
         /// only and is gone when the server stops.
         #[arg(long)]
         data: Option<PathBuf>,
+        /// Apply a config directory that changed while the server was down
+        /// even if that destroys data (a table or column removed, a type
+        /// narrowed). Without it such a server refuses to start.
+        #[arg(long)]
+        allow_destructive: bool,
     },
     /// Check a config directory: every file, and how they fit together.
     Validate {
@@ -75,7 +80,8 @@ fn main() -> ExitCode {
             listen,
             ui_dir,
             data,
-        } => match run_server(config.as_deref(), listen, ui_dir, data) {
+            allow_destructive,
+        } => match run_server(config.as_deref(), listen, ui_dir, data, allow_destructive) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err:#}");
@@ -91,6 +97,7 @@ async fn run_server(
     listen: Option<SocketAddr>,
     ui_dir: Option<PathBuf>,
     data: Option<PathBuf>,
+    allow_destructive: bool,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -149,6 +156,13 @@ async fn run_server(
         model.metrics.len(),
         model.dashboards.len()
     );
-    let state = AppState::new(model, writer, ui, Tokens::from_env())?;
+    let project = Project {
+        files: match config {
+            Some(dir) => tidepool_server::config::read_dir(dir)?,
+            None => tidepool_server::config::Files::new(),
+        },
+        dir: config.map(std::path::Path::to_path_buf),
+    };
+    let state = AppState::open(project, writer, ui, Tokens::from_env(), allow_destructive).await?;
     serve(listen, Arc::new(state)).await
 }

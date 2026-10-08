@@ -282,9 +282,35 @@ pub enum ColumnData {
         offsets: Vec<u32>,
         nulls: Option<Bits>,
     },
+    /// Every row NULL, holding nothing: a column added to a table after
+    /// this segment was written (plan §8.2). `dict` says how readers expect
+    /// it: as code 0 (NULL in every dictionary) or as plain NULLs.
+    Null {
+        rows: u32,
+        dict: bool,
+    },
 }
 
 impl ColumnData {
+    /// Rows held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Codes(c) => c.len(),
+            Self::I64 { values, .. } => values.len(),
+            Self::I128 { values, .. } => values.len(),
+            Self::F64 { values, .. } => values.len(),
+            Self::Str { offsets, .. } => offsets.len() - 1,
+            Self::PackedCodes { packed, .. } | Self::PackedI64 { packed, .. } => packed.len(),
+            Self::Null { rows, .. } => *rows as usize,
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     #[must_use]
     pub fn get(&self, row: usize) -> Raw<'_> {
         let null = |nulls: &Option<Bits>| nulls.as_ref().is_some_and(|n| n.get(row));
@@ -293,6 +319,8 @@ impl ColumnData {
             Self::PackedCodes { packed, .. } => {
                 Raw::Code(u32::try_from(packed.get(row)).unwrap_or(0))
             }
+            Self::Null { dict: true, .. } => Raw::Code(0),
+            Self::Null { dict: false, .. } => Raw::Null,
             Self::I64 { nulls, .. }
             | Self::PackedI64 { nulls, .. }
             | Self::I128 { nulls, .. }
@@ -334,6 +362,7 @@ impl ColumnData {
                 offsets,
                 nulls: n,
             } => bytes.len() + offsets.len() * 4 + nulls(n),
+            Self::Null { .. } => 0,
         }
     }
 
@@ -348,6 +377,7 @@ impl ColumnData {
                 #[allow(clippy::cast_possible_truncation)]
                 packed.unpack(rows, out, |v| v as u32);
             }
+            Self::Null { dict: true, .. } => out.resize(rows.len(), 0),
             _ => {}
         }
     }
@@ -368,6 +398,11 @@ impl ColumnData {
                 #[allow(clippy::cast_possible_truncation)]
                 for r in at {
                     out[*r as usize] = packed.get(start + *r as usize) as u32;
+                }
+            }
+            Self::Null { dict: true, .. } => {
+                for r in at {
+                    out[*r as usize] = 0;
                 }
             }
             _ => {}
@@ -399,6 +434,11 @@ impl ColumnData {
             Self::PackedCodes { packed, .. } => {
                 for r in at {
                     out[*r as usize] = lookup(packed.get(start + *r as usize));
+                }
+            }
+            Self::Null { dict: true, .. } => {
+                for r in at {
+                    out[*r as usize] = lookup(0);
                 }
             }
             _ => {}
@@ -435,6 +475,13 @@ impl ColumnData {
                 }
                 nulls
             }
+            Self::Null { dict: false, .. } => {
+                for r in at {
+                    values[*r as usize] = 0;
+                    nulls[*r as usize] = true;
+                }
+                return;
+            }
             _ => return,
         };
         for r in at {
@@ -455,15 +502,23 @@ impl ColumnData {
     ) {
         values.resize(len, 0.0);
         nulls.resize(len, false);
-        if let Self::F64 {
-            values: v,
-            nulls: bits,
-        } = self
-        {
-            for r in at {
-                values[*r as usize] = v[start + *r as usize];
-                nulls[*r as usize] = bits.as_ref().is_some_and(|b| b.get(start + *r as usize));
+        match self {
+            Self::F64 {
+                values: v,
+                nulls: bits,
+            } => {
+                for r in at {
+                    values[*r as usize] = v[start + *r as usize];
+                    nulls[*r as usize] = bits.as_ref().is_some_and(|b| b.get(start + *r as usize));
+                }
             }
+            Self::Null { dict: false, .. } => {
+                for r in at {
+                    values[*r as usize] = 0.0;
+                    nulls[*r as usize] = true;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -494,6 +549,7 @@ impl ColumnData {
             Self::PackedCodes { packed, .. } => {
                 packed.unpack(rows, out, at);
             }
+            Self::Null { dict: true, .. } => out.fill(at(0)),
             _ => {}
         }
     }
@@ -523,6 +579,11 @@ impl ColumnData {
                 packed.unpack(rows.clone(), values, |v| base.wrapping_add(v as i64));
                 n
             }
+            Self::Null { dict: false, .. } => {
+                values.resize(rows.len(), 0);
+                nulls.resize(rows.len(), true);
+                return;
+            }
             _ => return,
         };
         match null_bits {
@@ -536,16 +597,22 @@ impl ColumnData {
     pub fn decode_f64(&self, rows: Range<usize>, values: &mut Vec<f64>, nulls: &mut Vec<bool>) {
         values.clear();
         nulls.clear();
-        if let Self::F64 {
-            values: v,
-            nulls: n,
-        } = self
-        {
-            values.extend_from_slice(&v[rows.clone()]);
-            match n {
-                Some(bits) => nulls.extend(rows.map(|i| bits.get(i))),
-                None => nulls.resize(rows.len(), false),
+        match self {
+            Self::F64 {
+                values: v,
+                nulls: n,
+            } => {
+                values.extend_from_slice(&v[rows.clone()]);
+                match n {
+                    Some(bits) => nulls.extend(rows.map(|i| bits.get(i))),
+                    None => nulls.resize(rows.len(), false),
+                }
             }
+            Self::Null { dict: false, .. } => {
+                values.resize(rows.len(), 0.0);
+                nulls.resize(rows.len(), true);
+            }
+            _ => {}
         }
     }
 
@@ -555,6 +622,7 @@ impl ColumnData {
         match self {
             Self::PackedCodes { min, max, .. } => Some((i64::from(*min), i64::from(*max))),
             Self::PackedI64 { min, max, .. } => Some((*min, *max)),
+            Self::Null { dict: true, .. } => Some((0, 0)),
             _ => None,
         }
     }
@@ -694,19 +762,17 @@ impl ColumnBuilder {
 /// column of a sealed segment.
 #[must_use]
 pub fn seal(parts: &[&ColumnData], storage: Storage, dict: bool) -> ColumnData {
+    // a column added after all of these were written stays virtual
+    if parts.iter().all(|p| matches!(p, ColumnData::Null { .. })) {
+        let rows = parts.iter().map(|p| p.len()).sum::<usize>();
+        return ColumnData::Null {
+            rows: u32::try_from(rows).unwrap_or(u32::MAX),
+            dict,
+        };
+    }
     let mut builder = ColumnBuilder::new(storage, dict);
     for part in parts {
-        let rows = match part {
-            ColumnData::Codes(c) => c.len(),
-            ColumnData::I64 { values, .. } => values.len(),
-            ColumnData::I128 { values, .. } => values.len(),
-            ColumnData::F64 { values, .. } => values.len(),
-            ColumnData::Str { offsets, .. } => offsets.len() - 1,
-            ColumnData::PackedCodes { packed, .. } | ColumnData::PackedI64 { packed, .. } => {
-                packed.len()
-            }
-        };
-        for row in 0..rows {
+        for row in 0..part.len() {
             builder.push(part.get(row));
         }
     }

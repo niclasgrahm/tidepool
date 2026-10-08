@@ -35,8 +35,12 @@ async fn every_documented_endpoint_is_routed_at_its_documented_method() {
     for endpoint in endpoints() {
         let path = concrete(&endpoint);
         let reply = call(ready_state(), http_method(endpoint.method), &path).await;
+        // a handler may answer 404 itself (no such pending change); the
+        // fallback's 404 is what an unrouted path gets
+        let unrouted =
+            reply.status == StatusCode::NOT_FOUND && reply.text().contains("no endpoint");
         assert!(
-            reply.status != StatusCode::NOT_FOUND && reply.status != StatusCode::METHOD_NOT_ALLOWED,
+            !unrouted && reply.status != StatusCode::METHOD_NOT_ALLOWED,
             "{} {} came back {}",
             endpoint.method.label(),
             path,
@@ -418,6 +422,7 @@ async fn status_reports_the_log_when_data_is_kept_on_disk() {
         .await
         .json();
     assert_eq!(status["durability"]["mode"], "fsync");
-    assert_eq!(status["durability"]["last_lsn"], 1);
+    // the log starts with the model the data is in, then the write
+    assert_eq!(status["durability"]["last_lsn"], 2);
     assert_eq!(status["durability"]["checkpoint_lsn"], 0);
 }

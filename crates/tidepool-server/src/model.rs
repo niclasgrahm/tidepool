@@ -177,5 +177,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusInfo> {
         cache_bytes: state.engine.cache_bytes() as u64,
         sessions: state.hub.live_sessions(),
         durability,
+        config_version: snapshot.version,
+        rebuild: crate::config::rebuild_info(&state),
     })
 }

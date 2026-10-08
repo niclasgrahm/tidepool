@@ -28,7 +28,7 @@ pub(crate) fn decode(table: &Table, shape: Shape, body: &[u8]) -> Result<Batch, 
     let reader = StreamReader::try_new(body, None)
         .map_err(|e| rejected_body(format!("the body is not an Arrow IPC stream: {e}")))?;
     let columns = wanted_columns(table, shape);
-    let mut batch = new_batch(columns.len());
+    let mut batch = new_batch(&columns);
     let mut rejected = Rejected::default();
     let mut first_row = 0;
 

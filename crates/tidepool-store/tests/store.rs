@@ -418,7 +418,10 @@ fn the_writer_recovers_its_data_directory() {
     let model = model();
     let orders = table(&model, "orders");
     {
-        let (writer, thread) = match spawn(Arc::clone(&model), config.clone()) {
+        let (writer, thread) = match spawn(
+            tidepool_store::ModelVersion::initial(Arc::clone(&model)),
+            config.clone(),
+        ) {
             Ok(started) => started,
             Err(err) => panic!("{err}"),
         };
@@ -443,7 +446,10 @@ fn the_writer_recovers_its_data_directory() {
         drop(writer);
         let _ = thread.join();
     }
-    let (writer, _thread) = match spawn(Arc::clone(&model), config) {
+    let (writer, _thread) = match spawn(
+        tidepool_store::ModelVersion::initial(Arc::clone(&model)),
+        config,
+    ) {
         Ok(started) => started,
         Err(err) => panic!("{err}"),
     };

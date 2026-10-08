@@ -124,6 +124,8 @@ pub(crate) struct Hub {
     next: AtomicU64,
     /// Whether the epoch loop runs.
     running: AtomicBool,
+    /// The model sessions were last told about.
+    model: Mutex<Option<Arc<Model>>>,
 }
 
 impl Hub {
@@ -169,14 +171,7 @@ impl Hub {
             session_id: session.id.clone(),
             epoch: snapshot.epoch,
         });
-        session.send(ServerMessage::Model {
-            dashboards: snapshot
-                .model
-                .dashboards
-                .iter()
-                .map(|d| dashboard_info(&snapshot.model, d))
-                .collect(),
-        });
+        session.send(model_message(&snapshot));
         // built first: `send` takes the session lock itself
         let selection = selection_message(&snapshot.model, &session.lock());
         session.send(selection);
@@ -212,6 +207,18 @@ impl Hub {
     /// Bring every live session up to date with the newest epoch.
     fn refresh_all(&self, state: &AppState) {
         let snapshot = state.writer.snapshot();
+        let previous = self
+            .model
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Arc::clone(&snapshot.model));
+        if let Some(previous) = previous
+            && !Arc::ptr_eq(&previous, &snapshot.model)
+        {
+            for session in self.sessions() {
+                follow(&session, &previous, &snapshot);
+            }
+        }
         for session in self.sessions() {
             refresh(state, &session, &snapshot);
         }
@@ -229,6 +236,61 @@ impl Hub {
     #[allow(clippy::unused_self)]
     pub(crate) fn disconnect(&self, session: &Session) {
         session.lock().out = None;
+    }
+}
+
+/// The dashboards a client can open.
+fn model_message(snapshot: &Snapshot) -> ServerMessage {
+    ServerMessage::Model {
+        dashboards: snapshot
+            .model
+            .dashboards
+            .iter()
+            .map(|d| dashboard_info(&snapshot.model, d))
+            .collect(),
+        version: snapshot.version,
+    }
+}
+
+/// The type of a field, if the model has it.
+fn field_type(model: &Model, field: &FieldRef) -> Option<tidepool_model::ir::Type> {
+    model
+        .dataset(field.table)?
+        .field(&field.field)
+        .map(|f| f.ty)
+}
+
+/// Tell a session the model changed (plan §8.1, notify): the dashboards
+/// again, selections on fields that are gone or changed type dropped, and
+/// its dashboard sent whole, or closed if it was removed.
+fn follow(session: &Session, previous: &Model, snapshot: &Snapshot) {
+    let model = &snapshot.model;
+    session.send(model_message(snapshot));
+    let (selection, removed) = {
+        let mut inner = session.lock();
+        let before = inner.selection();
+        for selection in &mut inner.history {
+            selection.0.retain(|field, _| {
+                let now = field_type(model, field);
+                now.is_some() && now == field_type(previous, field)
+            });
+        }
+        inner.sent.clear();
+        let removed = inner
+            .dashboard
+            .take_if(|d| !model.dashboards.iter().any(|x| x.slug == *d));
+        (
+            (inner.selection() != before).then(|| selection_message(model, &inner)),
+            removed,
+        )
+    };
+    if let Some(selection) = selection {
+        session.send(selection);
+    }
+    if let Some(slug) = removed {
+        session.send(ServerMessage::Error {
+            message: format!("the dashboard `{slug}` was removed by a config change"),
+        });
     }
 }
 

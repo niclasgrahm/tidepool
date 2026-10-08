@@ -78,13 +78,13 @@ resolves names in expressions.)
 | `tidepool-config` | Apache-2.0 | serde types for every config file, JSON Schemas, diagnostics with `file:line:col` | M1 ✓ |
 | `tidepool-expr` | AGPL | SQL expressions: syntax + reference analysis (M1 ✓); type-check, kernels (M3) | M1/M3 |
 | `tidepool-model` | AGPL | compiled Model IR, cross-file validation, catalog of stable ids, diff → plan | M1 ✓ |
-| `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders, WAL and checkpoints | M2 ✓ / M5 ✓ |
+| `tidepool-store` | AGPL | values, dictionaries, segments, PK index, epochs/snapshots, the writer thread, ingest decoders, WAL and checkpoints, model changes over data | M2 ✓ / M5 ✓ / M7 ✓ |
 | `tidepool-engine` | AGPL | selection engine, aggregation, caches, incremental answers | M3 ✓ / M4 ✓ |
-| `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, live sessions, model/status | M0–M6 ✓ |
+| `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, live sessions, model/status, the config pipeline | M0–M7 ✓ |
 | `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 ✓ / M4 ✓ |
 | `tidepool` | AGPL | the binary: CLI and wiring; crash and browser e2e tests | M0–M6 ✓ |
 | `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
-| `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M6 ✓ |
+| `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M6 ✓ / M7 ✓ |
 
 The licence split is enforced by `crates/tidepool/tests/licensing.rs`; see
 [licensing.md](licensing.md). A permissive crate must never depend on a
@@ -191,6 +191,23 @@ written or how it's replayed must keep `tests/durability.rs` (1,000 power
 losses, including mid-checkpoint) and the `kill -9` loop
 (`crates/tidepool/tests/crash.rs`) green, and add a planted-bug check.
 
+**Model changes** (`migrate.rs`, plan §8.2): `Store::plan_migration`
+works out what a new `ModelVersion` does to the data; tables are
+re-shaped by column id (unchanged columns shared via `Arc`, new nullable
+columns as `ColumnData::Null`, which holds nothing). Anything that
+rewrites rows (joined dictionaries merged into a new one, encoding or type
+changes) is `migrate::build`, run from an immutable snapshot on its own
+thread; `Store::migrate` catches up with what arrived meanwhile and swaps
+on the writer thread. Rebuilt dictionaries and rewritten segments get a
+new **generation**, which is in their file names and in the engine's
+derived-dictionary cache key: a dictionary under an old id is never taken
+for the old one. Batches carry the column ids and types they were decoded
+for (`Batch::shape`), and `Store::fit` re-shapes a batch decoded before a
+change. A model change is a WAL record and part of every checkpoint.
+Every new kind of change needs a case in `tests/migrate.rs`, and anything
+that changes results must keep the migration oracle (`check_migration`)
+green.
+
 Store tests run against the retail example's model (`tests/store.rs`); use
 `Store::with_seal_rows` with a small number to exercise sealing.
 
@@ -278,6 +295,24 @@ refreshes every session from the newest snapshot (coalescing); selection
 changes are answered at once, outside it. Never hold a session's lock
 while calling `Session::send`: it takes the lock itself.
 
+### The config pipeline (`tidepool-server::config`)
+
+Every change to what the server runs goes through `config::submit`: a
+`ConfigChange` (files to set or remove, against a `base_version`) is
+compiled against the catalog, planned, checked against policy
+(destructive needs `approve`; `propose` queues it), handed to the writer
+(`WriterHandle::change_model`), recorded as a version, written back to the
+config directory with `renamed_from` hints stripped, and committed when
+the directory is a git repository. One async lock serialises changes; the
+directory watcher (`config::look`, every second) reads the directory under
+that lock and compares it with what the server last wrote, so write-backs
+are never mistaken for edits. `AppState::open` is startup: it recovers the
+data's model and applies the directory's difference as a change
+(destructive only with `--allow-destructive`). History and the pending
+queue live in `<data>/config/`. Sessions learn of a new model in the epoch
+loop (`live::follow`). Tests: `tests/config.rs`, which includes the M7 exit
+criterion.
+
 ### The oracle (`tidepool-oracle`)
 
 Random schemas, data (written in random batches with upserts, deletes and
@@ -294,6 +329,10 @@ seed and the query: `TIDEPOOL_ORACLE_SEED=<n> cargo test -p tidepool-oracle`
 reproduces it. Debug builds use 13-row morsels so small data still splits
 segments. When you add a query feature, extend the generator so the oracle
 covers it, and check it would catch a planted bug in the new code.
+`check_migration` writes each project's data under an earlier version of
+it (no relationships, other encodings, an extra column), changes the
+model midway with a background build and writes going on, then checks
+every query.
 
 ### UI serving
 
@@ -317,7 +356,11 @@ directly: request and response types are shared, never generated or copied.
 
 Pages (hash routes, `route.rs`): the dashboard list, dashboards, the model
 browser (tables with an ingest `curl`, a relationship diagram, the metric
-catalog; from `GET /v1/model`) and a status page (`GET /v1/status`, polled).
+catalog; from `GET /v1/model`), the config pages (`configui.rs`: the files
+edited with the plan checked as you type, history with diffs and revert,
+the approval queue) and a status page (`GET /v1/status`, polled).
+`api.rs` sends a `?token=` the page was opened with as the bearer token;
+the config pages need the admin one.
 One `Live` (`live.rs`, in context) owns the WebSocket to `/v1/ws` (keeping
 a `?token=` from the page URL) and the signals its messages feed; frames
 are applied to a `Board`. Rules the dashboard follows:
@@ -331,11 +374,13 @@ are applied to a `Board`. Rules the dashboard follows:
   reaches them; `echarts.rs` (from the spike: read its README's interop
   pitfalls before changing it) only hands them over. ECharts is vendored in
   `frontend/vendor/` with its licence.
-- Logic without a DOM goes in `board.rs`, `charts.rs` or `route.rs` and
+- Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs` or
+  `textdiff.rs` and
   gets a plain test. The browser path is covered by `just e2e`
   (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
-  protocol against the built UI, clicking a bar, watching a live update,
-  going back. It needs Chrome, so it isn't in `just ci`; run it after UI
+  protocol against the built UI (on a copy of the example: config
+  changes are written back), clicking a bar, watching a live update,
+  going back, and adding a table in the config editor. It needs Chrome, so it isn't in `just ci`; run it after UI
   changes.
 
 It is a workspace member, so `just ci` lints and tests it natively.
@@ -345,4 +390,6 @@ It is a workspace member, so `just ci` lints and tests it natively.
 - Spikes live in `spikes/`, outside the workspace, and are kept for reference
   once their decision is recorded in the plan.
 - `examples/retail/` is the example project. Keep it covering every config
-  feature as features land.
+  feature as features land. A server run on it writes applied changes back
+  into it (`git_commit: false` keeps them out of history); the demo in
+  `.claude/launch.json` runs on a copy in `target/demo-config` instead.

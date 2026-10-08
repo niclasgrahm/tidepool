@@ -36,6 +36,10 @@ pub struct ServerConfig {
     pub memory_budget: MemorySize,
     #[serde(default)]
     pub durability: Durability,
+    /// What happens to the config directory when a change is applied
+    /// through the API or the UI.
+    #[serde(default)]
+    pub config_writeback: Writeback,
 }
 
 impl Default for ServerConfig {
@@ -46,8 +50,35 @@ impl Default for ServerConfig {
             epoch_interval: default_epoch_interval(),
             memory_budget: default_memory_budget(),
             durability: Durability::default(),
+            config_writeback: Writeback::default(),
         }
     }
+}
+
+/// Write-back of applied changes (plan §8.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Writeback {
+    /// Write applied changes to the config files, so the directory always
+    /// holds what the server runs.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Commit them, when the config directory is in a git repository.
+    #[serde(default = "yes")]
+    pub git_commit: bool,
+}
+
+impl Default for Writeback {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            git_commit: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_epoch_interval() -> HumanDuration {

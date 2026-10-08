@@ -54,6 +54,26 @@ fn validate_fails_with_rendered_errors() {
 }
 
 #[test]
+fn validate_fails_when_a_file_does_not_parse() {
+    // the table is left out, and the rest compiles without it: still an error
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("temp dir: {err}"),
+    };
+    if let Err(err) = std::fs::create_dir(dir.path().join("tables")).and_then(|()| {
+        std::fs::write(
+            dir.path().join("tables/returns.yaml"),
+            "name: returns\nmode: append\ncolumns:\n  id: { type: strng }\n",
+        )
+    }) {
+        panic!("writing config: {err}");
+    }
+    let output = tidepool(&["validate", "--config", &dir.path().to_string_lossy()]);
+    assert!(!output.status.success(), "{}", text(&output.stdout));
+    assert!(text(&output.stdout).is_empty());
+}
+
+#[test]
 fn validate_reports_a_missing_directory() {
     let output = tidepool(&["validate", "--config", "/nonexistent/tidepool-config"]);
     assert!(!output.status.success());

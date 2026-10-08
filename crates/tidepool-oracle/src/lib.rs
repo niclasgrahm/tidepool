@@ -340,6 +340,192 @@ pub fn check_live(seed: u64, live: usize) -> Result<usize, String> {
     Ok(compared)
 }
 
+/// The project as it was before the generated one: the same tables, each
+/// with an extra column and with some columns stored the other way, and no
+/// relationships or metrics. Moving from it to the generated project merges
+/// the dictionaries of every relationship's columns over data, converts
+/// columns between encodings and drops the extra columns.
+fn before(schema: &Schema, rng: &mut Rng) -> Vec<(String, String)> {
+    let keys: Vec<(String, String)> = schema
+        .relationships
+        .iter()
+        .map(|r| (r.from.clone(), r.fk.clone()))
+        .collect();
+    let mut files = Vec::new();
+    for (path, text) in generate::files(schema) {
+        if let Some(name) = path
+            .strip_prefix("tables/")
+            .and_then(|p| p.strip_suffix(".yaml"))
+        {
+            let mut out = String::new();
+            for line in text.lines() {
+                let column = line
+                    .trim_start()
+                    .split_once(':')
+                    .map(|(c, _)| c.to_string())
+                    .filter(|_| line.starts_with("  ") && line.ends_with(" }"));
+                match column {
+                    Some(c)
+                        if c != "key"
+                            && !keys.iter().any(|(t, k)| t == name && *k == c)
+                            && rng.chance(50) =>
+                    {
+                        let encoding = if rng.chance(50) { "plain" } else { "dict" };
+                        out.push_str(&line.replacen(
+                            " }",
+                            &format!(", encoding: {encoding} }}"),
+                            1,
+                        ));
+                    }
+                    _ => out.push_str(line),
+                }
+                out.push('\n');
+            }
+            out.push_str("  scratch: { type: string, nullable: true }\n");
+            files.push((path, out));
+        } else if path == "model.ossie.yaml" {
+            let datasets = text.split("relationships:").next().unwrap_or_default();
+            files.push((path, format!("{datasets}relationships: []\nmetrics: []\n")));
+        } else {
+            files.push((path, text));
+        }
+    }
+    files
+}
+
+/// Apply one write to `store`, decoded under `model` (which may be older
+/// than the store's: the store fits it).
+fn write_to(
+    store: &mut Store,
+    model: &Model,
+    write: &Write,
+    last: &mut Option<Snapshot>,
+) -> Result<(), String> {
+    let (table, op, rows) = match write {
+        Write::Publish => {
+            if let Some(snapshot) = store.publish() {
+                *last = Some(snapshot);
+            }
+            return Ok(());
+        }
+        Write::Rows { table, rows } => (table, Op::Write, rows),
+        Write::Delete { table, keys } => (table, Op::Delete, keys),
+    };
+    let spec = model.table_named(table).ok_or("unknown table")?;
+    let shape = if op == Op::Delete {
+        Shape::Keys
+    } else {
+        Shape::Rows
+    };
+    let body = serde_json::to_vec(rows).map_err(|e| e.to_string())?;
+    let batch =
+        json_array(spec, shape, &body).map_err(|r| format!("{} rejected: {r:?}", spec.name))?;
+    store.apply(spec.id, op, &batch);
+    Ok(())
+}
+
+/// The model-change oracle (M7): the data is written first under an
+/// earlier version of the project ([`before`]); midway the store moves to
+/// the generated project the way the writer does it: a build from a
+/// snapshot, writes going on meanwhile (some decoded under the old model
+/// and applied after the swap), then the swap. Every query must then agree
+/// with DuckDB on the fast, general and cached paths. Returns how many
+/// queries were compared.
+///
+/// # Errors
+/// A report of the first mismatch.
+pub fn check_migration(seed: u64, queries: usize) -> Result<usize, String> {
+    let mut rng = Rng::new(seed);
+    let schema = generate::schema(&mut rng);
+    let compile_files = |files: Vec<(String, String)>, catalog: &Catalog| {
+        let (set, mut diagnostics) = ConfigSet::from_files(files);
+        let (compiled, more) = compile(&set, catalog);
+        diagnostics.extend(more);
+        compiled.ok_or_else(|| {
+            format!(
+                "seed {seed}: a generated project doesn't compile:\n{}",
+                render_all(&diagnostics, &set.files)
+            )
+        })
+    };
+    let old = compile_files(before(&schema, &mut rng), &Catalog::default())?;
+    let new = compile_files(generate::files(&schema), &old.catalog)?;
+    let (old_model, model) = (Arc::new(old.model), Arc::new(new.model));
+    let data = generate::data(&mut rng, &schema);
+
+    let mut store = Store::with_version(
+        tidepool_store::ModelVersion {
+            version: 1,
+            model: Arc::clone(&old_model),
+            catalog: Arc::new(old.catalog),
+        },
+        8 + rng.below(200),
+    );
+    let n = data.writes.len();
+    let start = rng.below(n.max(1));
+    let swap = (start + rng.below(n - start + 1)).min(n);
+    let late = (swap + rng.below(n - swap + 1)).min(n);
+    let mut last = None;
+    for write in &data.writes[..start] {
+        write_to(&mut store, &old_model, write, &mut last)?;
+    }
+    let snapshot = store
+        .publish()
+        .unwrap_or_else(|| Snapshot::empty(Arc::clone(&old_model)));
+    let migration = store.plan_migration(tidepool_store::ModelVersion {
+        version: 2,
+        model: Arc::clone(&model),
+        catalog: Arc::new(new.catalog),
+    });
+    let rebuilt = if rng.chance(75) {
+        tidepool_store::migrate::build(&migration, &snapshot, &std::sync::atomic::AtomicU64::new(0))
+    } else {
+        tidepool_store::Rebuilt::default()
+    };
+    for write in &data.writes[start..swap] {
+        write_to(&mut store, &old_model, write, &mut last)?;
+    }
+    store.migrate(migration, rebuilt);
+    // decoded before the change, applied after it
+    for write in &data.writes[swap..late] {
+        write_to(&mut store, &old_model, write, &mut last)?;
+    }
+    for write in &data.writes[late..] {
+        write_to(&mut store, &model, write, &mut last)?;
+    }
+    let snapshot = store
+        .publish()
+        .or(last)
+        .filter(|s| s.version == 2)
+        .ok_or_else(|| format!("seed {seed}: nothing published after the change"))?;
+    let db = duck::load(&schema, &data).map_err(|e| format!("seed {seed}: loading DuckDB: {e}"))?;
+    let cached = Engine::default();
+    for q in 0..queries {
+        let query = generate::query(&mut rng, &schema, &data);
+        let engine = engine_query(&model, &schema, &query)
+            .map_err(|e| format!("seed {seed} query {q}: {e}"))?;
+        let sql = duck::sql(&schema, &query);
+        let width = query.dims.len() + query.metrics.len();
+        let theirs = duck::run(&db, &sql, width)
+            .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
+        for (path, ours) in [
+            ("migrated, fast", run(&snapshot, &engine)),
+            ("migrated, general", run_general(&snapshot, &engine)),
+            ("migrated, cached", cached.run(&snapshot, &engine)),
+        ] {
+            let ours = ours
+                .map_err(|e| format!("seed {seed} query {q}: Tidepool refused {query:?}: {e}"))?;
+            let ours: Vec<Vec<Canon>> = ours
+                .rows
+                .iter()
+                .map(|row| row.iter().map(canon).collect())
+                .collect();
+            compare(seed, q, path, &query, &sql, ours, theirs.clone())?;
+        }
+    }
+    Ok(queries)
+}
+
 /// Queries also run over every intermediate snapshot.
 const HISTORY_QUERIES: usize = 12;
 

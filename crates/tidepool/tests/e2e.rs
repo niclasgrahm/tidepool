@@ -71,11 +71,32 @@ fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn start_server(address: SocketAddr) -> Running {
+/// A copy of the retail example: config changes are written back to it.
+fn example_copy() -> tempfile::TempDir {
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("{err}"),
+    };
+    let from = workspace().join("examples/retail");
+    for sub in ["", "tables", "dashboards"] {
+        let Ok(entries) = std::fs::read_dir(from.join(sub)) else {
+            continue;
+        };
+        let _ = std::fs::create_dir_all(dir.path().join(sub));
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                let _ = std::fs::copy(entry.path(), dir.path().join(sub).join(entry.file_name()));
+            }
+        }
+    }
+    dir
+}
+
+fn start_server(address: SocketAddr, config: &Path) -> Running {
     let root = workspace();
     let child = Command::new(env!("CARGO_BIN_EXE_tidepool"))
         .args(["serve", "--config"])
-        .arg(root.join("examples/retail"))
+        .arg(config)
         .arg("--ui-dir")
         .arg(root.join("frontend/dist"))
         .args(["--listen", &address.to_string()])
@@ -291,7 +312,8 @@ fn click_a_bar_watch_it_update_go_back() {
         "no frontend/dist: run `just frontend` first"
     );
     let address = free_port();
-    let _server = start_server(address);
+    let config = example_copy();
+    let _server = start_server(address, config.path());
 
     // two regions, one customer and product each, known amounts
     post(
@@ -393,4 +415,64 @@ fn click_a_bar_watch_it_update_go_back() {
         &format!("{KPI} === '1,205.00'"),
         "the KPI to show all 1,205.00",
     );
+}
+
+#[test]
+fn a_table_added_in_the_config_editor_goes_live() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/config") }),
+    );
+    browser.wait_for(
+        "document.querySelector('.files .file') !== null",
+        "the config files listed",
+    );
+
+    // a new file, written in the editor
+    browser.click_element("document.querySelector('.new-file input')");
+    browser.call(
+        "Input.insertText",
+        &json!({ "text": "tables/returns.yaml" }),
+    );
+    browser.click_element(
+        "[...document.querySelectorAll('.new-file button')].find(b => b.textContent === 'Add')",
+    );
+    browser.click_element("document.querySelector('textarea.code-editor')");
+    browser.call(
+        "Input.dispatchKeyEvent",
+        &json!({ "type": "keyDown", "key": "End", "code": "End", "modifiers": 4 }),
+    );
+    browser.call(
+        "Input.insertText",
+        &json!({ "text": "  refunded: { type: \"decimal(14,2)\" }\n" }),
+    );
+
+    // its plan, then apply
+    browser.wait_for(
+        "[...document.querySelectorAll('.changes li')].some(l => l.textContent.includes('returns') && l.textContent.includes('safe'))",
+        "a safe plan adding the table",
+    );
+    browser.click_element(
+        "[...document.querySelectorAll('.actions button')].find(b => b.textContent === 'Apply')",
+    );
+    browser.wait_for(
+        "document.querySelector('.plan .ok')?.textContent === 'Version 2 is live.'",
+        "version 2 live",
+    );
+    let written =
+        std::fs::read_to_string(config.path().join("tables/returns.yaml")).unwrap_or_default();
+    assert!(written.contains("refunded"), "written back: {written}");
+    match http(address, "GET", "/v1/tables/returns", "") {
+        Some((200, _)) => {}
+        other => panic!("the new table should be served: {other:?}"),
+    }
 }

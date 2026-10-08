@@ -5,6 +5,7 @@
 //! [`router`] in process through `tower::ServiceExt::oneshot`, with no socket.
 
 pub mod auth;
+pub mod config;
 mod endpoints;
 mod handlers;
 mod idempotency;
@@ -27,7 +28,7 @@ pub use endpoints::api_router;
 pub use ui::{Assets, DirAssets};
 
 use tidepool_model::Model;
-use tidepool_store::{WriterConfig, WriterHandle};
+use tidepool_store::{Change, ModelVersion, WriterConfig, WriterHandle};
 
 /// Everything a handler can reach.
 pub struct AppState {
@@ -41,6 +42,15 @@ pub struct AppState {
     /// Live sessions on `/v1/ws`.
     pub(crate) hub: live::Hub,
     pub(crate) started: std::time::Instant,
+    /// The config files, their versions, and changes waiting for approval.
+    pub(crate) config: config::ConfigStore,
+}
+
+/// A config to run: its directory (written back to and watched), if any,
+/// and its files.
+pub struct Project {
+    pub dir: Option<std::path::PathBuf>,
+    pub files: config::Files,
 }
 
 impl AppState {
@@ -55,14 +65,86 @@ impl AppState {
         ui: Option<Arc<dyn Assets>>,
         tokens: Tokens,
     ) -> std::io::Result<Self> {
-        let (writer, _thread) = tidepool_store::spawn(model, writer)?;
+        let (writer, _thread) = tidepool_store::spawn(ModelVersion::initial(model), writer)?;
         Ok(Self::with_writer(writer, ui, tokens))
+    }
+
+    /// A server for a project: the writer started (and its data recovered),
+    /// then the config reconciled with the data (plan §8.1, startup). A
+    /// config directory that changed while the server was down is applied
+    /// as a change; one that would destroy data only with
+    /// `allow_destructive`. Returns once the model the config describes is
+    /// live, rebuilds included.
+    ///
+    /// # Errors
+    /// The config doesn't compile, the data can't be recovered, or the
+    /// change would destroy data.
+    pub async fn open(
+        project: Project,
+        writer: WriterConfig,
+        ui: Option<Arc<dyn Assets>>,
+        tokens: Tokens,
+        allow_destructive: bool,
+    ) -> anyhow::Result<Self> {
+        let (set, mut diagnostics) = tidepool_config::ConfigSet::from_files(project.files.clone());
+        let (compiled, more) = tidepool_model::compile(&set, &tidepool_model::Catalog::default());
+        diagnostics.extend(more);
+        let Some(compiled) = compiled else {
+            anyhow::bail!(
+                "the config has errors:\n{}",
+                tidepool_config::diag::render_all(&diagnostics, &set.files)
+            );
+        };
+        let data = writer.data.clone();
+        let (writer, _thread) = tidepool_store::spawn(
+            ModelVersion {
+                version: 1,
+                model: Arc::new(compiled.model),
+                catalog: Arc::new(compiled.catalog),
+            },
+            writer,
+        )?;
+        let snapshot = writer.snapshot();
+        let live = ModelVersion {
+            version: snapshot.version,
+            model: Arc::clone(&snapshot.model),
+            catalog: Arc::clone(&snapshot.catalog),
+        };
+        let started = config::ConfigStore::start(
+            project.dir,
+            data.as_deref(),
+            project.files,
+            &live,
+            allow_destructive,
+        )?;
+        if let Some(target) = started.change {
+            let version = target.version;
+            tracing::info!("applying the config directory's changes: version {version}");
+            if let Change::Rebuilding { rows } = writer
+                .change_model(target)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?
+            {
+                tracing::info!("rebuilding {rows} rows for version {version}");
+                let mut epochs = writer.epochs();
+                while writer.snapshot().version < version {
+                    epochs
+                        .changed()
+                        .await
+                        .context("the writer stopped during a rebuild")?;
+                }
+            }
+        }
+        let mut state = Self::with_writer(writer, ui, tokens);
+        state.config = started.store;
+        Ok(state)
     }
 
     /// A server around an existing writer handle (tests use one whose queue is
     /// never drained, to see what happens when the writer is busy).
     #[must_use]
     pub fn with_writer(writer: WriterHandle, ui: Option<Arc<dyn Assets>>, tokens: Tokens) -> Self {
+        let snapshot = writer.snapshot();
         Self {
             ready: AtomicBool::new(false),
             ui,
@@ -72,6 +154,11 @@ impl AppState {
             engine: Arc::new(tidepool_engine::Engine::default()),
             hub: live::Hub::default(),
             started: std::time::Instant::now(),
+            config: config::ConfigStore::detached(&ModelVersion {
+                version: snapshot.version,
+                model: Arc::clone(&snapshot.model),
+                catalog: Arc::clone(&snapshot.catalog),
+            }),
         }
     }
 
@@ -121,6 +208,7 @@ pub async fn serve(listen: SocketAddr, state: Arc<AppState>) -> anyhow::Result<(
             open.join(", ")
         );
     }
+    config::watch(&state);
     state.set_ready();
     tracing::info!("tidepool listening on http://{local}");
 

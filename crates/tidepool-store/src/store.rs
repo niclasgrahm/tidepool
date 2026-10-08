@@ -25,9 +25,15 @@ use tidepool_config::table::{Encoding, TableMode};
 use tidepool_config::types::ColumnType;
 use tidepool_model::ir::{ColumnId, DomainId, Model, Table, TableId};
 
+use tidepool_model::Catalog;
+
 use crate::batch::Batch;
 use crate::column::{ColumnBuilder, ColumnData, Raw, seal};
 use crate::dict::{DictSnapshot, DictValue, Dictionary, Key, NULL};
+use crate::migrate::{
+    DictPlan, Migration, ModelVersion, Old, Rebuilt, TablePlan, address, cast, convert_segment,
+    dict_storage, extend_dicts, keyed,
+};
 use crate::value::{Parsed, Storage, Value};
 
 /// Seal chunks into a segment once they hold this many rows.
@@ -55,7 +61,7 @@ pub struct ColumnLayout {
 }
 
 impl ColumnLayout {
-    fn new(column: &tidepool_model::ir::Column) -> Self {
+    pub(crate) fn new(column: &tidepool_model::ir::Column) -> Self {
         let dict = (column.encoding == Encoding::Dict).then(|| {
             column
                 .key_domain
@@ -77,10 +83,16 @@ pub struct SegmentData {
     /// Row id of the first row.
     pub start: u64,
     pub rows: u32,
-    /// One per table column, in the table's column order.
-    pub columns: Vec<ColumnData>,
+    /// One per table column, in the table's column order. Shared: a model
+    /// change that leaves a column alone reuses it in the new segment.
+    pub columns: Vec<Arc<ColumnData>>,
     /// Bit-packed (sealed) rather than a fresh chunk.
     pub sealed: bool,
+    /// Which rewrite of the table's rows this is: 0 as first written, and
+    /// the store's generation when a model change rewrote it. Segment files
+    /// are named by it, so a rewrite never replaces a file an older
+    /// checkpoint still lists.
+    pub generation: u32,
 }
 
 impl SegmentData {
@@ -90,7 +102,7 @@ impl SegmentData {
 
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.columns.iter().map(ColumnData::bytes).sum()
+        self.columns.iter().map(|c| c.bytes()).sum()
     }
 }
 
@@ -169,9 +181,12 @@ pub struct Applied {
     pub replaced: usize,
     /// Keys that matched no row (deletes only).
     pub missing: usize,
+    /// The table was removed by a model change after the batch was
+    /// decoded: nothing was applied.
+    pub table_gone: bool,
 }
 
-struct TableStore {
+pub(crate) struct TableStore {
     table: Table,
     layouts: Arc<[ColumnLayout]>,
     /// Positions of the primary-key columns in `layouts`.
@@ -189,6 +204,8 @@ struct TableStore {
     changed: BTreeSet<ColumnId>,
     dirty: bool,
     seal_rows: usize,
+    /// The generation new segments get (see [`SegmentData::generation`]).
+    generation: u32,
     written_total: u64,
     rate_samples: VecDeque<(Instant, u64)>,
     published: Option<Arc<TableSnapshot>>,
@@ -227,6 +244,7 @@ impl TableStore {
             changed: BTreeSet::new(),
             dirty: false,
             seal_rows,
+            generation: 0,
             written_total: 0,
             rate_samples: VecDeque::new(),
             published: None,
@@ -395,7 +413,7 @@ impl TableStore {
                 .collect();
             let columns = std::mem::replace(&mut self.builder, builder)
                 .into_iter()
-                .map(ColumnBuilder::freeze)
+                .map(|b| Arc::new(b.freeze()))
                 .collect();
             *versions += 1;
             self.segments.push(SegmentView {
@@ -404,6 +422,7 @@ impl TableStore {
                     rows: u32::try_from(rows).unwrap_or(u32::MAX),
                     columns,
                     sealed: false,
+                    generation: self.generation,
                 }),
                 deletes: Arc::new(std::mem::take(&mut self.builder_deletes)),
                 version: *versions,
@@ -442,8 +461,8 @@ impl TableStore {
             .map(|index| {
                 let layout = &self.layouts[index];
                 let pieces: Vec<&ColumnData> =
-                    parts.iter().map(|p| &p.data.columns[index]).collect();
-                seal(&pieces, layout.storage, layout.dict.is_some())
+                    parts.iter().map(|p| &*p.data.columns[index]).collect();
+                Arc::new(seal(&pieces, layout.storage, layout.dict.is_some()))
             })
             .collect();
         let rows: u32 = parts.iter().map(|p| p.data.rows).sum();
@@ -454,6 +473,7 @@ impl TableStore {
                 rows,
                 columns,
                 sealed: true,
+                generation: self.generation,
             }),
             deletes: Arc::new(deletes),
             version: *versions,
@@ -497,6 +517,66 @@ impl TableStore {
     }
 }
 
+impl TableStore {
+    /// Take on a new layout (after the segments were converted to it).
+    fn reset_layout(&mut self, plan: &TablePlan) {
+        self.table = plan.table.clone();
+        self.layouts = Arc::clone(&plan.layouts);
+        self.key_columns = self
+            .table
+            .primary_key
+            .iter()
+            .filter_map(|id| self.layouts.iter().position(|l| l.id == *id))
+            .collect();
+        self.builder = self
+            .layouts
+            .iter()
+            .map(|l| ColumnBuilder::new(l.storage, l.dict.is_some()))
+            .collect();
+        if !keyed(&self.table) {
+            self.pk = None;
+        }
+    }
+
+    /// Build the primary-key index again from the live rows. Rows that now
+    /// share a key collapse to the latest (plan §8.2).
+    fn rebuild_index(&mut self, versions: &mut u64) {
+        if !keyed(&self.table) {
+            self.pk = None;
+            return;
+        }
+        let mut pk = if self.key_columns.len() == 1 {
+            PkIndex::Single(Vec::new())
+        } else {
+            PkIndex::Composite(HashMap::new())
+        };
+        let mut older = Vec::new();
+        let mut key = vec![0u32; self.key_columns.len()];
+        for view in &self.segments {
+            for offset in 0..view.data.rows {
+                if view.deletes.contains(offset) {
+                    continue;
+                }
+                for (slot, column) in self.key_columns.iter().enumerate() {
+                    key[slot] = match view.data.columns[*column].get(offset as usize) {
+                        Raw::Code(code) => code,
+                        _ => NULL,
+                    };
+                }
+                let row = view.data.start + u64::from(offset);
+                if let Some(previous) = pk.get(&key) {
+                    older.push(previous);
+                }
+                pk.insert(&key, row);
+            }
+        }
+        for row in older {
+            self.delete_row(row, versions);
+        }
+        self.pk = Some(pk);
+    }
+}
+
 fn builder_get(builder: &ColumnBuilder, offset: usize) -> Raw<'_> {
     match builder {
         ColumnBuilder::Codes(codes) => Raw::Code(codes[offset]),
@@ -522,7 +602,7 @@ fn builder_get(builder: &ColumnBuilder, offset: usize) -> Raw<'_> {
 }
 
 /// The dictionary key of a parsed value.
-fn key_of(value: &Parsed) -> Key<'_> {
+pub(crate) fn key_of(value: &Parsed) -> Key<'_> {
     match value {
         Parsed::Bool(b) => Key::Int(i128::from(*b)),
         Parsed::I64(v) => Key::Int(i128::from(*v)),
@@ -535,11 +615,21 @@ fn key_of(value: &Parsed) -> Key<'_> {
 /// Everything, for the writer.
 pub struct Store {
     model: Arc<Model>,
+    /// The config version the model is, and its catalog (persisted with
+    /// the data, so a restart knows what the data was written under).
+    version: u64,
+    catalog: Arc<Catalog>,
     tables: HashMap<TableId, TableStore>,
     dicts: HashMap<DictId, Dictionary>,
     epoch: u64,
     /// Store-wide counter for segment versions.
     versions: u64,
+    seal_rows: usize,
+    /// Bumped by every model change that rebuilds something (see
+    /// [`SegmentData::generation`]).
+    generation: u32,
+    /// The model changed since the last publish: publish even if no data did.
+    model_changed: bool,
 }
 
 impl Store {
@@ -558,11 +648,233 @@ impl Store {
             .collect();
         Self {
             model,
+            version: 0,
+            catalog: Arc::new(Catalog::default()),
             tables,
             dicts: HashMap::new(),
             epoch: 0,
             versions: 0,
+            seal_rows,
+            generation: 0,
+            model_changed: false,
         }
+    }
+
+    /// An empty store holding `version` of the model.
+    #[must_use]
+    pub fn with_version(version: ModelVersion, seal_rows: usize) -> Self {
+        let mut store = Self::with_seal_rows(version.model, seal_rows);
+        store.version = version.version;
+        store.catalog = version.catalog;
+        store
+    }
+
+    /// The model, its version and catalog.
+    #[must_use]
+    pub fn model_version(&self) -> ModelVersion {
+        ModelVersion {
+            version: self.version,
+            model: Arc::clone(&self.model),
+            catalog: Arc::clone(&self.catalog),
+        }
+    }
+
+    /// The store-wide generation (see [`SegmentData::generation`]).
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// What moving to `target` does to the data held now.
+    #[must_use]
+    pub fn plan_migration(&self, target: ModelVersion) -> Migration {
+        let old = Old {
+            tables: self
+                .tables
+                .iter()
+                .map(|(id, t)| (*id, (&t.table, &*t.layouts)))
+                .collect(),
+            dicts: self.dicts.iter().map(|(id, d)| (*id, d.len())).collect(),
+        };
+        let mut migration = crate::migrate::plan(&old, target, self.generation + 1);
+        migration.rows = migration
+            .tables
+            .iter()
+            .filter(|t| t.rewrites())
+            .filter_map(|t| self.tables.get(&t.id))
+            .map(|t| t.next_row)
+            .sum();
+        migration
+    }
+
+    /// Move to a new model at once: plan, rewrite and swap (log replay, and
+    /// changes with nothing to rewrite).
+    pub fn change_model(&mut self, target: ModelVersion) {
+        let migration = self.plan_migration(target);
+        self.migrate(migration, Rebuilt::default());
+    }
+
+    /// Finish `migration`: catch `rebuilt` (a [`build`](crate::migrate::build)
+    /// from an earlier snapshot, or nothing) up with what was written since,
+    /// rewrite what it didn't, and swap the new model in. Visible at the
+    /// next publish, which happens even if no data changed.
+    pub fn migrate(&mut self, migration: Migration, mut rebuilt: Rebuilt) {
+        let generation = migration.generation;
+        // rows waiting in builders go into segments first, so every row is
+        // in a segment to convert
+        for plan in &migration.tables {
+            if let Some(table) = self.tables.get_mut(&plan.id) {
+                table.freeze(&mut self.versions);
+            }
+        }
+        extend_dicts(&migration, &mut rebuilt.dicts, &self.dicts, |id| {
+            dict_storage(&migration, id)
+        });
+
+        let mut tables = HashMap::new();
+        for plan in &migration.tables {
+            let (Some(mut table), Some(plans)) = (self.tables.remove(&plan.id), &plan.columns)
+            else {
+                let mut table = TableStore::new(&plan.table, self.seal_rows);
+                table.generation = generation;
+                table.dirty = true;
+                tables.insert(plan.id, table);
+                continue;
+            };
+            let reshaped = plan.reshaped(table.layouts.len());
+            if reshaped {
+                for i in 0..table.segments.len() {
+                    let old = Arc::clone(&table.segments[i].data);
+                    let data = rebuilt
+                        .segments
+                        .remove(&(plan.id, address(&old)))
+                        .unwrap_or_else(|| {
+                            Arc::new(convert_segment(
+                                &old,
+                                plans,
+                                &table.layouts,
+                                &plan.layouts,
+                                &self.dicts,
+                                &mut rebuilt.dicts,
+                                generation,
+                            ))
+                        });
+                    self.versions += 1;
+                    let view = &mut table.segments[i];
+                    view.data = data;
+                    view.version = self.versions;
+                }
+                table.generation = generation;
+            }
+            let relaid = *table.layouts != *plan.layouts || table.table != plan.table;
+            table.reset_layout(plan);
+            if plan.rekey {
+                table.rebuild_index(&mut self.versions);
+            }
+            if reshaped || relaid || plan.rekey {
+                table.dirty = true;
+                table.published = None;
+            }
+            tables.insert(plan.id, table);
+        }
+        self.tables = tables;
+
+        // the dictionaries the new layouts use
+        let needed: BTreeSet<DictId> = self
+            .tables
+            .values()
+            .flat_map(|t| t.layouts.iter().filter_map(|l| l.dict))
+            .collect();
+        let mut uses: HashMap<DictId, usize> = HashMap::new();
+        for id in &needed {
+            if let Some(DictPlan::Keep(source)) = migration.dicts.get(id) {
+                *uses.entry(*source).or_default() += 1;
+            }
+        }
+        let mut dicts = HashMap::new();
+        for id in needed {
+            let dict = match migration.dicts.get(&id) {
+                Some(DictPlan::Keep(source)) => {
+                    let dict = if uses.get(source) == Some(&1) {
+                        self.dicts.remove(source)
+                    } else {
+                        self.dicts.get(source).cloned()
+                    };
+                    // a dictionary under a new id is a new dictionary there
+                    dict.map(|d| {
+                        if *source == id {
+                            d
+                        } else {
+                            d.with_generation(generation)
+                        }
+                    })
+                }
+                Some(DictPlan::Built { .. }) => rebuilt.dicts.remove(&id).map(|b| b.dict),
+                // starts empty; a new generation if the id held another one
+                None => self.dicts.contains_key(&id).then(|| {
+                    Dictionary::new(dict_storage(&migration, id)).with_generation(generation)
+                }),
+            };
+            if let Some(dict) = dict {
+                dicts.insert(id, dict);
+            }
+        }
+        self.dicts = dicts;
+
+        let target = migration.target;
+        self.model = target.model;
+        self.version = target.version;
+        self.catalog = target.catalog;
+        self.generation = generation;
+        self.model_changed = true;
+    }
+
+    /// `batch`, decoded for `table` under some earlier model, in the
+    /// table's columns now: matched by column id, values converted where a
+    /// type changed, new columns NULL. `None` if the table is gone.
+    #[must_use]
+    pub fn fit(&self, table: TableId, op: Op, batch: &Batch) -> Option<Option<Batch>> {
+        let store = self.tables.get(&table)?;
+        let wanted: Vec<&tidepool_model::ir::Column> = store
+            .table
+            .columns
+            .iter()
+            .filter(|c| op == Op::Write || store.table.primary_key.contains(&c.id))
+            .collect();
+        let fits = batch.shape.is_empty()
+            || (batch.shape.len() == wanted.len()
+                && batch
+                    .shape
+                    .iter()
+                    .zip(&wanted)
+                    .all(|((id, ty), c)| *id == c.id && *ty == c.column_type));
+        if fits {
+            return Some(None);
+        }
+        let columns = wanted
+            .iter()
+            .map(|column| {
+                let Some(j) = batch.shape.iter().position(|(id, _)| *id == column.id) else {
+                    return vec![None; batch.rows];
+                };
+                let from = batch.shape[j].1;
+                batch.columns[j]
+                    .iter()
+                    .map(|value| {
+                        let value = value.as_ref()?;
+                        if from == column.column_type {
+                            return Some(value.clone());
+                        }
+                        cast(&parsed_value(from, value), column.column_type)
+                    })
+                    .collect()
+            })
+            .collect();
+        Some(Some(Batch {
+            rows: batch.rows,
+            columns,
+            shape: wanted.iter().map(|c| (c.id, c.column_type)).collect(),
+        }))
     }
 
     /// A store holding recovered data: `segments` per table (with their
@@ -571,15 +883,17 @@ impl Store {
     /// indexes are rebuilt from the key columns. Recovery only.
     #[must_use]
     pub fn restore(
-        model: Arc<Model>,
+        model: ModelVersion,
         seal_rows: usize,
         epoch: u64,
+        generation: u32,
         dicts: HashMap<DictId, Dictionary>,
         segments: HashMap<TableId, Vec<SegmentView>>,
         counts: &HashMap<TableId, (u64, u64)>,
     ) -> Self {
-        let mut store = Self::with_seal_rows(model, seal_rows);
+        let mut store = Self::with_version(model, seal_rows);
         store.epoch = epoch;
+        store.generation = generation;
         store.dicts = dicts;
         for (id, views) in segments {
             let Some(table) = store.tables.get_mut(&id) else {
@@ -606,6 +920,7 @@ impl Store {
                     pk.insert(&key, view.data.start + u64::from(offset));
                 }
             }
+            table.generation = views.iter().map(|v| v.data.generation).max().unwrap_or(0);
             table.segments = views;
             table.next_row = end;
             table.builder_start = end;
@@ -701,18 +1016,30 @@ impl Store {
     /// Never on a batch decoded for this table; the decoders guarantee the
     /// shape.
     pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch) -> Applied {
+        let Some(fitted) = self.fit(table, op, batch) else {
+            return Applied {
+                table_gone: true,
+                ..Applied::default()
+            };
+        };
         let Some(store) = self.tables.get_mut(&table) else {
             return Applied::default();
         };
-        store.apply(&mut self.dicts, op, batch, &mut self.versions)
+        store.apply(
+            &mut self.dicts,
+            op,
+            fitted.as_ref().unwrap_or(batch),
+            &mut self.versions,
+        )
     }
 
     /// Make everything applied so far visible: a new epoch, if anything
     /// changed. `None` if nothing did.
     pub fn publish(&mut self) -> Option<Snapshot> {
-        if !self.tables.values().any(|t| t.dirty) && self.epoch > 0 {
+        if !self.tables.values().any(|t| t.dirty) && self.epoch > 0 && !self.model_changed {
             return None;
         }
+        self.model_changed = false;
         self.epoch += 1;
         let now = Instant::now();
         let versions = &mut self.versions;
@@ -734,6 +1061,9 @@ impl Store {
         Some(Snapshot {
             epoch: self.epoch,
             model: Arc::clone(&self.model),
+            version: self.version,
+            catalog: Arc::clone(&self.catalog),
+            generation: self.generation,
             tables,
             dicts,
         })
@@ -768,11 +1098,26 @@ impl TableSnapshot {
 pub struct Snapshot {
     pub epoch: u64,
     pub model: Arc<Model>,
+    /// The config version of `model`, and its catalog.
+    pub version: u64,
+    pub catalog: Arc<Catalog>,
+    /// The store's generation (see [`SegmentData::generation`]).
+    pub generation: u32,
     pub tables: HashMap<TableId, Arc<TableSnapshot>>,
     pub dicts: HashMap<DictId, DictSnapshot>,
 }
 
 impl Snapshot {
+    /// The model this snapshot is in, with its version and catalog.
+    #[must_use]
+    pub fn model_version(&self) -> ModelVersion {
+        ModelVersion {
+            version: self.version,
+            model: Arc::clone(&self.model),
+            catalog: Arc::clone(&self.catalog),
+        }
+    }
+
     /// An empty snapshot of a model, before anything is written.
     #[must_use]
     pub fn empty(model: Arc<Model>) -> Self {
@@ -780,6 +1125,9 @@ impl Snapshot {
         store.publish().unwrap_or_else(|| Self {
             epoch: 0,
             model: Arc::clone(&store.model),
+            version: 0,
+            catalog: Arc::new(Catalog::default()),
+            generation: 0,
             tables: HashMap::new(),
             dicts: HashMap::new(),
         })
@@ -843,7 +1191,7 @@ impl Snapshot {
 }
 
 /// Decode an integer-stored dictionary value by column type.
-fn decode_int(column_type: ColumnType, value: i128) -> Value {
+pub(crate) fn decode_int(column_type: ColumnType, value: i128) -> Value {
     match column_type {
         ColumnType::Float64 => {
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -852,5 +1200,16 @@ fn decode_int(column_type: ColumnType, value: i128) -> Value {
         }
         ColumnType::Decimal { scale, .. } => Value::Decimal { value, scale },
         _ => Value::from_i64(column_type, i64::try_from(value).unwrap_or(i64::MAX)),
+    }
+}
+
+/// A parsed value of a column of type `from`, as a value.
+fn parsed_value(from: ColumnType, parsed: &Parsed) -> Value {
+    match parsed {
+        Parsed::Bool(b) => Value::Bool(*b),
+        Parsed::I64(v) => Value::from_i64(from, *v),
+        Parsed::I128(v) => decode_int(from, *v),
+        Parsed::F64(v) => Value::Float(*v),
+        Parsed::Str(s) => Value::String(s.clone()),
     }
 }

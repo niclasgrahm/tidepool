@@ -6,6 +6,11 @@
 //! publishes epochs on its own clock: every `epoch_interval`, if anything
 //! changed, it swaps in a new [`Snapshot`] and announces the epoch.
 //!
+//! Model changes go through the same queue ([`WriterHandle::change_model`]).
+//! One that rewrites data is built on a thread of its own from the latest
+//! snapshot while this thread carries on with the old model; when the build
+//! is done, this thread catches up and swaps the new model in at an epoch.
+//!
 //! A full queue is backpressure: [`WriterHandle::apply`] fails fast with
 //! [`Busy`] rather than queueing without bound, and the HTTP layer turns that
 //! into `503 Retry-After`.
@@ -26,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tidepool_config::server::Durability;
 
 use crate::batch::Batch;
+use crate::migrate::{Migration, ModelVersion, Rebuilt, build};
 use crate::persist::{Checkpoints, Durable};
 use crate::store::{Applied, Op, Snapshot, Store};
 
@@ -42,6 +48,30 @@ enum Command {
     Publish {
         reply: oneshot::Sender<u64>,
     },
+    ChangeModel {
+        target: ModelVersion,
+        reply: oneshot::Sender<Result<Change, String>>,
+    },
+}
+
+/// How a model change went in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Nothing to rewrite: the model is live from this epoch.
+    Done { epoch: u64 },
+    /// Rewriting `rows` rows in the background; [`WriterHandle::rebuild`]
+    /// follows it, and the snapshot's version says when it's live.
+    Rebuilding { rows: u64 },
+}
+
+/// A model change being built in the background.
+#[derive(Debug)]
+pub struct Rebuild {
+    /// The config version it moves to.
+    pub version: u64,
+    pub rows: u64,
+    pub done: Arc<AtomicU64>,
+    pub started: Instant,
 }
 
 /// What applying a batch did, and the epoch from which it is visible.
@@ -66,6 +96,7 @@ pub struct WriterHandle {
     snapshot: Arc<ArcSwap<Snapshot>>,
     epochs: watch::Receiver<u64>,
     log: Option<Arc<LogStatus>>,
+    rebuild: Arc<std::sync::Mutex<Option<Rebuild>>>,
 }
 
 /// How the log and checkpoints stand, for status pages. Updated by the
@@ -127,6 +158,13 @@ impl Backend {
         }
     }
 
+    fn migrate(&mut self, migration: Migration, rebuilt: Rebuilt) {
+        match self {
+            Self::Memory(store) => store.migrate(migration, rebuilt),
+            Self::Disk(durable) => durable.migrate(migration, rebuilt),
+        }
+    }
+
     fn commit(&mut self) -> std::io::Result<()> {
         match self {
             Self::Memory(_) => Ok(()),
@@ -150,7 +188,7 @@ impl Backend {
 /// The operating system refuses to start a thread, or the data directory
 /// can't be recovered.
 pub fn spawn(
-    model: Arc<Model>,
+    model: ModelVersion,
     config: WriterConfig,
 ) -> std::io::Result<(WriterHandle, JoinHandle<()>)> {
     let log = config.data.as_ref().map(|dir| {
@@ -164,7 +202,7 @@ pub fn spawn(
     });
     let (mut backend, first, checkpoints) = match &config.data {
         None => {
-            let mut store = Store::with_seal_rows(model, config.seal_rows);
+            let mut store = Store::with_version(model, config.seal_rows);
             let first = store
                 .publish()
                 .unwrap_or_else(|| Snapshot::empty(Arc::clone(store.model())));
@@ -191,6 +229,8 @@ pub fn spawn(
         _ => None,
     };
     let status = log.clone();
+    let rebuild = Arc::new(std::sync::Mutex::new(None));
+    let jobs = Arc::clone(&rebuild);
     let thread = std::thread::Builder::new()
         .name("tidepool-writer".into())
         .spawn(move || {
@@ -202,6 +242,7 @@ pub fn spawn(
                 &config,
                 checkpointer.as_ref(),
                 status.as_deref(),
+                &jobs,
             );
         })?;
     Ok((
@@ -210,6 +251,7 @@ pub fn spawn(
             snapshot,
             epochs,
             log,
+            rebuild,
         },
         thread,
     ))
@@ -248,7 +290,21 @@ impl Checkpointer {
 /// Retention runs this often.
 const RETENTION_EVERY: Duration = Duration::from_secs(10);
 
-#[allow(clippy::too_many_lines)]
+/// The epoch interval after `migration`: the new model's, if the change
+/// sets one other than the model had; otherwise as it was.
+fn next_interval(store: &Store, migration: &Migration, now: Duration) -> Duration {
+    let before = store.model().server.epoch_interval;
+    let after = migration.target().model.server.epoch_interval;
+    if before == after { now } else { after.0 }
+}
+
+/// A build running on its own thread, and what it will hand back.
+struct Building {
+    migration: Arc<Migration>,
+    result: Receiver<Rebuilt>,
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run(
     mut backend: Backend,
     commands: &Receiver<Command>,
@@ -257,8 +313,11 @@ fn run(
     config: &WriterConfig,
     checkpointer: Option<&Checkpointer>,
     status: Option<&LogStatus>,
+    jobs: &std::sync::Mutex<Option<Rebuild>>,
 ) {
-    let interval = config.epoch_interval;
+    let mut building: Option<Building> = None;
+    // the config's, until a model change sets another (plan §8.2: safe)
+    let mut interval = config.epoch_interval;
     let mut next_tick = Instant::now() + interval;
     let mut next_checkpoint = Instant::now() + config.checkpoint_interval;
     let mut next_retention = Instant::now() + RETENTION_EVERY;
@@ -280,6 +339,24 @@ fn run(
         Ok(backend.store().epoch())
     };
     loop {
+        // a finished build: catch up and swap
+        if let Some(job) = &building
+            && let Ok(rebuilt) = job.result.try_recv()
+        {
+            let job = building.take();
+            if let Some(migration) = job.and_then(|j| Arc::try_unwrap(j.migration).ok()) {
+                interval = next_interval(backend.store(), &migration, interval);
+                next_tick = next_tick.min(Instant::now() + interval);
+                backend.migrate(migration, rebuilt);
+                if let Err(error) = publish(&mut backend) {
+                    tracing::error!("the write-ahead log failed, stopping writes: {error}");
+                    return;
+                }
+            }
+            if let Ok(mut job) = jobs.lock() {
+                *job = None;
+            }
+        }
         if let (Some(checkpointer), Backend::Disk(durable)) = (checkpointer, &mut backend) {
             while let Ok(lsn) = checkpointer.done.try_recv() {
                 if let Err(error) = durable.forget(lsn) {
@@ -309,6 +386,57 @@ fn run(
                         } => {
                             let applied = backend.apply(table, op, &batch);
                             acks.push((reply, applied));
+                        }
+                        Command::ChangeModel { target, reply } => {
+                            if building.is_some() {
+                                let _ = reply
+                                    .send(Err("a model change is still being rebuilt".to_string()));
+                                continue;
+                            }
+                            let version = target.version;
+                            let migration = backend.store().plan_migration(target);
+                            let rows = migration.rows();
+                            if rows == 0 {
+                                interval = next_interval(backend.store(), &migration, interval);
+                                next_tick = next_tick.min(Instant::now() + interval);
+                                backend.migrate(migration, Rebuilt::default());
+                                match publish(&mut backend) {
+                                    Ok(epoch) => {
+                                        let _ = reply.send(Ok(Change::Done { epoch }));
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(
+                                            "the write-ahead log failed, stopping writes: {error}"
+                                        );
+                                        return;
+                                    }
+                                }
+                                continue;
+                            }
+                            let migration = Arc::new(migration);
+                            let done = Arc::new(AtomicU64::new(0));
+                            let (finished, result) = sync_channel(1);
+                            let from = snapshot.load_full();
+                            let (job, counter) = (Arc::clone(&migration), Arc::clone(&done));
+                            let started = std::thread::Builder::new()
+                                .name("tidepool-rebuild".into())
+                                .spawn(move || {
+                                    let _ = finished.send(build(&job, &from, &counter));
+                                });
+                            if let Err(error) = started {
+                                let _ = reply.send(Err(format!("can't start a rebuild: {error}")));
+                                continue;
+                            }
+                            if let Ok(mut job) = jobs.lock() {
+                                *job = Some(Rebuild {
+                                    version,
+                                    rows,
+                                    done,
+                                    started: Instant::now(),
+                                });
+                            }
+                            building = Some(Building { migration, result });
+                            let _ = reply.send(Ok(Change::Rebuilding { rows }));
                         }
                         Command::Publish { reply } => match publish(&mut backend) {
                             Ok(epoch) => {
@@ -389,6 +517,29 @@ impl WriterHandle {
         }
     }
 
+    /// Move to a new model (plan §8.1, apply): at once when nothing needs
+    /// rewriting, otherwise after a background rebuild.
+    ///
+    /// # Errors
+    /// The writer has stopped, or a rebuild is already running.
+    pub async fn change_model(&self, target: ModelVersion) -> Result<Change, String> {
+        let (reply, change) = oneshot::channel();
+        self.queue
+            .send(Command::ChangeModel { target, reply })
+            .map_err(|_| "the writer has stopped".to_string())?;
+        change
+            .await
+            .map_err(|_| "the writer has stopped".to_string())?
+    }
+
+    /// The rebuild in progress: (version, rows done, rows), if any.
+    #[must_use]
+    pub fn rebuild(&self) -> Option<(u64, u64, u64)> {
+        let job = self.rebuild.lock().ok()?;
+        job.as_ref()
+            .map(|j| (j.version, j.done.load(Ordering::Relaxed), j.rows))
+    }
+
     /// Publish now instead of waiting for the next tick; resolves to the
     /// current epoch. For tests and for `?wait=visible` latency.
     ///
@@ -427,6 +578,7 @@ impl WriterHandle {
             snapshot: Arc::new(ArcSwap::from_pointee(Snapshot::empty(model))),
             epochs,
             log: None,
+            rebuild: Arc::new(std::sync::Mutex::new(None)),
         };
         // the receiver, kept alive so the queue fills instead of disconnecting
         (handle, DropGuard(commands))

@@ -614,4 +614,18 @@ fn settings(plan: &mut Plan, old: &Model, new: &Model) {
         format!("{:?}", b.durability).to_lowercase(),
         false,
     );
+    let writeback = |w: tidepool_config::server::Writeback| {
+        match (w.enabled, w.git_commit) {
+            (false, _) => "off",
+            (true, false) => "files",
+            (true, true) => "files and git",
+        }
+        .to_string()
+    };
+    setting(
+        "config_writeback",
+        writeback(a.config_writeback),
+        writeback(b.config_writeback),
+        false,
+    );
 }

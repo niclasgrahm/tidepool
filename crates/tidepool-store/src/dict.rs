@@ -90,9 +90,13 @@ impl Block {
 }
 
 /// The writer's dictionary.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Dictionary {
     storage: Storage,
+    /// Which dictionary of this id it is: a model change that builds a
+    /// dictionary afresh gives it a new generation, so codes cached against
+    /// an earlier one of the same id are never taken for its codes.
+    generation: u32,
     full: Vec<Arc<Block>>,
     current: Block,
     len: u32,
@@ -109,6 +113,7 @@ impl Dictionary {
     pub fn new(storage: Storage) -> Self {
         Self {
             storage,
+            generation: 0,
             full: Vec::new(),
             current: Block::default(),
             len: 0,
@@ -124,10 +129,28 @@ impl Dictionary {
         self.storage
     }
 
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// The same values under a new generation (see [`Dictionary::generation`]).
+    #[must_use]
+    pub fn with_generation(mut self, generation: u32) -> Self {
+        self.generation = generation;
+        self
+    }
+
     /// Number of distinct values (not counting NULL).
     #[must_use]
     pub fn len(&self) -> u32 {
         self.len
+    }
+
+    /// The value of `code` (NULL for code 0 and past the end).
+    #[must_use]
+    pub fn get(&self, code: u32) -> DictValue<'_> {
+        self.value(code)
     }
 
     #[must_use]
@@ -221,6 +244,7 @@ impl Dictionary {
         };
         DictSnapshot {
             storage: self.storage,
+            generation: self.generation,
             len: self.len,
             full: Arc::from(self.full.as_slice()),
             partial,
@@ -238,6 +262,7 @@ impl Dictionary {
 #[derive(Clone, Debug)]
 pub struct DictSnapshot {
     storage: Storage,
+    generation: u32,
     len: u32,
     full: Arc<[Arc<Block>]>,
     partial: Arc<Block>,
@@ -257,6 +282,12 @@ impl DictSnapshot {
     #[must_use]
     pub fn storage(&self) -> Storage {
         self.storage
+    }
+
+    /// See [`Dictionary::generation`].
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.generation
     }
 
     /// The value of `code`; NULL for code 0 and for codes newer than this
