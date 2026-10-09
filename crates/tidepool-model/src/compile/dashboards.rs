@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use tidepool_config::dashboard::{DashboardFile, FilterWidget, Visual as VisualSpec, VisualType};
+use tidepool_config::dashboard::{
+    DashboardFile, FilterWidget, Visual as VisualSpec, VisualType, WindowUnit,
+};
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::source::YamlPath;
 
@@ -12,7 +14,7 @@ use super::semantic::Semantic;
 use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
-    Dashboard, Dimension, FieldRef, Filter, MetricId, SortKey, TableId, Visual, VisualSort,
+    Dashboard, Dimension, FieldRef, Filter, MetricId, SortKey, TableId, Type, Visual, VisualSort,
 };
 
 pub(super) fn compile(
@@ -76,12 +78,16 @@ fn dashboard(
                         .at(file, path.key("widget")),
                     );
                 }
+                if let Some(window) = filter.default {
+                    check_default(cx, file, &path, filter, field, window);
+                }
                 filters.push(Filter {
                     field: FieldRef {
                         table,
                         field: field.name.clone(),
                     },
                     widget: filter.widget,
+                    default: filter.default,
                 });
             }
         }
@@ -459,4 +465,60 @@ fn visual_sort(
         }),
         true,
     )
+}
+
+/// A filter's default window: on a `date_range`, at least one period long,
+/// and in units its field has.
+fn check_default(
+    cx: &mut Cx,
+    file: &Path,
+    path: &YamlPath,
+    filter: &tidepool_config::dashboard::FilterSpec,
+    field: &crate::ir::Field,
+    window: tidepool_config::dashboard::RelativeWindow,
+) {
+    let at = path.key("default");
+    let problem = if filter.widget != FilterWidget::DateRange {
+        Some((
+            at,
+            format!(
+                "`{}` is a list; only a date_range can start on a window",
+                filter.field
+            ),
+        ))
+    } else if window.last == 0 {
+        Some((
+            at.key("last"),
+            "a window needs at least one period: `last` is 0".into(),
+        ))
+    } else if field.ty == Type::Date && matches!(window.unit, WindowUnit::Minute | WindowUnit::Hour)
+    {
+        Some((
+            at.key("unit"),
+            format!(
+                "`{}` is a date, so it has no {}s",
+                filter.field,
+                if window.unit == WindowUnit::Hour {
+                    "hour"
+                } else {
+                    "minute"
+                }
+            ),
+        ))
+    } else if field.is_time && !matches!(field.ty, Type::Date | Type::Timestamp | Type::TimestampTz)
+    {
+        Some((
+            at,
+            format!(
+                "`{}` holds {}, not dates or times, so it has no window",
+                filter.field,
+                field.ty.a()
+            ),
+        ))
+    } else {
+        None
+    };
+    if let Some((path, message)) = problem {
+        cx.push(Diagnostic::error(message).at(file, path));
+    }
 }

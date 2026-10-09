@@ -154,8 +154,9 @@ pub struct QueryDimension {
     pub grain: Option<String>,
 }
 
-/// A condition on a field: `in`, or a half-open range `from <= value < to`
-/// (either end may be left out). Values are written as in ingested rows:
+/// A condition on a field: `in`, a half-open range `from <= value < to`
+/// (either end may be left out), or a window of time `relative` to now
+/// (`{"unit": "day", "last": 7}`). Values are written as in ingested rows:
 /// decimals, dates and timestamps as strings or numbers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +169,8 @@ pub struct QueryFilter {
     pub from: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative: Option<live::RelativeWindow>,
 }
 
 /// A result column to sort by, by its name in [`QueryResult::columns`].

@@ -63,7 +63,11 @@ engine dashboards use, without a subscription.
 ```
 
 Names are the model's (`dataset.field`, metric names); a wrong one comes back
-as a `400` with a suggestion. Filters are one-directional: a metric is
+as a `400` with a suggestion. A filter on a date or time field can also be a
+window relative to the server's clock, the way a dashboard's period is:
+`{"field": "orders.ordered_at", "relative": {"unit": "day", "last": 7}}` is
+today and the six days before it (UTC; `ago: 1` ends a period earlier).
+Filters are one-directional: a metric is
 filtered by the fields its table reaches through relationships. The answer is
 columns (with types) and rows, values as JSON: decimals, dates and
 timestamps as strings. `?format=csv` returns the same as CSV instead.
@@ -78,8 +82,11 @@ relationships, metrics with their SQL); `GET /v1/status` the server.
 `tidepool-protocol`'s `live` module, which is Apache-2.0 for clients to
 use). A session says `hello`, gets the dashboards (`model`), opens one
 (`open_dashboard`), and from then on receives one `frame` per epoch with
-whatever changed on it. `select`, `select_range`, `clear`, `back` and
-`forward` change the selection and are answered at once; `pause` and
+whatever changed on it. `select`, `select_range`, `select_relative`
+(`{"field": …, "window": {"unit": "day", "last": 7}}`), `clear`, `back` and
+`forward` change the selection and are answered at once; a relative window
+comes back in `selection` with where it is now (`from`, `to`), and again
+whenever the clock moves it into a new period; `pause` and
 `resume` stop and restart frames; `filter_window` pages through a filter
 list; `sort` re-sorts a table visual. When the model changes, the session
 gets `model` again.

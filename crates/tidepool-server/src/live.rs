@@ -17,9 +17,16 @@
 //! published. It always takes the newest snapshot, so a slow refresh skips
 //! epochs rather than falling behind (coalescing); a selection change is
 //! answered right away, outside the loop (interactive first).
+//!
+//! A selection can hold windows relative to now ("the last 7 days", plan
+//! §5.5). A session keeps them as windows and turns them into ranges with
+//! the server's clock whenever it runs a query, so the engine and its caches
+//! only ever see ranges. Once a second the loop checks whether the clock has
+//! moved a session's window into a new period, and refreshes it if so, data
+//! or not.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -33,15 +40,15 @@ use tidepool_engine::{Condition, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
 use tidepool_protocol::live::{
-    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, FilterValue, GridAt, SelectMode,
-    SelectedField, ServerMessage, ValueState, VisualFrame, VisualInfo,
+    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, FilterValue, GridAt, RelativeUnit,
+    RelativeWindow, SelectMode, SelectedField, ServerMessage, ValueState, VisualFrame, VisualInfo,
 };
 use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
 use tokio::sync::mpsc;
 
 use crate::AppState;
-use crate::query::{field, json, resolve, result, scalar};
+use crate::query::{field, json, resolve, result, scalar, window_condition};
 
 /// Messages a session hasn't sent yet, at most; past this a slow client is
 /// dropped rather than buffered without end.
@@ -65,12 +72,75 @@ impl Default for Window {
     }
 }
 
+/// A selection as a session's viewer made it: conditions, and windows
+/// relative to now, which become conditions whenever it's used. A field has
+/// one or the other.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Chosen {
+    fixed: Selection,
+    windows: BTreeMap<FieldRef, RelativeWindow>,
+}
+
+impl Chosen {
+    fn set(&mut self, at: FieldRef, condition: Condition) {
+        self.windows.remove(&at);
+        self.fixed.0.insert(at, condition);
+    }
+
+    fn set_window(&mut self, at: FieldRef, window: RelativeWindow) {
+        self.fixed.0.remove(&at);
+        self.windows.insert(at, window);
+    }
+
+    fn remove(&mut self, at: &FieldRef) {
+        self.fixed.0.remove(at);
+        self.windows.remove(at);
+    }
+
+    fn has(&self, at: &FieldRef) -> bool {
+        self.fixed.0.contains_key(at) || self.windows.contains_key(at)
+    }
+
+    fn retain(&mut self, keep: impl Fn(&FieldRef) -> bool) {
+        self.fixed.0.retain(|at, _| keep(at));
+        self.windows.retain(|at, _| keep(at));
+    }
+
+    /// The condition each window stands for at `now`; a window that can't
+    /// be one (its field gone, or no longer a time) is left out.
+    fn ranges(&self, model: &Model, now: i64) -> Vec<(FieldRef, RelativeWindow, Condition)> {
+        self.windows
+            .iter()
+            .filter_map(|(at, window)| {
+                let ty = field_type(model, at)?;
+                let condition = window_condition(&at.field, *window, ty, now).ok()?;
+                Some((at.clone(), *window, condition))
+            })
+            .collect()
+    }
+
+    /// The selection as of `now`: windows as ranges.
+    fn resolve(&self, model: &Model, now: i64) -> Selection {
+        let mut selection = self.fixed.clone();
+        for (at, _, condition) in self.ranges(model, now) {
+            selection.0.insert(at, condition);
+        }
+        selection
+    }
+}
+
 #[derive(Default)]
 struct SessionState {
     /// Every selection so far; `at` is the current one.
-    history: Vec<Selection>,
+    history: Vec<Chosen>,
     at: usize,
     dashboard: Option<String>,
+    /// Dashboards this session has opened: a filter's default window
+    /// applies the first time only, so a viewer who cleared it keeps that.
+    opened: HashSet<String>,
+    /// The selection the last frame was computed under, windows resolved:
+    /// when the clock moves a window on, it no longer matches.
+    shown: Option<Selection>,
     paused: bool,
     windows: HashMap<String, Window>,
     /// Sort overrides by visual: (result column, descending).
@@ -81,12 +151,12 @@ struct SessionState {
 }
 
 impl SessionState {
-    fn selection(&self) -> Selection {
+    fn selection(&self) -> Chosen {
         self.history.get(self.at).cloned().unwrap_or_default()
     }
 
     /// Make `next` the current selection, dropping anything after it.
-    fn push(&mut self, next: Selection) {
+    fn push(&mut self, next: Chosen) {
         if next == self.selection() {
             return;
         }
@@ -152,7 +222,7 @@ impl Hub {
             let session = Arc::new(Session {
                 id: id.clone(),
                 state: Mutex::new(SessionState {
-                    history: vec![Selection::default()],
+                    history: vec![Chosen::default()],
                     ..SessionState::default()
                 }),
             });
@@ -173,7 +243,7 @@ impl Hub {
         });
         session.send(model_message(&snapshot));
         // built first: `send` takes the session lock itself
-        let selection = selection_message(&snapshot.model, &session.lock());
+        let selection = selection_message(&snapshot.model, &session.lock(), state.clock.now());
         session.send(selection);
         refresh(state, &session, &snapshot);
         session
@@ -184,9 +254,10 @@ impl Hub {
     pub(crate) fn handle(&self, state: &AppState, session: &Session, message: ClientMessage) {
         let snapshot = state.writer.snapshot();
         let model = &snapshot.model;
+        let now = state.clock.now();
         let changed = {
             let mut inner = session.lock();
-            match apply(model, &mut inner, message) {
+            match apply(model, &mut inner, message, now) {
                 Ok(changed) => changed,
                 Err(message) => {
                     drop(inner);
@@ -196,7 +267,7 @@ impl Hub {
             }
         };
         if changed.selection {
-            let selection = selection_message(model, &session.lock());
+            let selection = selection_message(model, &session.lock(), now);
             session.send(selection);
         }
         if changed.frame {
@@ -215,12 +286,38 @@ impl Hub {
         if let Some(previous) = previous
             && !Arc::ptr_eq(&previous, &snapshot.model)
         {
+            let now = state.clock.now();
             for session in self.sessions() {
-                follow(&session, &previous, &snapshot);
+                follow(&session, &previous, &snapshot, now);
             }
         }
         for session in self.sessions() {
             refresh(state, &session, &snapshot);
+        }
+    }
+
+    /// Refresh the sessions whose windows the clock has moved into a new
+    /// period since their last frame, and tell them where the windows are.
+    fn roll(&self, state: &AppState) {
+        let snapshot = state.writer.snapshot();
+        let now = state.clock.now();
+        for session in self.sessions() {
+            let moved = {
+                let inner = session.lock();
+                let chosen = inner.selection();
+                (!chosen.windows.is_empty()
+                    && !inner.paused
+                    && inner.out.is_some()
+                    && inner
+                        .shown
+                        .as_ref()
+                        .is_some_and(|shown| *shown != chosen.resolve(&snapshot.model, now)))
+                .then(|| selection_message(&snapshot.model, &inner, now))
+            };
+            if let Some(selection) = moved {
+                session.send(selection);
+                refresh(state, &session, &snapshot);
+            }
         }
     }
 
@@ -263,14 +360,14 @@ fn field_type(model: &Model, field: &FieldRef) -> Option<tidepool_model::ir::Typ
 /// Tell a session the model changed (plan §8.1, notify): the dashboards
 /// again, selections on fields that are gone or changed type dropped, and
 /// its dashboard sent whole, or closed if it was removed.
-fn follow(session: &Session, previous: &Model, snapshot: &Snapshot) {
+fn follow(session: &Session, previous: &Model, snapshot: &Snapshot, now: i64) {
     let model = &snapshot.model;
     session.send(model_message(snapshot));
     let (selection, removed) = {
         let mut inner = session.lock();
         let before = inner.selection();
         for selection in &mut inner.history {
-            selection.0.retain(|field, _| {
+            selection.retain(|field| {
                 let now = field_type(model, field);
                 now.is_some() && now == field_type(previous, field)
             });
@@ -280,7 +377,7 @@ fn follow(session: &Session, previous: &Model, snapshot: &Snapshot) {
             .dashboard
             .take_if(|d| !model.dashboards.iter().any(|x| x.slug == *d));
         (
-            (inner.selection() != before).then(|| selection_message(model, &inner)),
+            (inner.selection() != before).then(|| selection_message(model, &inner, now)),
             removed,
         )
     };
@@ -307,6 +404,7 @@ fn apply(
     model: &Model,
     inner: &mut SessionState,
     message: ClientMessage,
+    now: i64,
 ) -> Result<Changed, String> {
     let selected = |changed: bool| Changed {
         selection: changed,
@@ -318,10 +416,31 @@ fn apply(
             if !model.dashboards.iter().any(|d| d.slug == id) {
                 return Err(format!("no dashboard `{id}`"));
             }
+            // the first time, its filters' default windows, unless the
+            // viewer chose something for those fields already: part of the
+            // selection it opens with, not a step to go back from
+            let mut defaulted = false;
+            if inner.opened.insert(id.clone())
+                && let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == id)
+            {
+                let mut current = inner.selection();
+                for filter in &dashboard.filters {
+                    if let Some(window) = filter.default
+                        && !current.has(&filter.field)
+                    {
+                        current.set_window(filter.field.clone(), window_of(window));
+                        defaulted = true;
+                    }
+                }
+                if defaulted {
+                    let at = inner.at;
+                    inner.history[at] = current;
+                }
+            }
             inner.dashboard = Some(id);
             inner.sent.clear();
             Changed {
-                selection: false,
+                selection: defaulted,
                 frame: true,
             }
         }
@@ -336,7 +455,7 @@ fn apply(
                 .map(|v| scalar(v, ty).ok_or_else(|| format!("`{v}` isn't a value of `{name}`")))
                 .collect::<Result<Vec<_>, _>>()?;
             let mut next = inner.selection();
-            let current = match next.0.get(&at) {
+            let current = match next.fixed.0.get(&at) {
                 Some(Condition::In(values)) => values.clone(),
                 _ => Vec::new(),
             };
@@ -353,9 +472,9 @@ fn apply(
                 }
             };
             if chosen.is_empty() {
-                next.0.remove(&at);
+                next.remove(&at);
             } else {
-                next.0.insert(at, Condition::In(chosen));
+                next.set(at, Condition::In(chosen));
             }
             let before = inner.selection();
             inner.push(next);
@@ -374,10 +493,23 @@ fn apply(
             let (from, to) = (bound(from)?, bound(to)?);
             let mut next = inner.selection();
             if from.is_none() && to.is_none() {
-                next.0.remove(&at);
+                next.remove(&at);
             } else {
-                next.0.insert(at, Condition::Range { from, to });
+                next.set(at, Condition::Range { from, to });
             }
+            let before = inner.selection();
+            inner.push(next);
+            selected(inner.selection() != before)
+        }
+        ClientMessage::SelectRelative {
+            field: name,
+            window,
+        } => {
+            let (at, ty) = field(model, &name)?;
+            // refused now rather than left out of every query later
+            window_condition(&name, window, ty, now)?;
+            let mut next = inner.selection();
+            next.set_window(at, window);
             let before = inner.selection();
             inner.push(next);
             selected(inner.selection() != before)
@@ -386,9 +518,9 @@ fn apply(
             let mut next = inner.selection();
             match name {
                 Some(name) => {
-                    next.0.remove(&field(model, &name)?.0);
+                    next.remove(&field(model, &name)?.0);
                 }
-                None => next.0.clear(),
+                None => next = Chosen::default(),
             }
             let before = inner.selection();
             inner.push(next);
@@ -491,38 +623,83 @@ fn label(model: &Model, at: &FieldRef) -> String {
     format!("{dataset}.{}", at.field)
 }
 
-fn selection_message(model: &Model, inner: &SessionState) -> ServerMessage {
+fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMessage {
+    let chosen = inner.selection();
+    let mut fields: Vec<(FieldRef, SelectedField)> = chosen
+        .fixed
+        .0
+        .iter()
+        .map(|(at, condition)| {
+            let field = label(model, at);
+            let selected = match condition {
+                Condition::In(values) => SelectedField {
+                    field,
+                    values: Some(values.iter().map(json).collect()),
+                    from: None,
+                    to: None,
+                    relative: None,
+                },
+                Condition::Range { from, to } => SelectedField {
+                    field,
+                    values: None,
+                    from: from.as_ref().map(json),
+                    to: to.as_ref().map(json),
+                    relative: None,
+                },
+                Condition::Set(set) => SelectedField {
+                    field,
+                    values: Some(set.values().iter().map(json).collect()),
+                    from: None,
+                    to: None,
+                    relative: None,
+                },
+            };
+            (at.clone(), selected)
+        })
+        .collect();
+    // windows with where they are now
+    fields.extend(
+        chosen
+            .ranges(model, now)
+            .into_iter()
+            .map(|(at, window, condition)| {
+                let (from, to) = match condition {
+                    Condition::Range { from, to } => (from, to),
+                    _ => (None, None),
+                };
+                let selected = SelectedField {
+                    field: label(model, &at),
+                    values: None,
+                    from: from.as_ref().map(json),
+                    to: to.as_ref().map(json),
+                    relative: Some(window),
+                };
+                (at, selected)
+            }),
+    );
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
     ServerMessage::Selection {
-        fields: inner
-            .selection()
-            .0
-            .iter()
-            .map(|(at, condition)| {
-                let field = label(model, at);
-                match condition {
-                    Condition::In(values) => SelectedField {
-                        field,
-                        values: Some(values.iter().map(json).collect()),
-                        from: None,
-                        to: None,
-                    },
-                    Condition::Range { from, to } => SelectedField {
-                        field,
-                        values: None,
-                        from: from.as_ref().map(json),
-                        to: to.as_ref().map(json),
-                    },
-                    Condition::Set(set) => SelectedField {
-                        field,
-                        values: Some(set.values().iter().map(json).collect()),
-                        from: None,
-                        to: None,
-                    },
-                }
-            })
-            .collect(),
+        fields: fields.into_iter().map(|(_, f)| f).collect(),
         can_back: inner.at > 0,
         can_forward: inner.at + 1 < inner.history.len(),
+    }
+}
+
+/// A config file's window, as the protocol has it.
+fn window_of(window: tidepool_config::dashboard::RelativeWindow) -> RelativeWindow {
+    use tidepool_config::dashboard::WindowUnit;
+    RelativeWindow {
+        unit: match window.unit {
+            WindowUnit::Minute => RelativeUnit::Minute,
+            WindowUnit::Hour => RelativeUnit::Hour,
+            WindowUnit::Day => RelativeUnit::Day,
+            WindowUnit::Week => RelativeUnit::Week,
+            WindowUnit::Month => RelativeUnit::Month,
+            WindowUnit::Quarter => RelativeUnit::Quarter,
+            WindowUnit::Year => RelativeUnit::Year,
+        },
+        last: window.last,
+        ago: window.ago,
     }
 }
 
@@ -539,6 +716,11 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
             .map(|f| FilterInfo {
                 field: label(model, &f.field),
                 widget: name(&serde_json::to_value(f.widget).unwrap_or_default()),
+                timed: matches!(
+                    field_type(model, &f.field),
+                    Some(tidepool_expr::Type::Timestamp | tidepool_expr::Type::TimestampTz)
+                ),
+                default: f.default.map(window_of),
             })
             .collect(),
         visuals: dashboard
@@ -633,6 +815,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
         )
     };
     let model = &snapshot.model;
+    let selection = selection.resolve(model, state.clock.now());
     let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
         return;
     };
@@ -654,6 +837,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
 
     // only what changed since this session's last frame
     let mut inner = session.lock();
+    inner.shown = Some(selection);
     let mut changed = |key: String, hash: u64| inner.sent.insert(key, hash) != Some(hash);
     let visuals: Vec<VisualFrame> = visuals
         .into_iter()
@@ -689,7 +873,7 @@ fn visual_frame(
         }];
     }
     let run = |request: &QueryRequest| {
-        resolve(&snapshot.model, request)
+        resolve(&snapshot.model, request, state.clock.now())
             .map_err(tidepool_engine::QueryError)
             .and_then(|query| {
                 // only what can change the answer: sessions that differ
@@ -833,6 +1017,8 @@ fn start(state: &Arc<AppState>) {
                     for session in state.hub.sessions() {
                         session.send(ServerMessage::Status { epoch: snapshot.epoch, rows_per_second });
                     }
+                    // windows relative to now move with the clock, not epochs
+                    let _ = tokio::task::spawn_blocking(move || state.hub.roll(&state)).await;
                 }
             }
         }
@@ -913,12 +1099,12 @@ mod tests {
     #[test]
     fn a_selection_change_drops_what_came_after_it() {
         let mut state = SessionState {
-            history: vec![Selection::default()],
+            history: vec![Chosen::default()],
             ..SessionState::default()
         };
         let one = |n: i64| {
-            let mut s = Selection::default();
-            s.0.insert(
+            let mut s = Chosen::default();
+            s.set(
                 FieldRef {
                     table: tidepool_model::ir::TableId(1),
                     field: "x".into(),
@@ -936,5 +1122,33 @@ mod tests {
         // the same selection again isn't a step
         state.push(one(3));
         assert_eq!(state.history.len(), 3);
+    }
+
+    #[test]
+    fn a_field_holds_a_window_or_a_condition_not_both() {
+        let at = FieldRef {
+            table: tidepool_model::ir::TableId(1),
+            field: "t".into(),
+        };
+        let week = RelativeWindow {
+            unit: RelativeUnit::Day,
+            last: 7,
+            ago: 0,
+        };
+        let mut chosen = Chosen::default();
+        chosen.set(at.clone(), Condition::In(vec![Scalar::Int(1)]));
+        chosen.set_window(at.clone(), week);
+        assert!(chosen.fixed.0.is_empty(), "the window replaced the values");
+        chosen.set(
+            at.clone(),
+            Condition::Range {
+                from: None,
+                to: None,
+            },
+        );
+        assert!(chosen.windows.is_empty(), "the range replaced the window");
+        chosen.set_window(at.clone(), week);
+        chosen.remove(&at);
+        assert!(!chosen.has(&at));
     }
 }

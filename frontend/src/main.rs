@@ -22,7 +22,7 @@ use tidepool_protocol::ServerInfo;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
-use crate::board::{ago, display, range_label};
+use crate::board::{ago, display, selected_label};
 use crate::live::{Live, now};
 use crate::route::{ConfigTab, Route, Tab};
 
@@ -157,12 +157,7 @@ fn Selection() -> impl IntoView {
             .get()
             .into_iter()
             .map(|s| {
-                let what = match (&s.values, &s.from, &s.to) {
-                    (Some(values), _, _) => {
-                        values.iter().map(display).collect::<Vec<_>>().join(", ")
-                    }
-                    (None, from, to) => range_label(from.as_ref(), to.as_ref()),
-                };
+                let what = selected_label(&s);
                 let field = s.field.clone();
                 let short = s
                     .field

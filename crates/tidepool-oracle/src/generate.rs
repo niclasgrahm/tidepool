@@ -1049,6 +1049,15 @@ pub struct Query {
 pub enum Cond {
     In(Vec<Json>),
     Range(Json, Json),
+    /// The `last` whole `unit`s ending `ago` units before the one `now`
+    /// (microseconds, UTC) is in: a relative window, as a dashboard keeps
+    /// one.
+    Relative {
+        now: i64,
+        unit: &'static str,
+        last: u32,
+        ago: u32,
+    },
 }
 
 /// Fields of a table: columns and derived fields, with whether temporal.
@@ -1145,7 +1154,11 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
             column.values,
             Gen::Int(..) | Gen::Decimal(..) | Gen::Date(..) | Gen::Timestamp(..)
         );
-        let cond = if ranged && rng.chance(40) {
+        let temporal = matches!(column.values, Gen::Date(..) | Gen::Timestamp(..));
+        let cond = if temporal && rng.chance(30) {
+            let near = rng.pick(&values).clone();
+            relative(rng, &column.values, &near)
+        } else if ranged && rng.chance(40) {
             let (mut a, mut b) = (rng.pick(&values).clone(), rng.pick(&values).clone());
             // sometimes bounds between two stored values: one digit finer
             // than the column keeps
@@ -1174,5 +1187,49 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
         metrics,
         dims,
         selection,
+    }
+}
+
+/// A relative window around `near` (a stored value), so it usually holds
+/// some rows: units a date has, or any for a timestamp, and sometimes ending
+/// before the current period.
+fn relative(rng: &mut Rng, values: &Gen, near: &Json) -> Cond {
+    const DAY: i64 = 86_400_000_000;
+    let text = near.as_str().unwrap_or_default();
+    let at = match values {
+        Gen::Date(..) => tidepool_expr::temporal::parse_date(text).map(|d| i64::from(d) * DAY),
+        _ => tidepool_expr::temporal::parse_timestamptz(text),
+    }
+    .unwrap_or_default();
+    // now: a few days either side of the value, at any time of day
+    let now = at + rng.range(-3 * DAY, 3 * DAY);
+    let units: &[(&'static str, usize)] = match values {
+        Gen::Date(..) => &[
+            ("day", 60),
+            ("week", 10),
+            ("month", 4),
+            ("quarter", 2),
+            ("year", 1),
+        ],
+        _ => &[
+            ("minute", 3000),
+            ("hour", 300),
+            ("day", 60),
+            ("week", 10),
+            ("month", 4),
+            ("quarter", 2),
+            ("year", 1),
+        ],
+    };
+    let (unit, most) = *rng.pick(units);
+    Cond::Relative {
+        now,
+        unit,
+        last: u32::try_from(1 + rng.below(most)).unwrap_or(1),
+        ago: if rng.chance(30) {
+            u32::try_from(1 + rng.below(3)).unwrap_or(1)
+        } else {
+            0
+        },
     }
 }

@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use tidepool_protocol::live::{FilterFrame, FilterInfo, ValueState, VisualFrame, VisualInfo};
 
 use crate::api::{post_text, save_file};
-use crate::board::{display, export_request, next_period, next_sort, number, wanted_window};
+use crate::board::{
+    display, export_request, next_period, next_sort, number, presets, range_label, wanted_window,
+};
 use crate::charts::{bar, line, palette};
 use crate::echarts::{Click, EChart};
 use crate::live::Live;
@@ -69,7 +71,7 @@ pub fn Dashboard(slug: String) -> impl IntoView {
 #[component]
 fn Filter(info: FilterInfo) -> impl IntoView {
     if info.widget == "date_range" {
-        view! { <DateRange field=info.field /> }.into_any()
+        view! { <DateRange field=info.field timed=info.timed /> }.into_any()
     } else {
         view! { <FilterList field=info.field /> }.into_any()
     }
@@ -173,18 +175,50 @@ fn FilterList(field: String) -> impl IntoView {
     }
 }
 
-/// A from/to range on a date or time field.
+/// A from/to range on a date or time field, or a window relative to now
+/// ("Last 7 days") that moves as time passes.
 #[component]
-fn DateRange(field: String) -> impl IntoView {
+fn DateRange(field: String, timed: bool) -> impl IntoView {
     let live = expect_context::<Live>();
     let key = field.clone();
-    let current = Memo::new(move |_| {
-        live.selection.with(|s| {
-            s.iter()
-                .find(|f| f.field == key)
-                .map(|f| (f.from.clone(), f.to.clone()))
-        })
+    let selected = Memo::new(move |_| {
+        live.selection
+            .with(|s| s.iter().find(|f| f.field == key).cloned())
     });
+    let current = Memo::new(move |_| selected.get().map(|f| (f.from, f.to)));
+    let windows = presets(timed);
+    // the period picker's value: a preset's index, "custom" or "" (all time)
+    let period = {
+        let windows = windows.clone();
+        move || match selected.get() {
+            None => String::new(),
+            Some(s) => s
+                .relative
+                .and_then(|w| windows.iter().position(|p| *p == w))
+                .map_or_else(|| "custom".to_string(), |i| i.to_string()),
+        }
+    };
+    // a window that isn't a preset (a dashboard's default) by its name
+    let custom = move || {
+        selected.get().map_or_else(
+            || "Custom".to_string(),
+            |s| match s.relative {
+                Some(w) => w.label(),
+                None => range_label(s.from.as_ref(), s.to.as_ref()),
+            },
+        )
+    };
+    let choose = {
+        let (field, windows) = (field.clone(), windows.clone());
+        move |ev| {
+            let value = event_target_value(&ev);
+            if value.is_empty() {
+                live.send(&json!({"type": "clear", "field": field}));
+            } else if let Some(window) = value.parse::<usize>().ok().and_then(|i| windows.get(i)) {
+                live.send(&json!({"type": "select_relative", "field": field, "window": window}));
+            }
+        }
+    };
     let date = |v: &Option<Value>| {
         v.as_ref()
             .and_then(Value::as_str)
@@ -219,6 +253,15 @@ fn DateRange(field: String) -> impl IntoView {
         <section class="filter">
             <h2>{short(&field)}</h2>
             <div class="range">
+                <label>"Period"
+                    <select prop:value=period on:change=choose>
+                        <option value="">"All time"</option>
+                        {windows.iter().enumerate().map(|(i, w)| view! {
+                            <option value=i.to_string()>{w.label()}</option>
+                        }).collect_view()}
+                        <option value="custom" disabled=true>{custom}</option>
+                    </select>
+                </label>
                 <label>"From" <input type="date" prop:value=move || from.get()
                     on:change=move |ev| { from.set(event_target_value(&ev)); apply_from(); } /></label>
                 <label>"Until" <input type="date" prop:value=move || to.get()

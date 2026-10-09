@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn count_star_has_no_references() {
         let a = analysis("COUNT(*)");
-        assert!(a.references.is_empty());
+        assert_eq!(a.references, []);
         assert!(a.aggregates[0].star);
     }
 
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn row_level_functions_are_not_aggregates() {
         let a = analysis("EXTRACT(YEAR FROM ordered_at) + LOWER(name)");
-        assert!(a.aggregates.is_empty());
+        assert_eq!(a.aggregates, []);
         assert_eq!(a.functions, ["lower"]);
         assert_eq!(a.references.len(), 2);
     }

@@ -417,6 +417,96 @@ fn click_a_bar_watch_it_update_go_back() {
     );
 }
 
+/// A time `days` before now, as the API takes it.
+fn days_ago(days: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+    tidepool_store::value::format_timestamp(now - days * 86_400_000_000, true)
+}
+
+/// Pick `label` in a date range's period list (what choosing an option does:
+/// the value set, then `change`).
+fn choose_period(browser: &mut Browser, label: &str) {
+    let picked = browser.eval(&format!(
+        "(() => {{ const s = document.querySelector('.range select'); \
+         const o = [...s.options].find(o => o.textContent === '{label}'); \
+         if (!o) return false; s.value = o.value; \
+         s.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()"
+    ));
+    assert_eq!(picked, json!(true), "no period `{label}` to choose");
+}
+
+#[test]
+fn a_dashboard_opens_on_its_relative_period_and_changes_it() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    assert!(
+        workspace().join("frontend/dist/index.html").exists(),
+        "no frontend/dist: run `just frontend` first"
+    );
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, days: i64, amount: &str| {
+        json!({
+            "order_id": id, "customer_id": "c1", "product_id": "p1", "status": "paid",
+            "ordered_at": days_ago(days), "quantity": 1, "amount": amount, "note": null,
+        })
+    };
+    // one order today-ish (an hour back), one three weeks back, one months back
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", 0, "10.00"),
+            order("o2", 21, "20.00"),
+            order("o3", 200, "40.00"),
+        ]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales_recent") }),
+    );
+    // it opens on its default, the last seven days
+    browser.wait_for(
+        &format!("{CHIPS}.includes('Last 7 days')"),
+        "a chip for the default window",
+    );
+    browser.wait_for(&format!("{KPI} === '10.00'"), "only this week's order");
+    let shown = browser.eval(
+        "(() => { const s = document.querySelector('.range select'); \
+         return s.options[s.selectedIndex].textContent; })()",
+    );
+    assert_eq!(shown, json!("Last 7 days"), "the period list shows it");
+
+    choose_period(&mut browser, "Last 30 days");
+    browser.wait_for(
+        &format!("{CHIPS}.includes('Last 30 days')"),
+        "the chip to follow",
+    );
+    browser.wait_for(&format!("{KPI} === '30.00'"), "three weeks' orders");
+
+    choose_period(&mut browser, "All time");
+    browser.wait_for(&format!("{CHIPS} === ''"), "no chip for all time");
+    browser.wait_for(&format!("{KPI} === '70.00'"), "every order");
+}
+
 #[test]
 fn a_table_added_in_the_config_editor_goes_live() {
     if std::env::var_os("TIDEPOOL_E2E").is_none() {

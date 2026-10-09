@@ -151,7 +151,7 @@ impl Packed {
 /// and index in a block is too, so the loop unrolls into straight code.
 fn unpack_blocks<const W: usize, T>(words: &[u64], out: &mut [T], convert: &impl Fn(u64) -> T) {
     let mask = (1u64 << W) - 1;
-    for (block, chunk) in out.chunks_exact_mut(64).enumerate() {
+    for (block, chunk) in out.as_chunks_mut::<64>().0.iter_mut().enumerate() {
         // one spare word: a value may end in the next block's first word
         // only when it doesn't (64 values fill exactly W words), but the
         // read below is simpler with it, and `pack` always leaves one

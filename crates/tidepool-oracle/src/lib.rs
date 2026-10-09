@@ -14,8 +14,9 @@ use std::sync::Arc;
 use serde_json::Value as Json;
 use tidepool_config::ConfigSet;
 use tidepool_config::diag::render_all;
-use tidepool_engine::{Condition, Dim, Engine, Query, Selection, run, run_general};
-use tidepool_expr::Scalar;
+use tidepool_engine::{Condition, Dim, Engine, Query, Relative, Selection, run, run_general};
+use tidepool_expr::temporal::Part;
+use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, Model};
 use tidepool_model::{Catalog, compile};
 use tidepool_store::batch::{Shape, json_array};
@@ -111,6 +112,24 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
                 from: Some(scalar(from, &source)),
                 to: Some(scalar(to, &source)),
             },
+            Cond::Relative {
+                now,
+                unit,
+                last,
+                ago,
+            } => Relative {
+                unit: Part::parse(unit).ok_or("unknown unit")?,
+                last: *last,
+                ago: *ago,
+            }
+            .condition(
+                *now,
+                match source {
+                    Gen::Date(..) => Type::Date,
+                    _ => Type::TimestampTz,
+                },
+            )
+            .map_err(|e| e.to_string())?,
         };
         selection.0.insert(field(table, column)?, condition);
     }

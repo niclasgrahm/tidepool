@@ -117,7 +117,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* filter lists: Qlik's three states, at a glance */
 .filter h2, .visual h2 { margin: 0 0 8px; font: 500 15px/1.2 var(--display); }
-.filter input[type="search"], .range input {
+.filter input[type="search"], .range input, .range select {
   width: 100%;
   margin-bottom: 6px;
   padding: 5px 8px;

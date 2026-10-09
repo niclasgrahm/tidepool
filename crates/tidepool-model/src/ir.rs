@@ -283,6 +283,8 @@ pub struct Dashboard {
 pub struct Filter {
     pub field: FieldRef,
     pub widget: tidepool_config::dashboard::FilterWidget,
+    /// The window it starts with when the dashboard is opened.
+    pub default: Option<tidepool_config::dashboard::RelativeWindow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

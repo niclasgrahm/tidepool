@@ -212,13 +212,18 @@ async fn the_model_lists_metrics_with_where_they_are_shown() {
         .unwrap_or_default();
     assert_eq!(revenue["expression"], "SUM(orders.amount)");
     assert_eq!(revenue["anchor"], "orders");
-    assert_eq!(revenue["dashboards"], json!(["sales"]));
+    assert_eq!(revenue["dashboards"], json!(["sales", "sales_recent"]));
     let prev = model["metrics"]
         .as_array()
         .and_then(|m| m.iter().find(|m| m["name"] == "revenue_prev_year"))
         .cloned()
         .unwrap_or_default();
     assert_eq!(prev["time_offset"], "-1 year on orders.ordered_at");
+    assert_eq!(
+        prev["dashboards"],
+        json!(["sales"]),
+        "not on the recent one"
+    );
     assert_eq!(
         model["relationships"][0],
         json!({"name": "order_customer", "from": "orders", "from_columns": ["customer_id"], "to": "customers", "to_columns": ["customer_id"]})
@@ -279,4 +284,84 @@ async fn a_time_shifted_metric_reads_the_selection_a_year_back() {
     .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
     assert_eq!(reply.json()["rows"], json!([[null, "11.25"]]));
+}
+
+/// Microseconds for an RFC 3339 time, as the server's clock counts.
+fn at(text: &str) -> i64 {
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(time) => time.timestamp_micros(),
+        Err(err) => panic!("{text}: {err}"),
+    }
+}
+
+#[tokio::test]
+async fn a_relative_filter_is_a_window_counted_back_from_the_servers_clock() {
+    let state = loaded().await;
+    let count = |window: Value| {
+        let state = Arc::clone(&state);
+        async move {
+            let reply = post(
+                &state,
+                "/v1/query",
+                &json!({
+                    "metrics": ["order_count"],
+                    "filters": [{"field": "orders.ordered_at", "relative": window}],
+                }),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+            reply.json()["rows"][0][0].clone()
+        }
+    };
+    // late on 20 February: o3 is today's, o2 was 19 days ago, o1 in January
+    state.set_clock(Some(at("2026-02-20T23:59:00Z")));
+    assert_eq!(count(json!({"unit": "day", "last": 1})).await, json!(1));
+    assert_eq!(count(json!({"unit": "day", "last": 20})).await, json!(2));
+    assert_eq!(count(json!({"unit": "month", "last": 1})).await, json!(2));
+    assert_eq!(
+        count(json!({"unit": "month", "last": 1, "ago": 1})).await,
+        json!(1)
+    );
+    assert_eq!(count(json!({"unit": "hour", "last": 1})).await, json!(0));
+    // a minute later it's the 21st: today is empty, yesterday has o3
+    state.set_clock(Some(at("2026-02-21T00:00:30Z")));
+    assert_eq!(count(json!({"unit": "day", "last": 1})).await, json!(0));
+    assert_eq!(
+        count(json!({"unit": "day", "last": 1, "ago": 1})).await,
+        json!(1)
+    );
+}
+
+#[tokio::test]
+async fn relative_filters_that_cant_be_windows_are_400s() {
+    let state = loaded().await;
+    for (filter, expected) in [
+        (
+            json!({"field": "customers.region", "relative": {"unit": "day", "last": 7}}),
+            "only dates and times have a relative window",
+        ),
+        (
+            json!({"field": "orders.ordered_at", "relative": {"unit": "day", "last": 0}}),
+            "`last` should be 1 or more",
+        ),
+        (
+            json!({"field": "orders.ordered_at", "from": "2026-01-01", "relative": {"unit": "day", "last": 7}}),
+            "needs one of `in`, `from` and/or `to`, or `relative`",
+        ),
+    ] {
+        let reply = post(
+            &state,
+            "/v1/query",
+            &json!({"metrics": ["order_count"], "filters": [filter]}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{filter}");
+        assert!(
+            reply.json()["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(expected)),
+            "{filter}: {}",
+            reply.text()
+        );
+    }
 }

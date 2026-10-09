@@ -15,11 +15,12 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value as Json_;
 use tidepool_config::diag::suggest;
 use tidepool_config::ossie::TimeGrain;
-use tidepool_engine::{Condition, Dim, Order, Query, ResultSet, Role, Selection};
-use tidepool_expr::temporal::{parse_date, parse_timestamp, parse_timestamptz};
+use tidepool_engine::{Condition, Dim, Order, Query, Relative, ResultSet, Role, Selection};
+use tidepool_expr::temporal::{Part, parse_date, parse_timestamp, parse_timestamptz};
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, Model};
 use tidepool_protocol::api_docs::ApiError;
+use tidepool_protocol::live::{RelativeUnit, RelativeWindow};
 use tidepool_protocol::{QueryColumn, QueryDimension, QueryFilter, QueryRequest, QueryResult};
 use tidepool_store::value::{format_date, format_decimal, format_timestamp};
 
@@ -136,21 +137,56 @@ pub(crate) fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
     }
 }
 
-fn condition(filter: &QueryFilter, ty: Type) -> Result<Condition, String> {
+/// The engine's form of a window relative to now.
+pub(crate) fn relative(window: RelativeWindow) -> Relative {
+    Relative {
+        unit: match window.unit {
+            RelativeUnit::Minute => Part::Minute,
+            RelativeUnit::Hour => Part::Hour,
+            RelativeUnit::Day => Part::Day,
+            RelativeUnit::Week => Part::Week,
+            RelativeUnit::Month => Part::Month,
+            RelativeUnit::Quarter => Part::Quarter,
+            RelativeUnit::Year => Part::Year,
+        },
+        last: window.last,
+        ago: window.ago,
+    }
+}
+
+/// The range `window` selects of `name` (of type `ty`) at `now`.
+pub(crate) fn window_condition(
+    name: &str,
+    window: RelativeWindow,
+    ty: Type,
+    now: i64,
+) -> Result<Condition, String> {
+    if window.last == 0 {
+        return Err(format!(
+            "the window on `{name}` is no periods long: `last` should be 1 or more"
+        ));
+    }
+    relative(window)
+        .condition(now, ty)
+        .map_err(|e| format!("`{name}` ({}): {e}", ty.a()))
+}
+
+fn condition(filter: &QueryFilter, ty: Type, now: i64) -> Result<Condition, String> {
     let convert = |v: &Json_| {
         scalar(v, ty)
             .ok_or_else(|| format!("`{v}` isn't a value of `{}` ({})", filter.field, ty.a()))
     };
-    match (&filter.values, &filter.from, &filter.to) {
-        (Some(values), None, None) => Ok(Condition::In(
+    match (&filter.values, &filter.from, &filter.to, filter.relative) {
+        (Some(values), None, None, None) => Ok(Condition::In(
             values.iter().map(convert).collect::<Result<_, _>>()?,
         )),
-        (None, from, to) if from.is_some() || to.is_some() => Ok(Condition::Range {
+        (None, from, to, None) if from.is_some() || to.is_some() => Ok(Condition::Range {
             from: from.as_ref().map(convert).transpose()?,
             to: to.as_ref().map(convert).transpose()?,
         }),
+        (None, None, None, Some(window)) => window_condition(&filter.field, window, ty, now),
         _ => Err(format!(
-            "the filter on `{}` needs either `in`, or `from` and/or `to`",
+            "the filter on `{}` needs one of `in`, `from` and/or `to`, or `relative`",
             filter.field
         )),
     }
@@ -163,8 +199,9 @@ fn dimension_name(dim: &QueryDimension) -> String {
     }
 }
 
-/// The engine's query for a request.
-pub(crate) fn resolve(model: &Model, request: &QueryRequest) -> Result<Query, String> {
+/// The engine's query for a request, with windows relative to `now`
+/// (microseconds since the Unix epoch, UTC).
+pub(crate) fn resolve(model: &Model, request: &QueryRequest, now: i64) -> Result<Query, String> {
     let metrics = request
         .metrics
         .iter()
@@ -199,7 +236,11 @@ pub(crate) fn resolve(model: &Model, request: &QueryRequest) -> Result<Query, St
     let mut selection = Selection::default();
     for filter in &request.filters {
         let (at, ty) = field(model, &filter.field)?;
-        if selection.0.insert(at, condition(filter, ty)?).is_some() {
+        if selection
+            .0
+            .insert(at, condition(filter, ty, now)?)
+            .is_some()
+        {
             return Err(format!("`{}` is filtered twice", filter.field));
         }
     }
@@ -354,7 +395,7 @@ pub async fn query(
         Some(other) => return bad_request(format!("unknown format `{other}`: json or csv")),
     };
     let snapshot = state.writer.snapshot();
-    let query = match resolve(&snapshot.model, &request) {
+    let query = match resolve(&snapshot.model, &request, state.clock.now()) {
         Ok(query) => query,
         Err(message) => return bad_request(message),
     };

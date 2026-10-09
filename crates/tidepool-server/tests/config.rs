@@ -774,7 +774,11 @@ async fn sessions_follow_a_model_change() {
     assert_eq!(status, StatusCode::OK, "{reply}");
     let model = next(&mut socket, "model").await;
     assert_eq!(model["version"], 2);
-    assert_eq!(model["dashboards"], json!([]));
+    let left: Vec<&Value> = model["dashboards"]
+        .as_array()
+        .map(|d| d.iter().map(|d| &d["id"]).collect())
+        .unwrap_or_default();
+    assert_eq!(left, vec![&json!("sales_recent")], "only the other one");
     assert_eq!(next(&mut socket, "selection").await["fields"], json!([]));
     let error = next(&mut socket, "error").await;
     assert!(

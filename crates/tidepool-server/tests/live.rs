@@ -442,3 +442,130 @@ async fn selections_flow_from_orders_to_customers_when_the_model_says_both() {
     assert_eq!(regions, None);
     assert_eq!(by_region, json!([["north", "3.00"]]));
 }
+
+/// Microseconds for an RFC 3339 time, as the server's clock counts.
+fn at(text: &str) -> i64 {
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(time) => time.timestamp_micros(),
+        Err(err) => panic!("{text}: {err}"),
+    }
+}
+
+#[tokio::test]
+async fn a_relative_window_moves_with_the_clock_without_new_data() {
+    let (state, url) = server().await;
+    // the orders are from 10:00 on 1 February; it's just before midnight
+    state.set_clock(Some(at("2026-02-01T23:59:30Z")));
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let _ = next(&mut socket, "frame").await;
+
+    say(
+        &mut socket,
+        json!({"type": "select_relative", "field": "orders.ordered_at",
+               "window": {"unit": "day", "last": 1}}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    let today = &selection["fields"][0];
+    assert_eq!(
+        today["relative"],
+        json!({"unit": "day", "last": 1}),
+        "{selection}"
+    );
+    assert_eq!(today["from"], "2026-02-01T00:00:00Z", "where it is now");
+    assert_eq!(today["to"], "2026-02-02T00:00:00Z");
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([["15.00"]]));
+
+    // midnight passes: "today" is the 2nd now, and nothing was ordered then
+    state.set_clock(Some(at("2026-02-02T00:00:30Z")));
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"][0]["from"], "2026-02-02T00:00:00Z");
+    assert_eq!(selection["fields"][0]["relative"]["unit"], "day");
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([[null]]));
+
+    // and a window a date range can't be is refused, the session unchanged
+    say(
+        &mut socket,
+        json!({"type": "select_relative", "field": "customers.region",
+               "window": {"unit": "day", "last": 7}}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("only dates and times")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_dashboard_opens_on_its_default_window_the_first_time_only() {
+    let (state, url) = server().await;
+    // the last seven days reach back to 28 January
+    state.set_clock(Some(at("2026-02-03T12:00:00Z")));
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let model = next(&mut socket, "model").await;
+    let recent = match model["dashboards"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["id"] == "sales_recent"))
+    {
+        Some(recent) => recent.clone(),
+        None => panic!("no sales_recent in {model}"),
+    };
+    assert_eq!(
+        recent["filters"][0],
+        json!({"field": "orders.ordered_at", "widget": "date_range", "timed": true,
+               "default": {"unit": "day", "last": 7}})
+    );
+    let _ = next(&mut socket, "selection").await;
+
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales_recent"}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(
+        selection["fields"][0]["relative"],
+        json!({"unit": "day", "last": 7})
+    );
+    assert_eq!(selection["fields"][0]["from"], "2026-01-28T00:00:00Z");
+    assert_eq!(
+        selection["can_back"], false,
+        "the default isn't a step to go back from"
+    );
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "kpi_revenue"), json!([["15.00"]]));
+
+    // cleared, it stays cleared when the dashboard is opened again
+    say(
+        &mut socket,
+        json!({"type": "clear", "field": "orders.ordered_at"}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"], json!([]));
+    for id in ["sales", "sales_recent"] {
+        say(&mut socket, json!({"type": "open_dashboard", "id": id})).await;
+        let _ = next(&mut socket, "frame").await;
+    }
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["north"]}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(
+        selection["fields"],
+        json!([{"field": "customers.region", "values": ["north"]}])
+    );
+}

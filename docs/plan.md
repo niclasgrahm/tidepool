@@ -248,6 +248,7 @@ filters:
   - field: products.category
   - field: orders.ordered_at
     widget: date_range
+    default: { last: 30, unit: day }   # opens on a window relative to now (§5.5)
 visuals:
   - id: kpi_revenue
     type: kpi
@@ -558,6 +559,38 @@ It's message passing on the relationship tree (`tidepool-engine::assoc`). The me
 - `ignore_selection` applies first: an ignored field sends nothing either.
 - The oracle generates `both` for half its schemas (a second fact, a snowflake parent and nullable foreign keys give messages to carry) and builds the same thing in SQL as `key IN (SELECT fk FROM … WHERE …)`, recursively. It catches a planted bug that sends messages from empty sides, or that leaves out the messages a message itself carries.
 
+### 5.5 Relative time windows
+
+"Today", "Last 7 days", "Last month": a selection on a time field that moves
+as time passes. A window is `{unit, last, ago}`: the `last` whole periods of
+`unit` (minute … year) ending with the current one, or `ago` periods before
+it. Periods start where `DATE_TRUNC` puts them (weeks on Monday), in UTC
+(dashboard time zones are §14's open question); a date takes day units or
+longer. Like Looker's "in the last 7 days", the current period counts, so
+"Last 7 days" is today and the six days before it.
+
+- **The engine never sees a window.** A session keeps it as a window
+  (`live::Chosen`) and resolves it into a `Condition::Range` with the
+  server's clock (`AppState::clock`, which tests stop) every time it runs a
+  query. Caches therefore key on the resolved bounds, which change once per
+  period: a "Last 7 days" dashboard costs a recompute at midnight, not per
+  query. Incremental answers restart when the bounds move (rows leave the
+  window, which they can only do by a rescan), so windows of minutes
+  recompute every minute.
+- **The clock moves frames, not only epochs.** Once a second the epoch loop
+  checks whether a session's windows resolve differently from its last
+  frame, and if so sends `selection` (where the window is now) and a frame,
+  without new data.
+- **Defaults:** a `date_range` can declare `default: {last, unit, ago}`,
+  applied the first time a session opens the dashboard, to fields the
+  viewer hasn't chosen anything for, as part of the selection it opens with
+  (not a step `back` undoes).
+- **`POST /v1/query`** takes `{"field", "relative": {unit, last, ago}}` too.
+- **Oracle:** the generator makes windows around stored values with a
+  random `now`; Tidepool resolves them itself and DuckDB gets its own
+  `date_trunc` and interval arithmetic, so the resolution is checked
+  independently (a window one period too long fails all three suites).
+
 ---
 
 ## 6. Query execution
@@ -667,6 +700,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `open_dashboard { id }` | subscribe all its visuals and filters |
 | `select { field, values, mode: replace\|toggle\|add }` | change selection (click, list box) |
 | `select_range { field, lo, hi }` | brush on time axis / date range |
+| `select_relative { field, window: { unit, last, ago? } }` | a period relative to now ("Last 7 days", §5.5) |
 | `clear { field? }` / `back` / `forward` | selection management |
 | `filter_window { filter_id, offset, limit, search?, sort? }` | page/search a filter list |
 | `pause` / `resume` | freeze live updates for this session (the server keeps the last frame) |
@@ -990,6 +1024,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 11. Engine self-metrics exposed as Tidepool tables (`_system.*`), i.e. a dashboard of Tidepool in Tidepool
 12. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
 13. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
+14. ~~Relative time windows ("Today", "Last 7 days") on time selections and dashboard defaults~~ (done: §5.5)
 
 ---
 

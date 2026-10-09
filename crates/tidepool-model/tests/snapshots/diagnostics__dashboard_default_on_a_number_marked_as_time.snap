@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `orders.order_year` holds an integer, not dates or times, so it has no window
+ --> dashboards/sales_recent.yaml:8:14
+  |
+8 |     default: { last: 7, unit: day }
+  |              ^
+
+1 error, 0 warnings

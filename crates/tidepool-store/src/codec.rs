@@ -119,16 +119,20 @@ impl<'a> In<'a> {
         let n = self.len()?;
         Ok(self
             .take(n.checked_mul(4).ok_or_else(|| corrupt("length"))?)?
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect())
     }
     pub fn u64s(&mut self) -> io::Result<Vec<u64>> {
         let n = self.len()?;
         Ok(self
             .take(n.checked_mul(8).ok_or_else(|| corrupt("length"))?)?
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect())
     }
     pub fn i64s(&mut self) -> io::Result<Vec<i64>> {

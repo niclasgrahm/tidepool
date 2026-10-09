@@ -18,7 +18,8 @@ use tidepool_model::ir::FieldRef;
 use tidepool_store::Snapshot;
 
 pub use query::{
-    Condition, Dim, Order, Query, QueryError, ResultColumn, ResultSet, Role, Selection, ValueSet,
+    Condition, Dim, Order, Query, QueryError, Relative, ResultColumn, ResultSet, Role, Selection,
+    ValueSet,
 };
 
 /// Answer `query` from `snapshot`.

@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `customers.region` is a list; only a date_range can start on a window
+  --> dashboards/sales_recent.yaml:10:14
+   |
+10 |     default: { last: 7, unit: day }
+   |              ^
+
+1 error, 0 warnings

@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tidepool_config::ossie::TimeGrain;
+use tidepool_expr::temporal::Part;
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, MetricId};
 
@@ -120,6 +121,60 @@ impl Condition {
                     .is_none_or(|t| value.compare(t) == Some(std::cmp::Ordering::Less))
             }
         }
+    }
+}
+
+/// A window of whole periods relative to now: "the last 7 days", "last
+/// month" (plan §5.5). What it selects moves as time passes, so a session
+/// keeps it as this and turns it into a [`Condition::Range`] against the
+/// clock whenever it runs a query; the engine only ever sees the range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Relative {
+    /// The period: year, quarter, month, week, day, hour or minute.
+    pub unit: Part,
+    /// How many periods, the newest one included.
+    pub last: u32,
+    /// How many periods before the current one the window ends: 0 includes
+    /// the current period, 1 ends with the one before it.
+    pub ago: u32,
+}
+
+impl Relative {
+    /// The range this window selects of a field of type `ty` at `now`
+    /// (microseconds since the Unix epoch, UTC).
+    ///
+    /// # Errors
+    /// The field isn't a date or a timestamp, the unit is shorter than a day
+    /// for a date, or the window is empty or out of range.
+    pub fn condition(&self, now: i64, ty: Type) -> Result<Condition, QueryError> {
+        const MICROS_PER_DAY: i64 = 86_400_000_000;
+        let (from, to) = tidepool_expr::temporal::window(self.unit, self.last, self.ago, now)
+            .ok_or_else(|| QueryError(format!("{self:?} isn't a window of time")))?;
+        let bounds = |bound: fn(i64) -> Scalar| (Some(bound(from)), Some(bound(to)));
+        let (from, to) = match ty {
+            Type::Timestamp => bounds(Scalar::Timestamp),
+            Type::TimestampTz => bounds(Scalar::TimestampTz),
+            Type::Date if self.unit.is_calendar() => {
+                // calendar periods start at midnight: whole days
+                let day = |micros: i64| {
+                    i32::try_from(micros.div_euclid(MICROS_PER_DAY))
+                        .map_or(Scalar::Null, Scalar::Date)
+                };
+                (Some(day(from)), Some(day(to)))
+            }
+            Type::Date => {
+                return Err(QueryError(format!(
+                    "a date has no {:?}s: use days or longer",
+                    self.unit
+                )));
+            }
+            _ => {
+                return Err(QueryError(
+                    "only dates and times have a relative window".into(),
+                ));
+            }
+        };
+        Ok(Condition::Range { from, to })
     }
 }
 

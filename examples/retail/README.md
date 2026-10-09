@@ -1,7 +1,7 @@
 # retail
 
 The example project: a small retail star schema (orders, customers, products)
-with one dashboard. It is what `just dev` runs against, what the docs use, and
+with two dashboards (the second opens on a window of the last seven days). It is what `just dev` runs against, what the docs use, and
 (from M1) what `tidepool validate` is tested on. Keep it covering every config
 feature as features land, the way Kayak's `example_config/` covers every
 component.

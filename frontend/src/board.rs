@@ -4,7 +4,9 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use tidepool_protocol::live::{FilterFrame, ServerMessage, VisualFrame};
+use tidepool_protocol::live::{
+    FilterFrame, RelativeUnit, RelativeWindow, SelectedField, ServerMessage, VisualFrame,
+};
 
 /// The open dashboard's latest content.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -201,6 +203,40 @@ pub fn range_label(from: Option<&Value>, to: Option<&Value>) -> String {
     }
 }
 
+/// The windows a date range offers, newest first: hours too when the field
+/// has a time of day.
+#[must_use]
+pub fn presets(timed: bool) -> Vec<RelativeWindow> {
+    let window = |unit, last, ago| RelativeWindow { unit, last, ago };
+    let mut all = Vec::new();
+    if timed {
+        all.push(window(RelativeUnit::Hour, 1, 0));
+        all.push(window(RelativeUnit::Hour, 24, 0));
+    }
+    all.extend([
+        window(RelativeUnit::Day, 1, 0),
+        window(RelativeUnit::Day, 1, 1),
+        window(RelativeUnit::Day, 7, 0),
+        window(RelativeUnit::Day, 30, 0),
+        window(RelativeUnit::Day, 90, 0),
+        window(RelativeUnit::Month, 1, 0),
+        window(RelativeUnit::Month, 1, 1),
+        window(RelativeUnit::Year, 1, 0),
+    ]);
+    all
+}
+
+/// What a selected field reads as in a chip: a window by name ("Last 7
+/// days"), values listed, a range by its ends.
+#[must_use]
+pub fn selected_label(selected: &SelectedField) -> String {
+    match (&selected.relative, &selected.values) {
+        (Some(window), _) => window.label(),
+        (None, Some(values)) => values.iter().map(display).collect::<Vec<_>>().join(", "),
+        (None, None) => range_label(selected.from.as_ref(), selected.to.as_ref()),
+    }
+}
+
 /// Which way a click on a table's column header sorts: the other way if it
 /// is already the sorted column, otherwise largest first for numbers and A
 /// to Z for text. `true` is descending.
@@ -227,8 +263,10 @@ pub fn export_request(
             .map(|s| tidepool_protocol::QueryFilter {
                 field: s.field.clone(),
                 values: s.values.clone(),
+                // a relative window as it stands: the export is what's shown
                 from: s.from.clone(),
                 to: s.to.clone(),
+                relative: None,
             })
             .collect(),
         sort: Vec::new(),
@@ -561,11 +599,40 @@ mod tests {
             values: None,
             from: Some(json!("2026-01-01T00:00:00Z")),
             to: None,
+            relative: None,
         }];
         let request = export_request(&info, &selection);
         assert_eq!(request.metrics, vec!["revenue".to_string()]);
         assert_eq!(request.dimensions[0].field, "customers.region");
         assert_eq!(request.filters[0].field, "orders.ordered_at");
         assert_eq!(request.filters[0].from, Some(json!("2026-01-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn a_window_reads_by_name_and_exports_where_it_is() {
+        let window = RelativeWindow {
+            unit: RelativeUnit::Day,
+            last: 7,
+            ago: 0,
+        };
+        let selected = SelectedField {
+            field: "orders.ordered_at".into(),
+            values: None,
+            from: Some(json!("2026-10-02T00:00:00Z")),
+            to: Some(json!("2026-10-09T00:00:00Z")),
+            relative: Some(window),
+        };
+        assert_eq!(selected_label(&selected), "Last 7 days");
+        let plain = SelectedField {
+            relative: None,
+            ..selected.clone()
+        };
+        assert_eq!(selected_label(&plain), "2026-10-02 to 2026-10-08");
+        assert!(presets(false).contains(&window));
+        assert!(
+            presets(false).iter().all(|w| w.unit.fits_dates()),
+            "a date has no hours"
+        );
+        assert!(presets(true).iter().any(|w| w.unit == RelativeUnit::Hour));
     }
 }

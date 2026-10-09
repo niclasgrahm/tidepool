@@ -53,6 +53,36 @@ pub struct FilterSpec {
     pub field: String,
     #[serde(default)]
     pub widget: FilterWidget,
+    /// A `date_range`'s selection when the dashboard is opened: a window
+    /// relative to now, such as `{ last: 7, unit: day }`. It moves as time
+    /// passes; a viewer can change or clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<RelativeWindow>,
+}
+
+/// Whole periods relative to now: the `last` ones of `unit`, ending with the
+/// current one, or `ago` periods before it. `{ last: 7, unit: day }` is today
+/// and the six days before it; `{ last: 1, unit: month, ago: 1 }` is last
+/// month. Periods start where time grains do (weeks on Monday), in UTC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelativeWindow {
+    pub last: u32,
+    pub unit: WindowUnit,
+    #[serde(default)]
+    pub ago: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowUnit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

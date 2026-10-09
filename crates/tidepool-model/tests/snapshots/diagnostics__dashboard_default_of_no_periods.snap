@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: a window needs at least one period: `last` is 0
+ --> dashboards/sales_recent.yaml:8:22
+  |
+8 |     default: { last: 0, unit: day }
+  |                      ^
+
+1 error, 0 warnings

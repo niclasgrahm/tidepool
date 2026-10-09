@@ -312,7 +312,12 @@ cut to the fields that can change it (`tidepool_engine::relevant`), which
 is what makes sessions on the same dashboard share work. One epoch loop
 refreshes every session from the newest snapshot (coalescing); selection
 changes are answered at once, outside it. Never hold a session's lock
-while calling `Session::send`: it takes the lock itself.
+while calling `Session::send`: it takes the lock itself. A selection can
+hold windows relative to now (`Chosen::windows`, "Last 7 days"): they are
+resolved into ranges with `AppState::clock` (tests stop it with
+`set_clock`) whenever a query runs, so the engine never sees one, and the
+loop's one-second tick refreshes sessions whose windows the clock moved
+(plan §5.5).
 
 ### The config pipeline (`tidepool-server::config`)
 

@@ -27,7 +27,22 @@ fn the_retail_example_compiles_without_diagnostics() {
     let model = compiled.model;
     assert_eq!(model.tables.len(), 3);
     assert_eq!(model.relationships.len(), 2);
-    assert_eq!(model.dashboards.len(), 1);
+    assert_eq!(model.dashboards.len(), 2);
+    // the recent dashboard opens on a window of the last seven days
+    let windows: Vec<_> = model
+        .dashboards
+        .iter()
+        .flat_map(|d| &d.filters)
+        .filter_map(|f| f.default)
+        .collect();
+    assert_eq!(
+        windows,
+        vec![tidepool_config::dashboard::RelativeWindow {
+            last: 7,
+            unit: tidepool_config::dashboard::WindowUnit::Day,
+            ago: 0
+        }]
+    );
     // customer_id and product_id each join two tables into one key domain
     assert_eq!(model.key_domains.len(), 2);
 }

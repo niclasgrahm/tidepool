@@ -147,6 +147,7 @@ filters:
   - field: customers.region             # a list: selected, possible, excluded
   - field: orders.ordered_at
     widget: date_range
+    default: { last: 30, unit: day }     # opens on the last 30 days, moving with time
 visuals:
   - id: kpi_revenue
     type: kpi
@@ -176,6 +177,17 @@ visuals:
 
 `at` places a visual on the grid: column `x`, row `y`, `w` columns wide and
 `h` rows high. Time grains are `day`, `week`, `month`, `quarter` and `year`.
+
+A `date_range` offers fixed dates and periods relative to now ("Today",
+"Last 7 days", "Last month", and "Last hour" for timestamps). A relative
+period moves as time passes: a dashboard on "Today" shows the new day's
+numbers from midnight on, data or not. `default` is the period a dashboard
+opens on, the first time a viewer opens it; they can change or clear it.
+A window is `last` whole periods of `unit` (`minute`, `hour`, `day`, `week`,
+`month`, `quarter`, `year`), the current one included, ending `ago`
+periods back: `{ last: 7, unit: day }` is today and the six days before it,
+`{ last: 1, unit: month, ago: 1 }` is last month. Periods start where grains
+do (weeks on Monday) and are in UTC, and a date has no hours or minutes.
 
 ## Changing a running server
 

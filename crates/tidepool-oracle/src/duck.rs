@@ -175,6 +175,30 @@ fn condition_sql(schema: &Schema, (table, column, cond): &(String, String, Cond)
             literal(from, &source),
             literal(to, &source)
         ),
+        Cond::Relative {
+            now,
+            unit,
+            last,
+            ago,
+        } => {
+            // DuckDB's own calendar: its date_trunc and interval arithmetic
+            let now = tidepool_expr::temporal::datetime_from_micros(*now)
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                .unwrap_or_default();
+            let start = format!("date_trunc('{unit}', TIMESTAMP '{now}')");
+            let (per, interval) = match *unit {
+                "quarter" => (3, "MONTH"),
+                "week" => (7, "DAY"),
+                other => (1, other),
+            };
+            let (last, ago) = (i64::from(*last), i64::from(*ago));
+            let step = |periods: i64| format!("{start} + INTERVAL ({}) {interval}", periods * per);
+            format!(
+                "{field} >= {} AND {field} < {}",
+                step(-(ago + last - 1)),
+                step(1 - ago)
+            )
+        }
     }
 }
 

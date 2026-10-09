@@ -44,6 +44,12 @@ pub enum ClientMessage {
         #[serde(default)]
         to: Option<Value>,
     },
+    /// Select a window relative to now on a time field ("the last 7
+    /// days"): it moves as time passes, and the dashboard with it.
+    SelectRelative {
+        field: String,
+        window: RelativeWindow,
+    },
     /// Clear one field's selection, or all of it.
     Clear {
         #[serde(default)]
@@ -90,6 +96,83 @@ pub enum SelectMode {
     Toggle,
     /// These values as well.
     Add,
+}
+
+/// A window of whole periods relative to now: `last` periods of `unit`,
+/// ending with the current one, or `ago` periods before it. "The last 7
+/// days" is `{unit: day, last: 7}` (today and the six days before it);
+/// "last month" is `{unit: month, last: 1, ago: 1}`. Periods start where
+/// grains do (weeks on Monday), in UTC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelativeWindow {
+    pub unit: RelativeUnit,
+    pub last: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ago: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's signature
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelativeUnit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+impl RelativeUnit {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Quarter => "quarter",
+            Self::Year => "year",
+        }
+    }
+
+    /// Whether a date (no time of day) has periods this long.
+    #[must_use]
+    pub fn fits_dates(self) -> bool {
+        !matches!(self, Self::Minute | Self::Hour)
+    }
+}
+
+impl RelativeWindow {
+    /// How a person would say it: "Today", "Last 7 days", "Last month",
+    /// "Previous 7 days" (seven days ending yesterday).
+    #[must_use]
+    pub fn label(&self) -> String {
+        let unit = self.unit.name();
+        let plural = |n: u32| {
+            if n == 1 {
+                unit.to_string()
+            } else {
+                format!("{n} {unit}s")
+            }
+        };
+        match (self.last, self.ago) {
+            (1, 0) if self.unit == RelativeUnit::Day => "Today".into(),
+            (1, 1) if self.unit == RelativeUnit::Day => "Yesterday".into(),
+            (1, 0) => format!("This {unit}"),
+            (1, 1) => format!("Last {unit}"),
+            (n, 0) => format!("Last {}", plural(n)),
+            (n, 1) => format!("Previous {}", plural(n)),
+            (n, ago) => format!("{} ending {} ago", plural(n), plural(ago)),
+        }
+    }
 }
 
 /// What the server sends.
@@ -148,6 +231,13 @@ pub struct FilterInfo {
     pub field: String,
     /// `list` or `date_range`.
     pub widget: String,
+    /// Whether the field has a time of day, so windows of hours and
+    /// minutes apply to it (a date has none).
+    #[serde(default)]
+    pub timed: bool,
+    /// The window a `date_range` starts with when the dashboard is opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<RelativeWindow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -187,6 +277,9 @@ pub struct SelectedField {
     pub from: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<Value>,
+    /// A window relative to now; `from` and `to` are where it is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative: Option<RelativeWindow>,
 }
 
 /// A visual's new content.
@@ -228,4 +321,43 @@ pub enum ValueState {
     /// Occurs in rows that pass every *other* field's selection.
     Possible,
     Excluded,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_read_the_way_people_say_them() {
+        let window = |unit, last, ago| RelativeWindow { unit, last, ago }.label();
+        assert_eq!(window(RelativeUnit::Day, 1, 0), "Today");
+        assert_eq!(window(RelativeUnit::Day, 1, 1), "Yesterday");
+        assert_eq!(window(RelativeUnit::Day, 7, 0), "Last 7 days");
+        assert_eq!(window(RelativeUnit::Day, 7, 1), "Previous 7 days");
+        assert_eq!(window(RelativeUnit::Month, 1, 0), "This month");
+        assert_eq!(window(RelativeUnit::Month, 1, 1), "Last month");
+        assert_eq!(window(RelativeUnit::Hour, 24, 0), "Last 24 hours");
+        assert_eq!(
+            window(RelativeUnit::Week, 2, 3),
+            "2 weeks ending 3 weeks ago"
+        );
+    }
+
+    #[test]
+    fn a_relative_selection_reads_from_json() {
+        let parsed: Result<ClientMessage, _> = serde_json::from_str(
+            r#"{"type": "select_relative", "field": "orders.ordered_at", "window": {"unit": "day", "last": 7}}"#,
+        );
+        assert_eq!(
+            parsed.ok(),
+            Some(ClientMessage::SelectRelative {
+                field: "orders.ordered_at".into(),
+                window: RelativeWindow {
+                    unit: RelativeUnit::Day,
+                    last: 7,
+                    ago: 0
+                },
+            })
+        );
+    }
 }

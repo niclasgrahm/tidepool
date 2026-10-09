@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The project `init` writes: the retail example, compiled in.
-const FILES: [(&str, &str); 6] = [
+const FILES: [(&str, &str); 7] = [
     (
         "model.ossie.yaml",
         include_str!("../../../examples/retail/model.ossie.yaml"),
@@ -29,6 +29,10 @@ const FILES: [(&str, &str); 6] = [
     (
         "dashboards/sales.yaml",
         include_str!("../../../examples/retail/dashboards/sales.yaml"),
+    ),
+    (
+        "dashboards/sales_recent.yaml",
+        include_str!("../../../examples/retail/dashboards/sales_recent.yaml"),
     ),
     ("tidepool.yaml", SERVER),
 ];

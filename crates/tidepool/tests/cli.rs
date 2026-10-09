@@ -28,7 +28,7 @@ fn validate_accepts_the_example_and_summarises_it() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(
         text(&output.stdout),
-        "ok: 3 tables, 2 relationships, 7 metrics, 1 dashboard\n"
+        "ok: 3 tables, 2 relationships, 7 metrics, 2 dashboards\n"
     );
 }
 
@@ -70,7 +70,7 @@ fn validate_fails_when_a_file_does_not_parse() {
     }
     let output = tidepool(&["validate", "--config", &dir.path().to_string_lossy()]);
     assert!(!output.status.success(), "{}", text(&output.stdout));
-    assert!(text(&output.stdout).is_empty());
+    assert_eq!(text(&output.stdout), "");
 }
 
 #[test]

@@ -196,8 +196,106 @@ impl Shift {
     }
 }
 
+/// The span of a relative window (plan §5.5): `last` whole periods of
+/// `part` ending with the one `ago` periods before the one `now` is in, as
+/// half-open microseconds `[from, to)` in UTC. `last: 7, ago: 0` in days is
+/// today and the six days before it; `last: 1, ago: 1` in months is last
+/// month. Periods start where `DATE_TRUNC` puts them (weeks on Monday).
+///
+/// `None` for parts that aren't periods (`DayOfWeek`), `last: 0`, or a span
+/// past the calendar's range.
+#[must_use]
+pub fn window(part: Part, last: u32, ago: u32, now: i64) -> Option<(i64, i64)> {
+    if last == 0 {
+        return None;
+    }
+    let current = if part.is_calendar() {
+        let day = datetime_from_micros(now)?.date();
+        i64::from(days_from_date(trunc_date(part, day))).checked_mul(MICROS_PER_DAY)?
+    } else {
+        trunc_micros(part, now)
+    };
+    let step = |periods: i64| -> Option<i64> {
+        let n = i32::try_from(periods).ok()?;
+        let calendar = |months: i32, days: i32| Shift { months, days }.micros(current);
+        match part {
+            Part::Year => calendar(n.checked_mul(12)?, 0),
+            Part::Quarter => calendar(n.checked_mul(3)?, 0),
+            Part::Month => calendar(n, 0),
+            Part::Week => calendar(0, n.checked_mul(7)?),
+            Part::Day => calendar(0, n),
+            Part::Hour => current.checked_add(periods.checked_mul(3_600_000_000)?),
+            Part::Minute => current.checked_add(periods.checked_mul(60_000_000)?),
+            Part::Second => current.checked_add(periods.checked_mul(1_000_000)?),
+            Part::DayOfWeek | Part::DayOfYear => None,
+        }
+    };
+    let (last, ago) = (i64::from(last), i64::from(ago));
+    Some((step(-(ago + last - 1))?, step(1 - ago)?))
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn windows_are_whole_periods_counted_back_from_now() {
+        let at = |text: &str| parse_timestamp(text).unwrap_or(i64::MIN);
+        // a Thursday afternoon
+        let now = at("2026-10-08 14:35:10");
+        let span = |part, last, ago| match window(part, last, ago, now) {
+            Some((from, to)) => (
+                datetime_from_micros(from).map(|t| t.to_string()),
+                datetime_from_micros(to).map(|t| t.to_string()),
+            ),
+            None => panic!("{part:?} {last} {ago} should be a window"),
+        };
+        let both = |from: &str, to: &str| (Some(from.to_string()), Some(to.to_string()));
+        assert_eq!(
+            span(Part::Day, 7, 0),
+            both("2026-10-02 00:00:00", "2026-10-09 00:00:00"),
+            "today and the six days before"
+        );
+        assert_eq!(
+            span(Part::Day, 1, 1),
+            both("2026-10-07 00:00:00", "2026-10-08 00:00:00"),
+            "yesterday"
+        );
+        assert_eq!(
+            span(Part::Week, 1, 0),
+            both("2026-10-05 00:00:00", "2026-10-12 00:00:00"),
+            "this week, from Monday"
+        );
+        assert_eq!(
+            span(Part::Month, 1, 1),
+            both("2026-09-01 00:00:00", "2026-10-01 00:00:00"),
+            "last month"
+        );
+        assert_eq!(
+            span(Part::Quarter, 2, 0),
+            both("2026-07-01 00:00:00", "2027-01-01 00:00:00")
+        );
+        assert_eq!(
+            span(Part::Year, 1, 0),
+            both("2026-01-01 00:00:00", "2027-01-01 00:00:00")
+        );
+        assert_eq!(
+            span(Part::Hour, 24, 0),
+            both("2026-10-07 15:00:00", "2026-10-08 15:00:00")
+        );
+        assert_eq!(
+            span(Part::Minute, 15, 0),
+            both("2026-10-08 14:21:00", "2026-10-08 14:36:00")
+        );
+        assert_eq!(window(Part::Day, 0, 0, now), None, "no periods");
+        assert_eq!(window(Part::DayOfWeek, 1, 0, now), None);
+        // before 1970 too
+        let early = at("1969-12-31 23:00:00");
+        assert_eq!(
+            window(Part::Day, 1, 0, early),
+            Some((-MICROS_PER_DAY, 0)),
+            "the last day of 1969"
+        );
+    }
 
     #[test]
     fn shifts_move_by_calendar_months_and_clamp_to_the_month_end() {

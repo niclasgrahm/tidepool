@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(shown.first(), Some(&None));
         assert_eq!(shown.last(), Some(&None));
         assert_eq!(shown.iter().filter(|l| l.is_some()).count(), 6);
-        assert!(hunks(&diff("a\n", "a\n"), 2).is_empty());
+        assert_eq!(hunks(&diff("a\n", "a\n"), 2), []);
     }
 
     #[test]

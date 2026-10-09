@@ -530,6 +530,52 @@ case!(
 );
 case!(dashboards_without_a_model, [Remove("model.ossie.yaml")]);
 case!(
+    dashboard_default_on_a_list,
+    [Replace(
+        "dashboards/sales_recent.yaml",
+        "  - field: customers.region\n",
+        "  - field: customers.region\n    default: { last: 7, unit: day }\n"
+    )]
+);
+case!(
+    dashboard_default_of_no_periods,
+    [Replace(
+        "dashboards/sales_recent.yaml",
+        "default: { last: 7, unit: day }",
+        "default: { last: 0, unit: day }"
+    )]
+);
+case!(
+    dashboard_default_in_hours_on_a_date,
+    [
+        Replace(
+            "model.ossie.yaml",
+            "      - name: status\n",
+            "      - name: order_day\n        expression: { dialects: [{ dialect: ANSI_SQL, expression: \"DATE_TRUNC('day', ordered_at)\" }] }\n        dimension: { is_time: true }\n      - name: status\n"
+        ),
+        Replace(
+            "dashboards/sales_recent.yaml",
+            "  - field: orders.ordered_at\n    widget: date_range\n    default: { last: 7, unit: day }",
+            "  - field: orders.order_day\n    widget: date_range\n    default: { last: 24, unit: hour }"
+        )
+    ]
+);
+case!(
+    dashboard_default_on_a_number_marked_as_time,
+    [
+        Replace(
+            "model.ossie.yaml",
+            "        datatype: Integer\n",
+            "        datatype: Integer\n        dimension: { is_time: true }\n"
+        ),
+        Replace(
+            "dashboards/sales_recent.yaml",
+            "  - field: orders.ordered_at\n    widget: date_range\n    default:",
+            "  - field: orders.order_year\n    widget: date_range\n    default:"
+        )
+    ]
+);
+case!(
     both_ways_with_a_loop,
     [
         Replace(

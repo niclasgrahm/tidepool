@@ -50,6 +50,23 @@ pub struct AppState {
     pub(crate) counters: metrics::Counters,
     /// Browser sessions.
     pub(crate) sessions: auth::Sessions,
+    /// What time it is, for selections relative to now.
+    pub(crate) clock: Clock,
+}
+
+/// The time relative windows are resolved against: the wall clock, or a
+/// fixed time a test sets.
+#[derive(Default)]
+pub(crate) struct Clock(std::sync::Mutex<Option<i64>>);
+
+impl Clock {
+    /// Microseconds since the Unix epoch, UTC.
+    pub(crate) fn now(&self) -> i64 {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_micros())
+    }
 }
 
 /// A config to run: its directory (written back to and watched), if any,
@@ -168,6 +185,7 @@ impl AppState {
             started: std::time::Instant::now(),
             counters: metrics::Counters::default(),
             sessions: auth::Sessions::default(),
+            clock: Clock::default(),
             config: config::ConfigStore::detached(&ModelVersion {
                 version: snapshot.version,
                 model: Arc::clone(&snapshot.model),
@@ -180,6 +198,16 @@ impl AppState {
     #[must_use]
     pub fn writer(&self) -> &WriterHandle {
         &self.writer
+    }
+
+    /// Stop the clock at `micros` (since the Unix epoch, UTC), or let it
+    /// run again with `None`: for tests of selections relative to now.
+    pub fn set_clock(&self, micros: Option<i64>) {
+        *self
+            .clock
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = micros;
     }
 
     /// Whether `GET /readyz` answers 200.
