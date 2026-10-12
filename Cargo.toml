@@ -11,6 +11,7 @@ members = [
     "crates/tidepool-oracle",
     "crates/tidepool",
     "crates/tidepool-bench",
+    "crates/tidepool-docsgen",
     "frontend",
 ]
 # spikes are throwaway experiments with their own toolchains; see CLAUDE.md

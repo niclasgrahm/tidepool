@@ -64,6 +64,21 @@
         "target/oee-data"
       ],
       "port": 7073
+    },
+    {
+      "name": "tidepool-docs",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "website",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
+      "port": 5173
     }
   ]
 }

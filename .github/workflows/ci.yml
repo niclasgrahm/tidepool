@@ -61,3 +61,22 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The doc site. Its reference is committed, and `tidepool-docsgen`'s tests
+  # (in `test` above) are what say it still matches the source. This job
+  # checks that the site itself builds: a doc comment can be valid Rust and
+  # still break the page it lands on (Vue compiles these files), and a dead
+  # link fails the build.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+        working-directory: website
+      - run: npm run build
+        working-directory: website

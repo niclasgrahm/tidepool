@@ -28,6 +28,7 @@ use axum::Router;
 
 pub use auth::Tokens;
 pub use endpoints::api_router;
+pub use mcp::tools as mcp_tools;
 pub use ui::{Assets, DirAssets};
 
 use tidepool_model::Model;

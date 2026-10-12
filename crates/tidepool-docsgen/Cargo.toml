@@ -1,0 +1,20 @@
+[package]
+name = "tidepool-docsgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# Depends on the server crate, so it carries the server's licence.
+license = "AGPL-3.0-or-later"
+# A tool for this repository: it writes the doc site's generated reference.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidepool-config.workspace = true
+tidepool-model.workspace = true
+tidepool-protocol.workspace = true
+tidepool-server.workspace = true
+serde_json.workspace = true

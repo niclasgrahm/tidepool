@@ -38,9 +38,11 @@ preview_table to look at rows. To change the model, get_config for the files and
 version, plan_change to see what an edit does, then apply_change: safe changes apply at \
 once, others wait for a person's approval.";
 
-/// The tools, as `tools/list` describes them.
+/// The tools, as `tools/list` describes them. The doc site's reference is
+/// rendered from the same list (`tidepool-docsgen`).
+#[must_use]
 #[allow(clippy::too_many_lines)] // one schema per tool, as a list
-fn tools() -> Value {
+pub fn tools() -> Value {
     let files = json!({
         "type": "object",
         "description": "Config files to set (path → YAML text) or remove (path → null). \

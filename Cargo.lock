@@ -3406,6 +3406,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-docsgen"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tidepool-config",
+ "tidepool-model",
+ "tidepool-protocol",
+ "tidepool-server",
+]
+
+[[package]]
 name = "tidepool-engine"
 version = "0.0.1"
 dependencies = [

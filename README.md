@@ -35,13 +35,19 @@ What it does:
 - **Connectors**: through [Kayak](https://github.com/niclasgrahm/kayak); see
   [examples/kayak-demo](examples/kayak-demo).
 
-Guides:
+Documentation: <https://propell.dev/tidepool/> (the source is
+[website/](website); `just docs-dev` serves it locally):
 
-- [Getting started](docs/guide/getting-started.md)
-- [Configuration reference](docs/guide/config.md): tables, the model, dashboards, `tidepool.yaml`
-- [HTTP API](docs/guide/api.md): ingest, queries, CSV, the live protocol, the config API
-- [Agents (MCP)](docs/guide/agents.md)
-- [Operations](docs/guide/operations.md): data, durability, auth, metrics, Docker
+- [Getting started](website/getting-started.md)
+- [The project](website/project/the-project.md): tables, the model, metrics,
+  hierarchies, dashboards, selections, changes
+- [Writing rows](website/data/writing-rows.md), [queries](website/data/queries.md),
+  [the live protocol](website/data/live.md), [Kayak](website/data/kayak.md)
+- [Running a server](website/operating/deployment.md): durability, access,
+  monitoring, deployment
+- [Agents (MCP)](website/agents.md)
+- The reference (config files, HTTP API, MCP tools) is generated from the
+  source by `just docs`.
 
 For contributors: [docs/plan.md](docs/plan.md) is the design and the
 milestones, [CLAUDE.md](CLAUDE.md) the conventions, [licensing.md](licensing.md)

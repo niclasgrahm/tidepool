@@ -1,0 +1,54 @@
+{
+  "api": [
+    {
+      "link": "/reference/api#api-tables",
+      "text": "tables"
+    },
+    {
+      "link": "/reference/api#api-queries",
+      "text": "queries"
+    },
+    {
+      "link": "/reference/api#api-config",
+      "text": "config"
+    },
+    {
+      "link": "/reference/api#api-server",
+      "text": "server"
+    },
+    {
+      "link": "/reference/api#api-reference",
+      "text": "reference"
+    }
+  ],
+  "mcp": [
+    {
+      "link": "/reference/mcp#tool-describe-model",
+      "text": "describe_model"
+    },
+    {
+      "link": "/reference/mcp#tool-preview-table",
+      "text": "preview_table"
+    },
+    {
+      "link": "/reference/mcp#tool-query-metrics",
+      "text": "query_metrics"
+    },
+    {
+      "link": "/reference/mcp#tool-get-config",
+      "text": "get_config"
+    },
+    {
+      "link": "/reference/mcp#tool-plan-change",
+      "text": "plan_change"
+    },
+    {
+      "link": "/reference/mcp#tool-apply-change",
+      "text": "apply_change"
+    },
+    {
+      "link": "/reference/mcp#tool-ingest-rows",
+      "text": "ingest_rows"
+    }
+  ]
+}

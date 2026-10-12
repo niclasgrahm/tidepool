@@ -1,0 +1,4082 @@
+{
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "description": "The error body every failing request comes back with.",
+        "properties": {
+          "error": {
+            "description": "What went wrong, as one line.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ApiError",
+        "type": "object"
+      },
+      "ApplyResult": {
+        "description": "What became of an applied change: `POST /v1/config/apply`.",
+        "properties": {
+          "change": {
+            "description": "The pending change, when queued.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PlanInfo"
+          },
+          "status": {
+            "description": "`applied` (live now), `rebuilding` (live when the rebuild is done),\n`queued` (waiting for approval) or `unchanged`.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The config version: the new one when applied.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "plan"
+        ],
+        "title": "ApplyResult",
+        "type": "object"
+      },
+      "ColumnInfo": {
+        "properties": {
+          "encoding": {
+            "description": "`dict` or `plain`.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "type": {
+            "description": "The column type as written in the table file, e.g. `decimal(14,2)`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "nullable",
+          "encoding"
+        ],
+        "type": "object"
+      },
+      "ConfigChange": {
+        "description": "A proposed change: files to set or remove (`null`), against\n`base_version`. Files not named stay as they are, unless `replace` is set:\nthen the named files are the whole config (a revert).",
+        "properties": {
+          "approve": {
+            "default": false,
+            "description": "Apply even if it destroys data (plan §8.2, destructive).",
+            "type": "boolean"
+          },
+          "author": {
+            "description": "Who makes it, for the history and the commit message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default": {},
+            "type": "object"
+          },
+          "propose": {
+            "default": false,
+            "description": "Put it in the approval queue instead of applying it.",
+            "type": "boolean"
+          },
+          "replace": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "base_version"
+        ],
+        "title": "ConfigChange",
+        "type": "object"
+      },
+      "ConfigError": {
+        "description": "Why a change wasn't made (409 or 422).",
+        "properties": {
+          "current_version": {
+            "description": "The version changes are made against now.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "current_version"
+        ],
+        "title": "ConfigError",
+        "type": "object"
+      },
+      "ConfigFile": {
+        "description": "One config file, by its path in the config directory.",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "text"
+        ],
+        "type": "object"
+      },
+      "ConfigProblem": {
+        "description": "One problem with a config, located.",
+        "properties": {
+          "column": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "help": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "description": "1-based, when the problem points at a token.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "severity": {
+            "description": "`error` or `warning`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ConfigState": {
+        "description": "`GET /v1/config`: the files of the current version.",
+        "properties": {
+          "external": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExternalEdits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Edits in the config directory that aren't applied."
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigFile"
+            },
+            "type": "array"
+          },
+          "live_version": {
+            "description": "The version the server runs: behind `version` while a change is\nbeing rebuilt.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rebuild": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RebuildInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "writeback": {
+            "description": "Whether applied changes are written back to the config directory.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "files",
+          "live_version",
+          "writeback"
+        ],
+        "title": "ConfigState",
+        "type": "object"
+      },
+      "ConfigVersion": {
+        "description": "One version's files: `GET /v1/config/versions/{version}`.",
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigFile"
+            },
+            "type": "array"
+          },
+          "info": {
+            "$ref": "#/components/schemas/VersionInfo"
+          }
+        },
+        "required": [
+          "info",
+          "files"
+        ],
+        "title": "ConfigVersion",
+        "type": "object"
+      },
+      "DatasetInfo": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FieldInfo"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "table": {
+            "description": "The table it reads.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "table",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "DurabilityStatus": {
+        "properties": {
+          "checkpoint_age_seconds": {
+            "description": "Seconds since that checkpoint was written (`None`: none yet).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "checkpoint_lsn": {
+            "description": "The last write the newest checkpoint holds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "last_lsn": {
+            "description": "The last write logged.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "`fsync` or `async`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_dir",
+          "mode",
+          "last_lsn",
+          "checkpoint_lsn"
+        ],
+        "type": "object"
+      },
+      "ExternalEdits": {
+        "description": "Edits found in the config directory that the server hasn't applied.",
+        "properties": {
+          "change": {
+            "description": "Waiting for approval as this pending change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "problems": {
+            "description": "They don't compile: what's wrong, rendered.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "FieldInfo": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expression": {
+            "description": "The expression, for a derived field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hierarchy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a hierarchy field: the columns its tree is made of."
+          },
+          "is_time": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "description": "`string`, `int`, `decimal(2)`, `date`, …",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "is_time"
+        ],
+        "type": "object"
+      },
+      "HierarchyInfo": {
+        "description": "A hierarchy field's columns (plan §5.6).",
+        "properties": {
+          "key": {
+            "description": "The key: a node's identity, and the field's values.",
+            "type": "string"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent": {
+            "description": "The parent's key.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "parent"
+        ],
+        "type": "object"
+      },
+      "IngestError": {
+        "description": "A rejected write: nothing was written.",
+        "properties": {
+          "error": {
+            "description": "One line: the problem, or how many there are.",
+            "type": "string"
+          },
+          "errors": {
+            "description": "The problems, by row and column (at most 100).",
+            "items": {
+              "$ref": "#/components/schemas/RowError"
+            },
+            "type": "array"
+          },
+          "more": {
+            "description": "Problems beyond the ones listed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "error",
+          "errors",
+          "more"
+        ],
+        "title": "IngestError",
+        "type": "object"
+      },
+      "IngestResponse": {
+        "description": "What a successful write answers (`POST`/`DELETE /v1/tables/{table}/rows`).",
+        "properties": {
+          "epoch": {
+            "description": "The epoch from which the change is visible to queries. With\n`?wait=visible` it already is when the response arrives.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing": {
+            "description": "Keys that matched no row (deletes only).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "replaced": {
+            "description": "Existing rows replaced (upserts) or deleted.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "written": {
+            "description": "Rows written.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "written",
+          "replaced",
+          "missing",
+          "epoch"
+        ],
+        "title": "IngestResponse",
+        "type": "object"
+      },
+      "Key_categories": {
+        "additionalProperties": false,
+        "description": "The primary key of a `categories` row.",
+        "properties": {
+          "category": {
+            "description": "string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category"
+        ],
+        "type": "object"
+      },
+      "Key_customers": {
+        "additionalProperties": false,
+        "description": "The primary key of a `customers` row.",
+        "properties": {
+          "customer_id": {
+            "description": "string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "Key_products": {
+        "additionalProperties": false,
+        "description": "The primary key of a `products` row.",
+        "properties": {
+          "product_id": {
+            "description": "string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id"
+        ],
+        "type": "object"
+      },
+      "MetricInfo": {
+        "properties": {
+          "anchor": {
+            "description": "The table whose rows a base metric aggregates.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dashboards": {
+            "description": "Dashboards that show it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expression": {
+            "description": "The SQL expression.",
+            "type": "string"
+          },
+          "ignores": {
+            "description": "Fields whose selection it ignores (`*` for all).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "description": "`base` (aggregates rows) or `derived` (combines other metrics).",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "time_offset": {
+            "description": "E.g. `-1 year on orders.ordered_at`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "expression",
+          "kind",
+          "ignores",
+          "dashboards"
+        ],
+        "type": "object"
+      },
+      "ModelInfo": {
+        "description": "The semantic model as the UI shows it (`GET /v1/model`).",
+        "properties": {
+          "datasets": {
+            "items": {
+              "$ref": "#/components/schemas/DatasetInfo"
+            },
+            "type": "array"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/MetricInfo"
+            },
+            "type": "array"
+          },
+          "relationships": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasets",
+          "relationships",
+          "metrics"
+        ],
+        "title": "ModelInfo",
+        "type": "object"
+      },
+      "PendingChange": {
+        "description": "A change waiting for approval: `GET /v1/changes`.",
+        "properties": {
+          "at": {
+            "description": "RFC 3339.",
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "base_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "The files it sets or removes.",
+            "type": "object"
+          },
+          "id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PlanInfo"
+          },
+          "replace": {
+            "default": false,
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "author",
+          "at",
+          "base_version",
+          "files",
+          "plan"
+        ],
+        "title": "PendingChange",
+        "type": "object"
+      },
+      "PlanInfo": {
+        "description": "What a change would do: `POST /v1/config/plan`.",
+        "properties": {
+          "base_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "type": "array"
+          },
+          "class": {
+            "description": "The worst class among the changes; `None` without changes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigProblem"
+            },
+            "type": "array"
+          },
+          "problems_text": {
+            "description": "The problems as `tidepool validate` prints them.",
+            "type": "string"
+          },
+          "text": {
+            "description": "The plan as `tidepool plan` prints it.",
+            "type": "string"
+          },
+          "valid": {
+            "description": "Whether the config compiles.",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "base_version",
+          "valid",
+          "problems",
+          "problems_text",
+          "changes",
+          "warnings",
+          "text"
+        ],
+        "title": "PlanInfo",
+        "type": "object"
+      },
+      "PlannedChange": {
+        "description": "One change a plan makes.",
+        "properties": {
+          "class": {
+            "description": "`safe`, `rebuild` or `destructive`.",
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "`table`, `column`, `relationship`, `dataset`, `field`, `metric`,\n`dashboard` or `setting`.",
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "description": "`add`, `remove`, `change` or `rename`.",
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "kind",
+          "subject",
+          "class"
+        ],
+        "type": "object"
+      },
+      "Preview": {
+        "description": "The newest rows of a table (`GET /v1/tables/{table}/preview`).",
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows": {
+            "description": "Newest first; values as JSON (decimals, dates and timestamps as strings).",
+            "items": {
+              "items": true,
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "columns",
+          "rows",
+          "epoch"
+        ],
+        "title": "Preview",
+        "type": "object"
+      },
+      "ProbeState": {
+        "oneOf": [
+          {
+            "const": "ok",
+            "description": "The process is up and serving HTTP.",
+            "type": "string"
+          },
+          {
+            "const": "ready",
+            "description": "Ready to take traffic: config applied, data recovered.",
+            "type": "string"
+          },
+          {
+            "const": "starting",
+            "description": "Up, but not ready yet (still starting, or recovering).",
+            "type": "string"
+          }
+        ]
+      },
+      "ProbeStatus": {
+        "description": "What the probes (`GET /healthz`, `GET /readyz`) answer.",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ProbeState"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ProbeStatus",
+        "type": "object"
+      },
+      "QueryColumn": {
+        "properties": {
+          "name": {
+            "description": "`dataset.field` (with `:grain`) for dimensions, the metric's name for\nmetrics.",
+            "type": "string"
+          },
+          "role": {
+            "description": "`dimension` or `metric`.",
+            "type": "string"
+          },
+          "type": {
+            "description": "`bool`, `int`, `float`, `decimal(s)`, `string`, `date`, `timestamp`\nor `timestamptz`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "role"
+        ],
+        "type": "object"
+      },
+      "QueryDimension": {
+        "additionalProperties": false,
+        "description": "A field to group by.",
+        "properties": {
+          "field": {
+            "description": "`dataset.field`.",
+            "type": "string"
+          },
+          "grain": {
+            "description": "For time fields: `day`, `week`, `month`, `quarter` or `year`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "description": "For hierarchy fields: group by each node's ancestor at this depth\n(0 is the roots); nodes not that deep group as null.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "type": "object"
+      },
+      "QueryFilter": {
+        "additionalProperties": false,
+        "description": "A condition on a field: `in`, a half-open range `from <= value < to`\n(either end may be left out), or a window of time `relative` to now\n(`{\"unit\": \"day\", \"last\": 7}`). Values are written as in ingested rows:\ndecimals, dates and timestamps as strings or numbers.",
+        "properties": {
+          "field": {
+            "description": "`dataset.field`.",
+            "type": "string"
+          },
+          "from": true,
+          "in": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "relative": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelativeWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to": true
+        },
+        "required": [
+          "field"
+        ],
+        "type": "object"
+      },
+      "QueryRequest": {
+        "additionalProperties": false,
+        "description": "A query: metrics grouped by dimensions, under a selection. The same\nengine dashboards use, without a subscription.",
+        "properties": {
+          "dimensions": {
+            "default": [],
+            "description": "Fields to group by, in result order.",
+            "items": {
+              "$ref": "#/components/schemas/QueryDimension"
+            },
+            "type": "array"
+          },
+          "filters": {
+            "default": [],
+            "description": "The selection: conditions on fields. A metric is filtered by the\nfields its table reaches; the others don't apply to it.",
+            "items": {
+              "$ref": "#/components/schemas/QueryFilter"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "At most this many rows.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "metrics": {
+            "description": "Metrics by name, as in the model.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sort": {
+            "default": [],
+            "description": "Result columns to sort by. Default: the dimensions, ascending.",
+            "items": {
+              "$ref": "#/components/schemas/QuerySort"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "metrics"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
+      "QueryResult": {
+        "description": "A query's answer.",
+        "properties": {
+          "columns": {
+            "description": "Dimensions first, then metrics, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/QueryColumn"
+            },
+            "type": "array"
+          },
+          "epoch": {
+            "description": "The data epoch the answer was computed from.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows": {
+            "description": "Values as JSON: decimals, dates and timestamps as strings, so nothing\nis lost on the way through.",
+            "items": {
+              "items": true,
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "columns",
+          "rows",
+          "epoch"
+        ],
+        "title": "QueryResult",
+        "type": "object"
+      },
+      "QuerySort": {
+        "additionalProperties": false,
+        "description": "A result column to sort by, by its name in [`QueryResult::columns`].",
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "desc": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "column"
+        ],
+        "type": "object"
+      },
+      "RebuildInfo": {
+        "description": "A change being built in the background (plan §8.2, rebuild).",
+        "properties": {
+          "rows": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows_done": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "rows_done",
+          "rows"
+        ],
+        "type": "object"
+      },
+      "RelationshipInfo": {
+        "properties": {
+          "from": {
+            "description": "The many side.",
+            "type": "string"
+          },
+          "from_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "to": {
+            "description": "The one side.",
+            "type": "string"
+          },
+          "to_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "from",
+          "from_columns",
+          "to",
+          "to_columns"
+        ],
+        "type": "object"
+      },
+      "RelativeUnit": {
+        "enum": [
+          "minute",
+          "hour",
+          "day",
+          "week",
+          "month",
+          "quarter",
+          "year"
+        ],
+        "type": "string"
+      },
+      "RelativeWindow": {
+        "additionalProperties": false,
+        "description": "A window of whole periods relative to now: `last` periods of `unit`,\nending with the current one, or `ago` periods before it. \"The last 7\ndays\" is `{unit: day, last: 7}` (today and the six days before it);\n\"last month\" is `{unit: month, last: 1, ago: 1}`. Periods start where\ngrains do (weeks on Monday), in UTC.",
+        "properties": {
+          "ago": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unit": {
+            "$ref": "#/components/schemas/RelativeUnit"
+          }
+        },
+        "required": [
+          "unit",
+          "last"
+        ],
+        "type": "object"
+      },
+      "RowError": {
+        "description": "One problem with a write.",
+        "properties": {
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "row": {
+            "description": "The row's position in the batch, from 0; absent for problems with the\nbody as a whole (or, for Arrow, a whole column).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
+      "Row_categories": {
+        "additionalProperties": false,
+        "description": "A `categories` row.",
+        "properties": {
+          "category": {
+            "description": "string",
+            "type": "string"
+          },
+          "level": {
+            "description": "string",
+            "type": "string"
+          },
+          "parent": {
+            "description": "string",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "level"
+        ],
+        "type": "object"
+      },
+      "Row_customers": {
+        "additionalProperties": false,
+        "description": "A `customers` row.",
+        "properties": {
+          "customer_id": {
+            "description": "string",
+            "type": "string"
+          },
+          "name": {
+            "description": "string",
+            "type": "string"
+          },
+          "region": {
+            "description": "string",
+            "type": "string"
+          },
+          "segment": {
+            "description": "string",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id",
+          "name",
+          "region"
+        ],
+        "type": "object"
+      },
+      "Row_orders": {
+        "additionalProperties": false,
+        "description": "A `orders` row.",
+        "properties": {
+          "amount": {
+            "description": "decimal(14,2)",
+            "oneOf": [
+              {
+                "pattern": "^[+-]?[0-9]*\\.?[0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "customer_id": {
+            "description": "string",
+            "type": "string"
+          },
+          "note": {
+            "description": "string",
+            "nullable": true,
+            "type": "string"
+          },
+          "order_id": {
+            "description": "string",
+            "type": "string"
+          },
+          "ordered_at": {
+            "description": "timestamptz",
+            "format": "date-time",
+            "type": "string"
+          },
+          "product_id": {
+            "description": "string",
+            "type": "string"
+          },
+          "quantity": {
+            "description": "int32",
+            "maximum": 2147483647,
+            "minimum": -2147483648,
+            "type": "integer"
+          },
+          "status": {
+            "description": "string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_id",
+          "customer_id",
+          "product_id",
+          "status",
+          "ordered_at",
+          "quantity",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "Row_products": {
+        "additionalProperties": false,
+        "description": "A `products` row.",
+        "properties": {
+          "category": {
+            "description": "string",
+            "type": "string"
+          },
+          "list_price": {
+            "description": "decimal(12,2)",
+            "oneOf": [
+              {
+                "pattern": "^[+-]?[0-9]*\\.?[0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "name": {
+            "description": "string",
+            "type": "string"
+          },
+          "product_id": {
+            "description": "string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "name",
+          "category",
+          "list_price"
+        ],
+        "type": "object"
+      },
+      "ServerInfo": {
+        "description": "What `GET /v1/info` answers: which server this is.\n\nThe UI shows it in its footer, and a client can check `api_version` before\nit relies on anything else.",
+        "properties": {
+          "api_version": {
+            "description": "The version of the HTTP API this server speaks. Bumped on breaking\nchanges to anything under `/v1`; currently `1`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "Always `\"tidepool\"`.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The server's crate version, e.g. `0.0.1`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "api_version"
+        ],
+        "title": "ServerInfo",
+        "type": "object"
+      },
+      "SessionInfo": {
+        "description": "What a request may do: `GET`/`POST /v1/auth/session`. A level that\nneeds no token is `true` for everyone.",
+        "properties": {
+          "admin": {
+            "type": "boolean"
+          },
+          "ingest": {
+            "type": "boolean"
+          },
+          "read": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "ingest",
+          "admin"
+        ],
+        "title": "SessionInfo",
+        "type": "object"
+      },
+      "StatusInfo": {
+        "description": "What the server is doing (`GET /v1/status`).",
+        "properties": {
+          "cache_bytes": {
+            "description": "Memory held by the engine's caches (join columns, kept answers).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "config_version": {
+            "default": 0,
+            "description": "The config version the server runs.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dictionary_bytes": {
+            "description": "Memory held by dictionary values.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurabilityStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`None` when data lives in memory only."
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "epoch_publish_ms": {
+            "default": 0.0,
+            "description": "The last epoch's publish, in milliseconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "live_refresh_ms": {
+            "default": 0.0,
+            "description": "The last refresh of every live session after an epoch, in\nmilliseconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "rebuild": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RebuildInfo"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A model change being rebuilt in the background."
+          },
+          "sessions": {
+            "description": "Live dashboard sessions.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/TableStatus"
+            },
+            "type": "array"
+          },
+          "uptime_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "uptime_seconds",
+          "tables",
+          "dictionary_bytes",
+          "cache_bytes",
+          "sessions"
+        ],
+        "title": "StatusInfo",
+        "type": "object"
+      },
+      "TableInfo": {
+        "description": "A table, as listed by `GET /v1/tables`.",
+        "properties": {
+          "bytes": {
+            "description": "Approximate memory held by the table's segments.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/ColumnInfo"
+            },
+            "type": "array"
+          },
+          "epoch": {
+            "description": "The epoch these numbers are from.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "`append` or `upsert`.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "primary_key": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rows": {
+            "description": "Rows currently stored (not counting deleted ones).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows_per_second": {
+            "description": "Write rate over the last ten seconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "written_total": {
+            "description": "Rows written since the server started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "mode",
+          "primary_key",
+          "columns",
+          "rows",
+          "written_total",
+          "rows_per_second",
+          "bytes",
+          "epoch"
+        ],
+        "title": "TableInfo",
+        "type": "object"
+      },
+      "TableStatus": {
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "rows": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rows_per_second": {
+            "format": "double",
+            "type": "number"
+          },
+          "segments": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "rows",
+          "bytes",
+          "segments",
+          "rows_per_second"
+        ],
+        "type": "object"
+      },
+      "VersionInfo": {
+        "description": "One applied version: `GET /v1/config/versions`.",
+        "properties": {
+          "at": {
+            "description": "RFC 3339.",
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "class": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "`startup`, `api`, `files` or `revert`.",
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "at",
+          "author",
+          "source",
+          "summary"
+        ],
+        "title": "VersionInfo",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "description": "A token per access level, set with TIDEPOOL_INGEST_TOKEN, TIDEPOOL_READ_TOKEN and TIDEPOOL_ADMIN_TOKEN. A level without a token is open.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "A live, associative analytics server. Data is pushed in over HTTP, held in an in-memory column store, and served as dashboards that update continuously.",
+    "title": "tidepool",
+    "version": "0.0.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Answers `200` whenever the process is serving HTTP at all. It says nothing about whether the data is ready to query; that is `GET /readyz`.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeStatus"
+                }
+              }
+            },
+            "description": "The process is up."
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/mcp": {
+      "post": {
+        "description": "The Model Context Protocol over Streamable HTTP: JSON-RPC 2.0 messages, each answered with one JSON body. Tools: describe_model, preview_table, query_metrics, get_config, plan_change, apply_change and ingest_rows. Each tool is the HTTP endpoint it wraps, called with the caller's credentials, so tools that change the config need the admin token and ingest_rows the ingest token. apply_change applies what `agents.auto_apply` allows and proposes the rest.",
+        "operationId": "mcp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "A JSON-RPC message, or a batch of them.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The JSON-RPC reply (or replies)."
+          },
+          "202": {
+            "description": "A notification: nothing to reply."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "MCP for agents",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "The server in the Prometheus text format: rows, memory and segments per table, ingest requests and rows, epoch publish and live refresh times, query times, sessions, the log and checkpoints, a running rebuild. At the root, where scrapers look.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The metrics."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Prometheus metrics",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Answers `200` once the server can take traffic, and `503` while it is still starting. Later, starting includes applying the config and recovering data from the WAL, which is why this is separate from `GET /healthz`: a restart should not be killed for being slow to recover.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeStatus"
+                }
+              }
+            },
+            "description": "Ready."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeStatus"
+                }
+              }
+            },
+            "description": "Up, but not ready yet."
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/v1/auth/session": {
+      "delete": {
+        "description": "Ends this browser's session and clears its cookie.",
+        "operationId": "endSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            },
+            "description": "Signed out: what's left open to everyone."
+          }
+        },
+        "summary": "Sign out",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      },
+      "get": {
+        "description": "The levels open to this request: by its session cookie, its bearer token, or because they need no token.",
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            },
+            "description": "The levels."
+          }
+        },
+        "summary": "What this request may do",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      },
+      "post": {
+        "description": "Trades the token in `Authorization: Bearer <token>` for a session cookie (`HttpOnly`, `SameSite=Strict`), good for the levels the token is: the UI does this so tokens stay out of URLs and logs. Sessions end after 12 idle hours, on sign-out, or when the server stops.",
+        "operationId": "startSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            },
+            "description": "The session's levels; the cookie is set."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No bearer token."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The token is good for nothing here."
+          }
+        },
+        "summary": "Start a browser session",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/v1/changes": {
+      "get": {
+        "description": "Proposed changes, and edits in the config directory that aren't safe to apply on their own, with their plans.",
+        "operationId": "listChanges",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PendingChange"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The pending changes."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Changes waiting for approval",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/changes/{id}/approve": {
+      "post": {
+        "description": "Applies it, destructive or not. It must still be against the current version.",
+        "operationId": "approveChange",
+        "parameters": [
+          {
+            "description": "The pending change.",
+            "example": "1",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyResult"
+                }
+              }
+            },
+            "description": "Applied or rebuilding."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such pending change."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigError"
+                }
+              }
+            },
+            "description": "It was made against an older version, or a rebuild is running."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Approve a pending change",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/changes/{id}/reject": {
+      "post": {
+        "description": "Drops it from the queue.",
+        "operationId": "rejectChange",
+        "parameters": [
+          {
+            "description": "The pending change.",
+            "example": "1",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingChange"
+                }
+              }
+            },
+            "description": "The change, now dropped."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such pending change."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Reject a pending change",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "description": "Every config file of the current version, the version the server runs (behind while a change is rebuilt), and edits in the config directory that aren't applied.",
+        "operationId": "getConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigState"
+                }
+              }
+            },
+            "description": "The config."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The config",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/config/apply": {
+      "post": {
+        "description": "Plans the change and applies it: safe changes are live at the next epoch, rebuilds when their background rebuild is done (the old version serves until then). A destructive change needs `approve`. With `propose` it waits in the approval queue instead. Applied changes are written back to the config directory, and committed when it is a git repository.",
+        "operationId": "applyConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigChange"
+              }
+            }
+          },
+          "description": "Files to set or remove, against a version.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyResult"
+                }
+              }
+            },
+            "description": "Applied, rebuilding, queued, or nothing to change."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigError"
+                }
+              }
+            },
+            "description": "`base_version` isn't current, the change destroys data and isn't approved, or a rebuild is still running."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigError"
+                }
+              }
+            },
+            "description": "The config doesn't compile with the change."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Apply a change",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/config/plan": {
+      "post": {
+        "description": "Compiles the config with the change and compares it with the current one: every problem, located, and every change with its class (safe, rebuild, destructive). Changes nothing.",
+        "operationId": "planConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigChange"
+              }
+            }
+          },
+          "description": "Files to set or remove, against a version.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanInfo"
+                }
+              }
+            },
+            "description": "The plan (also when the config has errors: `valid` says)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigError"
+                }
+              }
+            },
+            "description": "`base_version` isn't the current version."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "What a change would do",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/config/versions": {
+      "get": {
+        "description": "Every applied version, newest first: who, when, from where, and what changed. Reverting is applying an old version's files.",
+        "operationId": "listConfigVersions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VersionInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The versions."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Versions so far",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/config/versions/{version}": {
+      "get": {
+        "description": "The files of an applied version, to compare or revert to.",
+        "operationId": "getConfigVersion",
+        "parameters": [
+          {
+            "description": "The version number.",
+            "example": "1",
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigVersion"
+                }
+              }
+            },
+            "description": "The version."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such version."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One version's files",
+        "tags": [
+          "config"
+        ],
+        "x-tidepool-access": "admin"
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "description": "The server's name, version and API version.",
+        "operationId": "getInfo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            },
+            "description": "The server's identity."
+          }
+        },
+        "summary": "Which server this is",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/v1/model": {
+      "get": {
+        "description": "Datasets and their fields, relationships, and metrics with their SQL, anchor table and the dashboards that show them: what the model browser shows.",
+        "operationId": "getModel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            },
+            "description": "The model."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The semantic model",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "description": "Generated from the same endpoint table the router is built from, so it can't describe a route that isn't served.",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The OpenAPI document."
+          }
+        },
+        "summary": "This API, as OpenAPI 3.1",
+        "tags": [
+          "reference"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/v1/query": {
+      "post": {
+        "description": "Metrics grouped by dimensions, under a selection, from the newest snapshot: the engine dashboards use, without a subscription. Filters are one-directional: a metric is filtered by the fields its table reaches through relationships, and the rest don't apply to it.",
+        "operationId": "query",
+        "parameters": [
+          {
+            "description": "`csv` for the answer as CSV (a header of column names, then the rows), for spreadsheets and exports. JSON otherwise.",
+            "example": "json",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "description": "What to compute.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The query names something the model doesn't have, or asks for something the engine can't do."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Run a query",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/schemas/{kind}": {
+      "get": {
+        "description": "For editors (yaml-language-server), the config editor and agents writing config. Kinds: `server` (tidepool.yaml), `table` (tables/*.yaml), `model` (model.ossie.yaml), `dashboard` (dashboards/*.yaml), and the JSON inside TIDEPOOL extensions: `metric-extension`, `field-extension`, `dataset-extension`, `relationship-extension`, `model-extension`.",
+        "operationId": "getSchema",
+        "parameters": [
+          {
+            "description": "Which kind of config file.",
+            "example": "table",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The schema."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such kind."
+          }
+        },
+        "summary": "The JSON Schema of a config file",
+        "tags": [
+          "reference"
+        ],
+        "x-tidepool-access": "public"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "description": "Epoch, memory per table and for caches, live sessions, and the write-ahead log and checkpoints when data is kept on disk.",
+        "operationId": "getStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusInfo"
+                }
+              }
+            },
+            "description": "The status."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "What the server is doing",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/tables": {
+      "get": {
+        "description": "The tables declared in `tables/*.yaml`, with live row counts, write rates and memory, as of the latest epoch.",
+        "operationId": "listTables",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TableInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The tables, in name order."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Every table, with its columns and how much it holds",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/tables/categories/rows": {
+      "delete": {
+        "description": "The body lists keys, in the same formats as writing: each row holds the table's primary key columns and nothing else. Keys that match no row are counted in `missing`, not treated as errors. Only upsert tables have keys, so only they can be deleted from this way.",
+        "operationId": "deleteRows_categories",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the deletes are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Key_categories"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Key_categories"
+              }
+            }
+          },
+          "description": "The keys of the rows to delete.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or the table isn't an upsert table."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The table was removed by a config change meanwhile."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete rows from an upsert table, by key",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "post": {
+        "description": "The body is the rows, in one of three formats, chosen by `Content-Type`: `application/json` (an array of row objects), `application/x-ndjson` (one row object per line) or `application/vnd.apache.arrow.stream` (an Arrow IPC stream, matched to columns by field name).\n\nValues are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row.\n\nRows become visible to queries at the next epoch (within `epoch_interval`); `?wait=visible` answers only once they are. An `Idempotency-Key` header makes retries safe: a key seen in the last 24 hours gets the first response again and writes nothing. A `503` means the server is busy; retry after `Retry-After` seconds.",
+        "operationId": "ingestRows_categories",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the rows are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_categories"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_categories"
+              }
+            }
+          },
+          "description": "The rows.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or a value doesn't fit its column. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Write rows into a table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "put": {
+        "description": "The body is the table's complete new contents, in the same formats as writing: its rows are written (a row whose key exists replaces the old one), and every row whose key isn't among them is deleted, in one batch that becomes visible at once. For keeping a dimension in step with a system of record that can only be read whole (an asset tree, a product catalogue): send all of it every time, and what disappeared there disappears here. `replaced` counts rows replaced and rows deleted. Only upsert tables have keys, so only they can be replaced.",
+        "operationId": "replaceRows_categories",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the new contents are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_categories"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_categories"
+              }
+            }
+          },
+          "description": "Every row the table should hold.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Replaced."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, a value doesn't fit its column, or the table isn't an upsert table. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Replace an upsert table's contents",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      }
+    },
+    "/v1/tables/customers/rows": {
+      "delete": {
+        "description": "The body lists keys, in the same formats as writing: each row holds the table's primary key columns and nothing else. Keys that match no row are counted in `missing`, not treated as errors. Only upsert tables have keys, so only they can be deleted from this way.",
+        "operationId": "deleteRows_customers",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the deletes are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Key_customers"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Key_customers"
+              }
+            }
+          },
+          "description": "The keys of the rows to delete.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or the table isn't an upsert table."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The table was removed by a config change meanwhile."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete rows from an upsert table, by key",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "post": {
+        "description": "The body is the rows, in one of three formats, chosen by `Content-Type`: `application/json` (an array of row objects), `application/x-ndjson` (one row object per line) or `application/vnd.apache.arrow.stream` (an Arrow IPC stream, matched to columns by field name).\n\nValues are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row.\n\nRows become visible to queries at the next epoch (within `epoch_interval`); `?wait=visible` answers only once they are. An `Idempotency-Key` header makes retries safe: a key seen in the last 24 hours gets the first response again and writes nothing. A `503` means the server is busy; retry after `Retry-After` seconds.",
+        "operationId": "ingestRows_customers",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the rows are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_customers"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_customers"
+              }
+            }
+          },
+          "description": "The rows.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or a value doesn't fit its column. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Write rows into a table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "put": {
+        "description": "The body is the table's complete new contents, in the same formats as writing: its rows are written (a row whose key exists replaces the old one), and every row whose key isn't among them is deleted, in one batch that becomes visible at once. For keeping a dimension in step with a system of record that can only be read whole (an asset tree, a product catalogue): send all of it every time, and what disappeared there disappears here. `replaced` counts rows replaced and rows deleted. Only upsert tables have keys, so only they can be replaced.",
+        "operationId": "replaceRows_customers",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the new contents are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_customers"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_customers"
+              }
+            }
+          },
+          "description": "Every row the table should hold.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Replaced."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, a value doesn't fit its column, or the table isn't an upsert table. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Replace an upsert table's contents",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      }
+    },
+    "/v1/tables/orders/rows": {
+      "post": {
+        "description": "The body is the rows, in one of three formats, chosen by `Content-Type`: `application/json` (an array of row objects), `application/x-ndjson` (one row object per line) or `application/vnd.apache.arrow.stream` (an Arrow IPC stream, matched to columns by field name).\n\nValues are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row.\n\nRows become visible to queries at the next epoch (within `epoch_interval`); `?wait=visible` answers only once they are. An `Idempotency-Key` header makes retries safe: a key seen in the last 24 hours gets the first response again and writes nothing. A `503` means the server is busy; retry after `Retry-After` seconds.",
+        "operationId": "ingestRows_orders",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the rows are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_orders"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_orders"
+              }
+            }
+          },
+          "description": "The rows.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or a value doesn't fit its column. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Write rows into a table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      }
+    },
+    "/v1/tables/products/rows": {
+      "delete": {
+        "description": "The body lists keys, in the same formats as writing: each row holds the table's primary key columns and nothing else. Keys that match no row are counted in `missing`, not treated as errors. Only upsert tables have keys, so only they can be deleted from this way.",
+        "operationId": "deleteRows_products",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the deletes are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Key_products"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Key_products"
+              }
+            }
+          },
+          "description": "The keys of the rows to delete.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or the table isn't an upsert table."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The table was removed by a config change meanwhile."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete rows from an upsert table, by key",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "post": {
+        "description": "The body is the rows, in one of three formats, chosen by `Content-Type`: `application/json` (an array of row objects), `application/x-ndjson` (one row object per line) or `application/vnd.apache.arrow.stream` (an Arrow IPC stream, matched to columns by field name).\n\nValues are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row.\n\nRows become visible to queries at the next epoch (within `epoch_interval`); `?wait=visible` answers only once they are. An `Idempotency-Key` header makes retries safe: a key seen in the last 24 hours gets the first response again and writes nothing. A `503` means the server is busy; retry after `Retry-After` seconds.",
+        "operationId": "ingestRows_products",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the rows are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_products"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_products"
+              }
+            }
+          },
+          "description": "The rows.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, or a value doesn't fit its column. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Write rows into a table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      },
+      "put": {
+        "description": "The body is the table's complete new contents, in the same formats as writing: its rows are written (a row whose key exists replaces the old one), and every row whose key isn't among them is deleted, in one batch that becomes visible at once. For keeping a dimension in step with a system of record that can only be read whole (an asset tree, a product catalogue): send all of it every time, and what disappeared there disappears here. `replaced` counts rows replaced and rows deleted. Only upsert tables have keys, so only they can be replaced.",
+        "operationId": "replaceRows_products",
+        "parameters": [
+          {
+            "description": "`visible`: answer once the new contents are visible to queries.",
+            "example": "visible",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Makes retries safe: a key seen in the last 24 hours gets the first response again.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Row_products"
+                },
+                "type": "array"
+              }
+            },
+            "application/vnd.apache.arrow.stream": {
+              "description": "An Arrow IPC stream; fields are matched to columns by name.",
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            },
+            "application/x-ndjson": {
+              "description": "One row object per line.",
+              "schema": {
+                "$ref": "#/components/schemas/Row_products"
+              }
+            }
+          },
+          "description": "Every row the table should hold.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "Replaced."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestError"
+                }
+              }
+            },
+            "description": "The body didn't decode, a value doesn't fit its column, or the table isn't an upsert table. Nothing was written."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A request with the same `Idempotency-Key` is still being processed, or the table was removed by a config change meanwhile."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A `Content-Type` that isn't one of the three formats."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Busy: the write queue is full. Retry after `Retry-After` seconds."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Replace an upsert table's contents",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "ingest"
+      }
+    },
+    "/v1/tables/{table}": {
+      "get": {
+        "description": "The same as one entry of `GET /v1/tables`.",
+        "operationId": "getTable",
+        "parameters": [
+          {
+            "description": "The table, by name.",
+            "example": "orders",
+            "in": "path",
+            "name": "table",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableInfo"
+                }
+              }
+            },
+            "description": "The table."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/tables/{table}/preview": {
+      "get": {
+        "description": "Newest first, decoded: decimals, dates and timestamps as strings, so nothing is lost on the way through JSON.",
+        "operationId": "previewTable",
+        "parameters": [
+          {
+            "description": "The table, by name.",
+            "example": "orders",
+            "in": "path",
+            "name": "table",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How many rows, at most 1000. Default 100.",
+            "example": "10",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Preview"
+                }
+              }
+            },
+            "description": "The rows."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such table."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The newest rows of a table",
+        "tags": [
+          "tables"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/ws": {
+      "get": {
+        "description": "Upgrades to a WebSocket speaking the live protocol: JSON messages tagged by `type` (`ClientMessage` in, `ServerMessage` out). A session holds a selection with back/forward history and shows one dashboard; the server sends one frame per epoch with whatever changed on it, and answers selection changes right away. Browsers can't set headers on a WebSocket, so the read token may also come as `?token=`.",
+        "operationId": "live",
+        "parameters": [
+          {
+            "description": "The read token, when one is configured.",
+            "example": "s3cret",
+            "in": "query",
+            "name": "token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching to the WebSocket protocol."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Live dashboards (WebSocket)",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "The data: writing rows into tables, and looking at what they hold. Tables are declared in `tables/*.yaml`; every table gets these endpoints.",
+      "name": "tables"
+    },
+    {
+      "description": "Asking the model: metrics grouped by fields, under a selection. Names are the semantic layer's (`model.ossie.yaml`), not tables'.",
+      "name": "queries"
+    },
+    {
+      "description": "Changing what the server runs while it runs: the config files, plans of what a change does, applying it, the versions so far and changes waiting for approval. Every change goes through the same pipeline, and is written back to the config directory.",
+      "name": "config"
+    },
+    {
+      "description": "The process itself: probes for orchestrators, and what server this is.",
+      "name": "server"
+    },
+    {
+      "description": "The API describing itself.",
+      "name": "reference"
+    }
+  ]
+}

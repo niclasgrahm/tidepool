@@ -1,0 +1,156 @@
+/*
+ * tidepool's own colours and type, from `frontend/style.css` (see
+ * `landing/visual-language.md`):
+ *
+ *   - cool paper, deep teal ink, both themes;
+ *   - teal is the brand; coral means "selected" and nothing else;
+ *   - flat surfaces with a teal rule on top or at the left, no shadows;
+ *   - Bricolage Grotesque for display, Atkinson Hyperlegible for text;
+ *   - tabular numbers;
+ *   - lowercase headings.
+ */
+
+:root {
+  --tp-paper: #eef3f2;
+  --tp-surface: #f8fbfa;
+  --tp-ink: #14302f;
+  --tp-ink-soft: #4d6664;
+  --tp-tide: #1f7a73;
+  --tp-kelp: #c9d8d4;
+  --tp-sand: #b9c7c3;
+  --tp-anemone: #d9466f;
+  --tp-problem: #a23b2c;
+  --tp-display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+}
+
+.dark {
+  --tp-paper: #0f2321;
+  --tp-surface: #142c2a;
+  --tp-ink: #e2eeeb;
+  --tp-ink-soft: #9db5b1;
+  --tp-tide: #4fb3a9;
+  --tp-kelp: #2b4441;
+  --tp-sand: #35504c;
+  --tp-anemone: #f07a98;
+  --tp-problem: #f0937f;
+}
+
+:root,
+.dark {
+  --vp-font-family-base: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --vp-font-family-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --vp-c-bg: var(--tp-paper);
+  --vp-c-bg-alt: var(--tp-surface);
+  --vp-c-bg-elv: var(--tp-surface);
+  --vp-c-bg-soft: var(--tp-surface);
+  --vp-c-divider: var(--tp-sand);
+  --vp-c-border: var(--tp-sand);
+  --vp-c-gutter: var(--tp-kelp);
+
+  --vp-c-text-1: var(--tp-ink);
+  --vp-c-text-2: var(--tp-ink-soft);
+  --vp-c-text-3: var(--tp-ink-soft);
+
+  --vp-c-brand-1: var(--tp-tide);
+  --vp-c-brand-2: var(--tp-tide);
+  --vp-c-brand-3: var(--tp-tide);
+  --vp-c-brand-soft: color-mix(in srgb, var(--tp-tide) 14%, transparent);
+
+  --vp-c-tip-1: var(--tp-tide);
+  --vp-c-tip-soft: color-mix(in srgb, var(--tp-tide) 10%, transparent);
+  --vp-c-warning-1: var(--tp-ink);
+  --vp-c-warning-soft: color-mix(in srgb, var(--tp-sand) 40%, transparent);
+  --vp-c-danger-1: var(--tp-problem);
+  --vp-c-danger-soft: color-mix(in srgb, var(--tp-problem) 12%, transparent);
+
+  --vp-code-block-bg: var(--tp-surface);
+  --vp-code-bg: color-mix(in srgb, var(--tp-kelp) 55%, transparent);
+  --vp-code-color: var(--tp-ink);
+
+  --vp-button-brand-bg: var(--tp-tide);
+  --vp-button-brand-hover-bg: var(--tp-tide);
+  --vp-button-brand-text: var(--tp-paper);
+  --vp-button-brand-hover-text: var(--tp-paper);
+  --vp-button-brand-border: var(--tp-tide);
+  --vp-button-alt-bg: transparent;
+  --vp-button-alt-border: var(--tp-sand);
+  --vp-button-alt-text: var(--tp-ink);
+
+  --vp-custom-block-info-bg: var(--tp-surface);
+  --vp-custom-block-details-bg: var(--tp-surface);
+  --vp-sidebar-bg-color: var(--tp-paper);
+  --vp-nav-bg-color: var(--tp-paper);
+  --vp-local-search-bg: var(--tp-paper);
+}
+
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+/* display face for the brand and the headings */
+.VPNavBarTitle .title {
+  font: 700 20px/1 var(--tp-display);
+  letter-spacing: -0.01em;
+}
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3 {
+  font-family: var(--tp-display);
+  letter-spacing: -0.01em;
+}
+.vp-doc h1 { font-weight: 700; }
+.vp-doc h2,
+.vp-doc h3 { font-weight: 500; }
+
+/* code: a surface with a teal rule at the left, as in the UI */
+.vp-doc div[class*="language-"] {
+  border-left: 3px solid var(--tp-tide);
+  border-radius: 0;
+}
+.vp-doc :not(pre) > code {
+  border-radius: 4px;
+}
+
+/* tables: rules in sand and kelp, no zebra */
+.vp-doc table {
+  display: table;
+  width: 100%;
+  font-size: 14px;
+}
+.vp-doc tr:nth-child(2n) {
+  background: transparent;
+}
+.vp-doc th {
+  background: transparent;
+  border-bottom: 1px solid var(--tp-sand);
+}
+.vp-doc th,
+.vp-doc td {
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+}
+.vp-doc td {
+  border-bottom: 1px solid var(--tp-kelp);
+}
+
+/* custom blocks: flat, with a rule at the left */
+.vp-doc .custom-block {
+  border-radius: 0;
+  border: 0;
+  border-left: 3px solid var(--tp-tide);
+}
+.vp-doc .custom-block.danger {
+  border-left-color: var(--tp-problem);
+}
+.vp-doc .custom-block.warning {
+  border-left-color: var(--tp-sand);
+}
+
+/* nothing in tidepool floats */
+.VPFeature,
+.VPNav,
+.VPLocalSearchBox .shell {
+  box-shadow: none !important;
+}

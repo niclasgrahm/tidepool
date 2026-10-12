@@ -9,3 +9,10 @@
 /spikes/*/target
 /spikes/*/dist
 /spikes/*/node_modules
+
+# the doc site: `just docs-build`. website/reference/generated is committed
+# on purpose (the site builds without Rust; tidepool-docsgen's tests keep it
+# true)
+/website/node_modules
+/website/.vitepress/dist
+/website/.vitepress/cache
