@@ -188,12 +188,11 @@ with `tidepool feed` running. Each in `-light.png` and `-dark.png`.
 
 | file | what it shows |
 | --- | --- |
-| `01-dashboard` | the sales dashboard with no selection |
-| `02-dashboard-selected` | the same, with a region selected: coral chip, excluded values, the visuals filtered |
-| `03-model` | the model browser: tables and the relationship diagram |
-| `04-config-plan` | the config page with an edit and its plan |
-| `05-history` | the config history with a diff |
-| `06-status` | the status page |
+| `01-dashboard` | the sales dashboard with no selection, live |
+| `02-dashboard-selected` | the same, with a region selected: a coral chip and bar, every visual filtered. Used on the landing page (`website/public/screens/`, as JPEG). |
+| `03-model` | the model browser: the relationship diagram |
+| `04-status` | the status page |
 
-Best hero candidate: `02-dashboard-selected`. It shows all three filter states
-and the coral selection.
+Best hero candidate: `02-dashboard-selected`. It shows the coral selection, and
+every visual filtered by it. Missing: the config page with a plan, and the
+history with a diff. They need an edit in progress to look like anything.

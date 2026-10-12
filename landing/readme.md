@@ -19,6 +19,11 @@ dark theme (`-light.png`, `-dark.png`).
 To take them again:
 
 1. Run `just build`.
-2. Run `cargo run -p tidepool -- init target/shots && ./target/release/tidepool serve --config target/shots`.
-3. In another terminal, run `./target/release/tidepool feed`.
-4. Open `127.0.0.1:7070` and wait one minute, so the trend has live data.
+2. Run `./target/release/tidepool init target/shots`. Remove `data_dir` from
+   its `tidepool.yaml`.
+3. Run `./target/release/tidepool serve --config target/shots`.
+4. In another terminal, run `./target/release/tidepool feed`.
+5. Capture each page at 1600×1000, device scale 2, once with
+   `prefers-color-scheme: light` and once with `dark` (Playwright:
+   `browser.newContext({ viewport, deviceScaleFactor: 2, colorScheme })`).
+   For `02`, click the second value of the region filter.
