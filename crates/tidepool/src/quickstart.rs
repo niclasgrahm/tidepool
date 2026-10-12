@@ -75,15 +75,34 @@ pub fn init(dir: &Path) -> ExitCode {
     }
     let shown = dir.display();
     println!(
-        "Created {shown}: three tables (orders, customers, products), a model with metrics, \
-         and a sales dashboard.\n\n\
+        "Created {shown}: {}.\n\n\
          Next:\n  \
          tidepool serve --config {shown}     # then open http://127.0.0.1:7070\n  \
          tidepool feed                      # in another terminal: sample orders, live\n\n\
          Edit the files (or use Config in the UI) and the server follows. \
-         `tidepool validate --config {shown}` checks them."
+         `tidepool validate --config {shown}` checks them.",
+        contents()
     );
     ExitCode::SUCCESS
+}
+
+/// What `init` writes, in a few words, from [`FILES`]: the message can't
+/// fall behind the example.
+fn contents() -> String {
+    let named = |dir: &str| -> Vec<&str> {
+        FILES
+            .iter()
+            .filter_map(|(path, _)| path.strip_prefix(dir)?.strip_suffix(".yaml"))
+            .collect()
+    };
+    let (tables, dashboards) = (named("tables/"), named("dashboards/"));
+    format!(
+        "{} tables ({}), a model with metrics, and {} dashboards ({})",
+        tables.len(),
+        tables.join(", "),
+        dashboards.len(),
+        dashboards.join(", ")
+    )
 }
 
 /// A small, fast, good-enough generator (`SplitMix64`).
@@ -336,6 +355,15 @@ fn run_feed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_init_message_lists_what_it_writes() {
+        assert_eq!(
+            contents(),
+            "4 tables (orders, customers, products, categories), a model with metrics, \
+             and 2 dashboards (sales, sales_recent)"
+        );
+    }
 
     #[test]
     fn times_are_utc_rfc3339() {

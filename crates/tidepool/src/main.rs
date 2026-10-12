@@ -54,8 +54,8 @@ enum Command {
         #[arg(long)]
         allow_destructive: bool,
     },
-    /// Start a project: the retail example (three tables, a model, a
-    /// dashboard) in a new directory.
+    /// Start a project: the retail example (tables, a model with metrics,
+    /// dashboards) in a new directory.
     Init {
         /// Where to write it.
         #[arg(default_value = "tidepool-project")]
