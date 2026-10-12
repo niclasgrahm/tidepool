@@ -92,6 +92,12 @@ struct MapEntry {
     map: Arc<Map>,
 }
 
+struct HierarchyEntry {
+    table: Weak<TableSnapshot>,
+    columns: tidepool_model::ir::Hierarchy,
+    tree: Arc<crate::hierarchy::Hierarchy>,
+}
+
 struct JoinEntry {
     segment: Weak<SegmentData>,
     map: Weak<Map>,
@@ -102,6 +108,8 @@ struct JoinEntry {
 struct Inner {
     maps: HashMap<MapKey, MapEntry>,
     joins: HashMap<(usize, usize), JoinEntry>,
+    /// Hierarchies' trees, by their table's identity.
+    hierarchies: HashMap<usize, HierarchyEntry>,
     /// Derived dictionaries per (base dictionary, expression). Codes never
     /// change, so an entry stays valid; it is extended as its base grows.
     /// Keyed by the dictionary's generation too: a model change can build
@@ -187,6 +195,35 @@ impl Caches {
         Some(map)
     }
 
+    /// The tree of a hierarchy over `table`, built by `build` unless the
+    /// table is unchanged since it last was.
+    pub(crate) fn hierarchy(
+        &self,
+        table: &Arc<TableSnapshot>,
+        columns: &tidepool_model::ir::Hierarchy,
+        build: impl FnOnce() -> Option<crate::hierarchy::Hierarchy>,
+    ) -> Option<Arc<crate::hierarchy::Hierarchy>> {
+        if let Some(entry) = self.lock().hierarchies.get(&address(table))
+            && entry.columns == *columns
+            && entry
+                .table
+                .upgrade()
+                .is_some_and(|t| Arc::ptr_eq(&t, table))
+        {
+            return Some(Arc::clone(&entry.tree));
+        }
+        let tree = Arc::new(build()?);
+        self.lock().hierarchies.insert(
+            address(table),
+            HierarchyEntry {
+                table: Arc::downgrade(table),
+                columns: *columns,
+                tree: Arc::clone(&tree),
+            },
+        );
+        Some(tree)
+    }
+
     /// The derived dictionary of `expr` over `dict`, covering every code.
     pub(crate) fn derived(
         &self,
@@ -253,6 +290,7 @@ impl Caches {
         inner
             .joins
             .retain(|_, e| e.segment.strong_count() > 0 && e.map.strong_count() > 0);
+        inner.hierarchies.retain(|_, e| e.table.strong_count() > 0);
         let bytes: usize = inner.joins.values().map(|e| e.column.bytes()).sum();
         if bytes > self.join_budget {
             inner.joins.clear();

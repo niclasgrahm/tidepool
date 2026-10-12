@@ -110,6 +110,17 @@ pub async fn ingest_rows(
     counted(&state, &table, Op::Write, &query, &headers, body).await
 }
 
+/// `PUT /v1/tables/{table}/rows`
+pub async fn replace_rows(
+    State(state): State<Arc<AppState>>,
+    Path(table): Path<String>,
+    Query(query): Query<WriteQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    counted(&state, &table, Op::Replace, &query, &headers, body).await
+}
+
 /// `DELETE /v1/tables/{table}/rows`
 pub async fn delete_rows(
     State(state): State<Arc<AppState>>,
@@ -154,7 +165,11 @@ async fn counted(
     body: Bytes,
 ) -> Response {
     let response = write(state, name, op, query, headers, body).await;
-    let label = if op == Op::Delete { "delete" } else { "write" };
+    let label = match op {
+        Op::Write => "write",
+        Op::Delete => "delete",
+        Op::Replace => "replace",
+    };
     state.counters.request(name, label, response.status());
     response
 }
@@ -170,9 +185,12 @@ fn prepare(
 ) -> Result<(Table, Format, bool), Box<Response>> {
     let snapshot = state.writer.snapshot();
     let table = find(&snapshot, name)?.clone();
-    if op == Op::Delete && table.mode != tidepool_config::table::TableMode::Upsert {
-        let message =
-            format!("`{name}` is an append table; only upsert tables have keys to delete by");
+    if op != Op::Write && table.mode != tidepool_config::table::TableMode::Upsert {
+        let message = if op == Op::Delete {
+            format!("`{name}` is an append table; only upsert tables have keys to delete by")
+        } else {
+            format!("`{name}` is an append table; only upsert tables have keys to replace by")
+        };
         return Err(Box::new(rejected(&batch::rejected(message))));
     }
     let format = format_of(headers)?;

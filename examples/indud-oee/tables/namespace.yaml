@@ -1,0 +1,13 @@
+# Indu's unified namespace, as Kayak's `indu_namespace` input reads it: the
+# org tree, the devices placed in it and their sensors, one row per node.
+# Kayak replaces the table with every read (`write: replace`), so a node
+# moved, renamed or deleted in Indu is the same here at the next read.
+name: namespace
+mode: upsert
+primary_key: [id]
+columns:
+  id:        { type: string }                  # org:…, device:…, sensor:…
+  parent_id: { type: string, nullable: true }  # NULL at a root
+  label:     { type: string }
+  kind:      { type: string }                  # org, device, sensor
+  unit:      { type: string, nullable: true }

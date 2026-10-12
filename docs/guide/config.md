@@ -125,6 +125,29 @@ excluded). The relationships must form a tree: two paths between the same
 tables (say an order's billing and shipping customer) are refused, because
 the answer would depend on which way a selection went round.
 
+**Hierarchies.** A table whose rows form a tree (a plant: site, hall, line,
+machine; a category tree; an org chart) declares it on its dataset: each
+row is a node keyed by the table's primary key, and a column holds its
+parent's key. Depth is whatever the data says.
+
+```yaml
+  - name: namespace
+    source: namespace
+    primary_key: [id]
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"hierarchy": {"name": "asset", "parent": "parent_id", "label": "label", "kind": "kind"}}'
+```
+
+That adds the field `namespace.asset`, whose values are node keys.
+Selecting a node selects it and everything below it, so a selection of
+"Line 2" filters every fact that relates to a machine under Line 2 — and
+keeps doing so when a machine moves to another line: it's the tree as it
+is now that counts. A row whose parent isn't there is a root. `label`
+(what a node is shown as; the key otherwise) and `kind` (shown beside it)
+are optional. In a dashboard a hierarchy field is a tree filter (below);
+in `POST /v1/query` a dimension can group by a level of it.
+
 **Metrics** are aggregate SQL: `SUM`, `COUNT`, `COUNT(DISTINCT …)`, `AVG`,
 `MIN`, `MAX`, with `FILTER (WHERE …)`, arithmetic, `CASE`, `COALESCE`, date
 functions. A metric is computed over the rows of the table its expression
@@ -145,6 +168,8 @@ name: Sales overview
 layout: { columns: 12, row_height: 80 }
 filters:
   - field: customers.region             # a list: selected, possible, excluded
+    measure: revenue                     # each region's revenue instead of its row count
+  - field: categories.tree               # a hierarchy: a tree to open and select branches of
   - field: orders.ordered_at
     widget: date_range
     default: { last: 30, unit: day }     # opens on the last 30 days, moving with time
@@ -177,6 +202,15 @@ visuals:
 
 `at` places a visual on the grid: column `x`, row `y`, `w` columns wide and
 `h` rows high. Time grains are `day`, `week`, `month`, `quarter` and `year`.
+
+A list shows how many rows hold each value; `measure` shows a metric
+instead, computed for that value under the rest of the selection (each
+region's revenue, each machine's OEE). A **tree** (any hierarchy field)
+opens node by node; clicking a node selects its whole branch, ⌘/Ctrl-click
+adds a branch, and a node with a selection somewhere below it carries a
+dot, so it's findable with its branch closed. A tree's measure is computed
+per level, so a ratio is right at every level: a line's OEE is over its
+machines' time and units, not an average of their OEEs.
 
 A `date_range` offers fixed dates and periods relative to now ("Today",
 "Last 7 days", "Last month", and "Last hour" for timestamps). A relative

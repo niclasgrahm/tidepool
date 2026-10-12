@@ -228,7 +228,7 @@ pub(crate) fn prepare<'s>(
     for access in &plan.accesses {
         // a column, or a derived field over one dictionary column
         let (target_column, expr) = match &access.target {
-            Target::Column(column) => (*column, None),
+            Target::Column(column) | Target::Ancestor { column, .. } => (*column, None),
             Target::Derived(expr) => {
                 let mut slots = expr.slots();
                 slots.dedup();
@@ -243,9 +243,17 @@ pub(crate) fn prepare<'s>(
         let layout = target.layouts.get(target_column)?.clone();
         let kind = kind_of(&layout)?;
         let dict = layout.dict.and_then(|d| snapshot.dicts.get(&d));
-        let derived = match expr {
-            None => None,
-            Some((expr, slot)) => {
+        let derived = match (expr, &access.target) {
+            (None, Target::Ancestor { depth, .. }) => {
+                let (Kind::Codes, Some(base)) = (kind, dict) else {
+                    return None;
+                };
+                let columns = crate::hierarchy::columns(model, &access.field)?;
+                let tree = crate::hierarchy::get(snapshot, caches, target_table, &columns).ok()?;
+                Some(tree.ancestors(*depth, base))
+            }
+            (None, _) => None,
+            (Some((expr, slot)), _) => {
                 let (Kind::Codes, Some(id), Some(base)) = (kind, layout.dict, dict) else {
                     return None;
                 };
@@ -256,7 +264,10 @@ pub(crate) fn prepare<'s>(
             }
         };
         // a derived field's values, for keying caches built from them
-        let variant = expr.map(|(e, _)| format!("{e:?}")).unwrap_or_default();
+        let variant = match (&access.target, expr) {
+            (Target::Ancestor { depth, .. }, _) => format!("ancestor:{depth}"),
+            (_, expr) => expr.map(|(e, _)| format!("{e:?}")).unwrap_or_default(),
+        };
         let (column, gathered) = match access.path.first() {
             None => (target_column, None),
             Some(first) => {

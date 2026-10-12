@@ -1,0 +1,48 @@
+name: OEE
+layout: { columns: 12, row_height: 80 }
+filters:
+  - field: namespace.asset                 # the plant as a tree, each node with its OEE
+    measure: oee
+  - field: minutes.state
+  - field: minutes.reason
+    measure: downtime_minutes
+  - field: minutes.at
+    widget: date_range
+    default: { last: 1, unit: day }
+visuals:
+  - id: kpi_oee
+    type: kpi
+    metrics: [oee]
+    at: { x: 0, y: 0, w: 3, h: 2 }
+  - id: kpi_availability
+    type: kpi
+    metrics: [availability]
+    at: { x: 3, y: 0, w: 3, h: 2 }
+  - id: kpi_performance
+    type: kpi
+    metrics: [performance]
+    at: { x: 6, y: 0, w: 3, h: 2 }
+  - id: kpi_quality
+    type: kpi
+    metrics: [quality]
+    at: { x: 9, y: 0, w: 3, h: 2 }
+  - id: by_machine
+    type: bar
+    dimensions: [namespace.label]
+    metrics: [oee]
+    sort: { by: oee, desc: false }
+    on_click: select
+    at: { x: 0, y: 2, w: 6, h: 4 }
+  - id: downtime_by_reason
+    type: bar
+    dimensions: [minutes.reason]
+    metrics: [downtime_minutes]
+    sort: { by: downtime_minutes, desc: true }
+    on_click: select
+    at: { x: 6, y: 2, w: 6, h: 4 }
+  - id: trend
+    type: line
+    dimensions: [{ field: minutes.at, grain: day }]
+    metrics: [good, produced]
+    on_brush: select_range
+    at: { x: 0, y: 6, w: 12, h: 4 }

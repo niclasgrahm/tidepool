@@ -276,6 +276,34 @@ pub struct FieldExtension {
     pub grain: Option<Vec<TimeGrain>>,
 }
 
+/// What a dataset's Tidepool extension may say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetExtension {
+    /// A parent–child hierarchy over the dataset's rows (plan §5.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy: Option<HierarchyExtension>,
+}
+
+/// A parent–child hierarchy: each row is a node, keyed by the table's
+/// (single-column) primary key, and `parent` holds its parent's key. The
+/// tree may be ragged: nodes are at whatever depth their parents put them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HierarchyExtension {
+    /// The field the hierarchy adds to the dataset; its values are node keys.
+    pub name: String,
+    /// The column holding a node's parent's key; NULL for a root.
+    pub parent: String,
+    /// The column a node is shown by; the key when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// A column saying what a node is (`site`, `line`, `device`…), shown
+    /// beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
 /// What a relationship's Tidepool extension may say.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

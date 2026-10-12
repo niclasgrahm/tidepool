@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_between(&\n[Replace(\"model.ossie.yaml\", TREE_EXTENSION, \"    primary_key: [category]\\n\"),\nReplace(\"dashboards/sales.yaml\", TREE_FILTER, \"\")], &\n[Replace(\"model.ossie.yaml\", \"    primary_key: [category]\\n\",\nTREE_EXTENSION)])"
+---
+1 change (0 safe, 1 rebuild, 0 destructive)
+
+  + hierarchy    categories.tree  rebuild  (the parent column joins the key's dictionary: existing parents are re-encoded)

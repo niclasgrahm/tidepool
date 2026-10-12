@@ -6,11 +6,12 @@
 
 use leptos::prelude::*;
 use serde_json::{Value, json};
-use tidepool_protocol::live::{FilterFrame, FilterInfo, ValueState, VisualFrame, VisualInfo};
+use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
 
 use crate::api::{post_text, save_file};
 use crate::board::{
-    display, export_request, next_period, next_sort, number, presets, range_label, wanted_window,
+    beside, display, export_request, next_period, next_sort, node_class, number, presets,
+    range_label, value_class, wanted_window,
 };
 use crate::charts::{bar, line, palette};
 use crate::echarts::{Click, EChart};
@@ -70,11 +71,34 @@ pub fn Dashboard(slug: String) -> impl IntoView {
 
 #[component]
 fn Filter(info: FilterInfo) -> impl IntoView {
-    if info.widget == "date_range" {
-        view! { <DateRange field=info.field timed=info.timed /> }.into_any()
-    } else {
-        view! { <FilterList field=info.field /> }.into_any()
+    match info.widget.as_str() {
+        "date_range" => view! { <DateRange field=info.field timed=info.timed /> }.into_any(),
+        "tree" => view! { <FilterTree field=info.field measured=info.measure.is_some() format=info.measure_format /> }.into_any(),
+        _ => view! { <FilterList field=info.field measured=info.measure.is_some() format=info.measure_format /> }.into_any(),
     }
+}
+
+/// Ask for the window of a list or tree the scroll position needs.
+fn follow_scroll(
+    live: Live,
+    frame: Memo<Option<FilterFrame>>,
+    scroll: RwSignal<f64>,
+    window: impl Fn(usize, usize) -> Value + 'static,
+) {
+    Effect::new(move |_| {
+        let top = scroll.get();
+        let Some(frame) = frame.get() else { return };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let first = (top / ROW).floor() as usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let visible = (LIST_HEIGHT / ROW).ceil() as usize + 1;
+        let have = frame.values.len().max(frame.nodes.len());
+        if let Some((offset, limit)) =
+            wanted_window(first, visible, (frame.offset, have), frame.total)
+        {
+            live.send(&window(offset, limit));
+        }
+    });
 }
 
 const ROW: f64 = 30.0;
@@ -84,7 +108,7 @@ const LIST_HEIGHT: f64 = 300.0;
 /// excluded), searchable, only the rows on screen in the DOM, fetched from
 /// the server a window at a time.
 #[component]
-fn FilterList(field: String) -> impl IntoView {
+fn FilterList(field: String, measured: bool, format: Option<String>) -> impl IntoView {
     let live = expect_context::<Live>();
     let key = field.clone();
     // only this list's frame: others mustn't re-render (and so swallow
@@ -101,22 +125,7 @@ fn FilterList(field: String) -> impl IntoView {
         })
     };
     // ask for the rows on screen when scrolling leaves the window there is
-    Effect::new(move |_| {
-        let top = scroll.get();
-        let Some(frame) = frame.get() else { return };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let first = (top / ROW).floor() as usize;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let visible = (LIST_HEIGHT / ROW).ceil() as usize + 1;
-        if let Some((offset, limit)) = wanted_window(
-            first,
-            visible,
-            (frame.offset, frame.values.len()),
-            frame.total,
-        ) {
-            live.send(&window(offset, limit));
-        }
-    });
+    follow_scroll(live, frame, scroll, window);
     let on_search = move |event| {
         search.set(event_target_value(&event));
         scroll.set(0.0);
@@ -142,26 +151,125 @@ fn FilterList(field: String) -> impl IntoView {
                     #[allow(clippy::cast_precision_loss)]
                     let height = f.total as f64 * ROW;
                     let field = select_field.clone();
+                    let format = format.clone();
                     view! {
                         <ul style=format!("height: {height}px")>
                             {f.values.into_iter().enumerate().map(|(i, v)| {
-                                let state = match v.state {
-                                    ValueState::Selected => "selected",
-                                    ValueState::Possible => "possible",
-                                    ValueState::Excluded => "excluded",
-                                };
+                                let class = value_class(v.state, false, false);
+                                let pressed = v.state == tidepool_protocol::live::ValueState::Selected;
                                 #[allow(clippy::cast_precision_loss)]
                                 let top = (f.offset + i) as f64 * ROW;
                                 let (field, value) = (field.clone(), v.value.clone());
                                 view! {
                                     <li style=format!("top: {top}px")>
                                         <button
-                                            class=format!("value {state}")
-                                            aria-pressed=(state == "selected").to_string()
+                                            class=class
+                                            aria-pressed=pressed.to_string()
                                             on:click=move |_| live.select(&field, std::slice::from_ref(&value), true)
                                         >
                                             <span>{display(&v.value)}</span>
-                                            <span class="rows">{if v.rows > 0 { display(&json!(v.rows)) } else { String::new() }}</span>
+                                            <span class="rows">{beside(measured, v.measure.as_ref(), v.rows, format.as_deref())}</span>
+                                        </button>
+                                    </li>
+                                }
+                            }).collect_view()}
+                        </ul>
+                    }
+                })}
+            </div>
+            {move || frame.get().filter(|f| f.total == 0).map(|_| view! { <p class="quiet">"No values match."</p> })}
+        </section>
+    }
+}
+
+/// A tree filter (a hierarchy field): nodes indented by depth, opened with
+/// their twist, selected with a click (a node selects everything below
+/// it). A node inside a selected branch is washed in the selection colour;
+/// one with a selection somewhere below it carries a dot, so a selection
+/// stays findable with its branch closed.
+#[component]
+fn FilterTree(field: String, measured: bool, format: Option<String>) -> impl IntoView {
+    let live = expect_context::<Live>();
+    let key = field.clone();
+    let frame = Memo::new(move |_| live.board.with(|b| b.filters.get(&key).cloned()));
+    let search = RwSignal::new(String::new());
+    let scroll = RwSignal::new(0.0_f64);
+    let field_name = StoredValue::new(field.clone());
+    let window = move |offset: usize, limit: usize| {
+        json!({
+            "type": "filter_window", "field": field_name.get_value(),
+            "offset": offset, "limit": limit, "search": search.get_untracked(),
+        })
+    };
+    follow_scroll(live, frame, scroll, window);
+    let on_search = move |event| {
+        search.set(event_target_value(&event));
+        scroll.set(0.0);
+        live.send(&window(0, 120));
+    };
+    let title = short(&field);
+    view! {
+        <section class="filter tree">
+            <h2>{title.clone()}</h2>
+            <input type="search" placeholder="Search" aria-label=format!("Search {title}") on:input=on_search />
+            <div
+                class="values"
+                role="tree"
+                aria-label=title.clone()
+                style=move || {
+                    #[allow(clippy::cast_precision_loss)]
+                    let rows = frame.with(|f| f.as_ref().map_or(0, |f| f.total)) as f64;
+                    format!("height: {}px", (rows * ROW).min(LIST_HEIGHT))
+                }
+                on:scroll=move |ev| scroll.set(f64::from(event_target::<web_sys::Element>(&ev).scroll_top()))
+            >
+                {move || frame.get().map(|f: FilterFrame| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let height = f.total as f64 * ROW;
+                    let format = format.clone();
+                    view! {
+                        <ul style=format!("height: {height}px")>
+                            {f.nodes.into_iter().enumerate().map(|(i, node)| {
+                                #[allow(clippy::cast_precision_loss)]
+                                let top = (f.offset + i) as f64 * ROW;
+                                let class = node_class(&node);
+                                let selected = node.state == tidepool_protocol::live::ValueState::Selected;
+                                let (open, has_children) = (node.open, node.has_children);
+                                let (twist_key, select_key) = (node.key.clone(), node.key.clone());
+                                let twist = move |_| live.send(&json!({
+                                    "type": "filter_open", "field": field_name.get_value(),
+                                    "keys": [twist_key.clone()], "open": !open,
+                                }));
+                                let select = move |ev: web_sys::MouseEvent| {
+                                    live.select(
+                                        &field_name.get_value(),
+                                        std::slice::from_ref(&select_key),
+                                        ev.ctrl_key() || ev.meta_key() || selected,
+                                    );
+                                };
+                                view! {
+                                    <li
+                                        style=format!("top: {top}px; padding-left: {}px", node.depth * 14)
+                                        role="treeitem"
+                                        aria-expanded=has_children.then(|| open.to_string())
+                                        attr:aria-level=(node.depth + 1).to_string()
+                                    >
+                                        {if has_children {
+                                            view! {
+                                                <button class="twist" aria-label=if open { "Close" } else { "Open" } on:click=twist>
+                                                    {if open { "▾" } else { "▸" }}
+                                                </button>
+                                            }.into_any()
+                                        } else {
+                                            view! { <span class="twist" aria-hidden="true"></span> }.into_any()
+                                        }}
+                                        <button class=class aria-pressed=selected.to_string() on:click=select>
+                                            <span class="node-label">
+                                                {node.holds.then(|| view! { <span class="dot" aria-label="selection below"></span> })}
+                                                {display(&node.label)}
+                                                {node.kind.as_ref().map(|k| view! { <span class="kind">{display(k)}</span> })}
+                                            </span>
+                                            <span class="rows">{beside(measured, node.measure.as_ref(), node.rows, format.as_deref())}</span>
                                         </button>
                                     </li>
                                 }

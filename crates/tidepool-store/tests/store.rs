@@ -225,6 +225,93 @@ fn deletes_remove_rows_by_key_and_count_misses() {
 }
 
 #[test]
+fn a_replace_keeps_what_it_lists_and_deletes_the_rest() {
+    let mut store = Store::with_seal_rows(model(), 2);
+    write(
+        &mut store,
+        "customers",
+        Op::Write,
+        &format!(
+            "[{}, {}, {}]",
+            customer("c1", "north"),
+            customer("c2", "south"),
+            customer("c3", "east")
+        ),
+    );
+    publish(&mut store);
+    // c3 is deleted already, c2 is sealed away: a replace finds them where
+    // they are
+    write(
+        &mut store,
+        "customers",
+        Op::Delete,
+        r#"[{"customer_id": "c3"}]"#,
+    );
+    write(
+        &mut store,
+        "customers",
+        Op::Write,
+        &format!("[{}]", customer("c4", "west")),
+    );
+    publish(&mut store);
+
+    // c1 rewritten as it was, c2 moved, c4 left out, c5 new
+    let applied = write(
+        &mut store,
+        "customers",
+        Op::Replace,
+        &format!(
+            "[{}, {}, {}]",
+            customer("c1", "north"),
+            customer("c2", "islands"),
+            customer("c5", "central")
+        ),
+    );
+    // two rows replaced (c1, c2) and one deleted (c4)
+    assert_eq!((applied.written, applied.replaced), (3, 3));
+    let snapshot = publish(&mut store);
+    let mut live: Vec<(serde_json::Value, serde_json::Value)> = rows(&snapshot, "customers", 10)
+        .into_iter()
+        .map(|r| (r[0].clone(), r[2].clone()))
+        .collect();
+    live.sort_by_key(|(id, _)| id.to_string());
+    assert_eq!(
+        live,
+        [
+            (serde_json::json!("c1"), serde_json::json!("north")),
+            (serde_json::json!("c2"), serde_json::json!("islands")),
+            (serde_json::json!("c5"), serde_json::json!("central")),
+        ]
+    );
+    let customers = table(&snapshot.model, "customers");
+    assert_eq!(snapshot.table(customers).map(|t| t.live_rows), Some(3));
+
+    // the same contents again change nothing a query sees
+    write(
+        &mut store,
+        "customers",
+        Op::Replace,
+        &format!(
+            "[{}, {}, {}]",
+            customer("c1", "north"),
+            customer("c2", "islands"),
+            customer("c5", "central")
+        ),
+    );
+    let again = publish(&mut store);
+    assert_eq!(
+        again.table(customers).map(|t| t.changed.clone()),
+        Some(vec![])
+    );
+
+    // and an empty one empties the table
+    let applied = write(&mut store, "customers", Op::Replace, "[]");
+    assert_eq!((applied.written, applied.replaced), (0, 3));
+    let empty = publish(&mut store);
+    assert_eq!(empty.table(customers).map(|t| t.live_rows), Some(0));
+}
+
+#[test]
 fn sealing_keeps_every_row_and_value() {
     let mut store = Store::with_seal_rows(model(), 10);
     for batch in 0..3 {

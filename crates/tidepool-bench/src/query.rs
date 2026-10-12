@@ -146,10 +146,12 @@ pub fn measure_epochs(store: &mut Store, snapshot: Snapshot, epochs: usize, rows
                 Dim {
                     field: field(&model, "customers", "region"),
                     grain: None,
+                    level: None,
                 },
                 Dim {
                     field: field(&model, "products", "category"),
                     grain: None,
+                    level: None,
                 },
             ],
             metrics: metrics.iter().map(|m| metric(m)).collect(),
@@ -245,10 +247,12 @@ fn measure_metrics(snapshot: &Snapshot, metrics: &[&str], by: &str, runs: usize)
             Dim {
                 field: field(model, "customers", by),
                 grain: None,
+                level: None,
             },
             Dim {
                 field: field(model, "products", "category"),
                 grain: None,
+                level: None,
             },
         ],
         metrics: metrics.iter().map(|m| metric(m)).collect(),

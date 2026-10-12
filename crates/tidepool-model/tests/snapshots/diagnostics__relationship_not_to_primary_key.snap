@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: relationship `order_customer`: to_columns must be the primary key of `customers`
-  --> model.ossie.yaml:39:17
+  --> model.ossie.yaml:45:17
    |
-39 |     to_columns: [region]
+45 |     to_columns: [region]
    |                 ^
    = help: `customers` is keyed by (customer_id)
 

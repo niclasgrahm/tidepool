@@ -7,10 +7,10 @@ use std::sync::atomic::Ordering;
 use axum::Json;
 use axum::extract::State;
 use tidepool_config::server::Durability;
-use tidepool_model::ir::{FieldSource, IgnoreSelection, MetricBody, Model};
+use tidepool_model::ir::{FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId};
 use tidepool_protocol::{
-    DatasetInfo, DurabilityStatus, FieldInfo, MetricInfo, ModelInfo, RelationshipInfo, StatusInfo,
-    TableStatus,
+    DatasetInfo, DurabilityStatus, FieldInfo, HierarchyInfo, MetricInfo, ModelInfo,
+    RelationshipInfo, StatusInfo, TableStatus,
 };
 
 use crate::AppState;
@@ -30,6 +30,21 @@ fn table_name(model: &Model, table: tidepool_model::ir::TableId) -> String {
     model
         .table(table)
         .map_or_else(|| "?".into(), |t| t.name.clone())
+}
+
+fn hierarchy(model: &Model, table: TableId, h: &Hierarchy) -> HierarchyInfo {
+    let name = |id| {
+        model
+            .table(table)
+            .and_then(|t| t.column(id))
+            .map_or_else(|| "?".into(), |c| c.name.clone())
+    };
+    HierarchyInfo {
+        key: name(h.key),
+        parent: name(h.parent),
+        label: h.label.map(name),
+        kind: h.kind.map(name),
+    }
 }
 
 pub(crate) fn info(model: &Model) -> ModelInfo {
@@ -59,10 +74,11 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                         ty: type_name(f.ty),
                         expression: match &f.source {
                             FieldSource::Derived { expression, .. } => Some(expression.clone()),
-                            FieldSource::Column(_) => None,
+                            FieldSource::Column(_) | FieldSource::Hierarchy(_) => None,
                         },
                         is_time: f.is_time,
                         description: f.description.clone(),
+                        hierarchy: f.hierarchy().map(|h| hierarchy(model, d.table, h)),
                     })
                     .collect(),
             })

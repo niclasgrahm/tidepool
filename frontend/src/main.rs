@@ -22,7 +22,7 @@ use tidepool_protocol::ServerInfo;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
-use crate::board::{ago, display, selected_label};
+use crate::board::{ago, chip_label, display};
 use crate::live::{Live, now};
 use crate::route::{ConfigTab, Route, Tab};
 
@@ -157,7 +157,7 @@ fn Selection() -> impl IntoView {
             .get()
             .into_iter()
             .map(|s| {
-                let what = selected_label(&s);
+                let what = live.board.with(|b| chip_label(&s, b.filters.get(&s.field)));
                 let field = s.field.clone();
                 let short = s
                     .field

@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: filter `customers.region`: metric `product_count` counts rows of `products`, which can't be grouped by `customers.region`
+ --> dashboards/sales.yaml:5:14
+  |
+5 |     measure: product_count                     # shown beside each region instead of its row count
+  |              ^^^^^^^^^^^^^
+  = help: no relationship path leads from `products` to `customers`
+
+1 error, 0 warnings

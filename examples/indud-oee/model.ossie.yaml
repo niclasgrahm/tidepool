@@ -1,0 +1,82 @@
+version: "0.2.0"
+name: oee
+datasets:
+  - name: namespace
+    source: namespace
+    primary_key: [id]
+    custom_extensions:
+      - vendor_name: TIDEPOOL                # the plant as a tree: org nodes, devices, sensors
+        data: '{"hierarchy": {"name": "asset", "parent": "parent_id", "label": "label", "kind": "kind"}}'
+  - name: devices
+    source: devices
+    primary_key: [device_id]
+  - name: minutes
+    source: minutes
+    fields:
+      - name: at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+
+relationships:
+  - name: device_node                      # a device is a node of the namespace
+    from: devices
+    to: namespace
+    from_columns: [device_id]
+    to_columns: [id]
+  - name: minute_device
+    from: minutes
+    to: devices
+    from_columns: [device_id]
+    to_columns: [device_id]
+
+# OEE = availability × performance × quality, each a ratio of sums, so it is
+# right at every level of the tree: a line's OEE is over its machines' time
+# and units, not an average of their OEEs.
+metrics:
+  - name: planned_minutes                  # every minute counted is a planned one
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "minutes"}'
+  - name: run_minutes
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE minutes.state = 'running')" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "minutes"}'
+  - name: downtime_minutes
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE minutes.state <> 'running')" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "minutes"}'
+  - name: good
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(minutes.good)" }] }
+  - name: produced
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(minutes.good + minutes.reject)" }] }
+  - name: ideal_minutes                    # what the units made should have taken
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM((minutes.good + minutes.reject) * devices.ideal_cycle_s) / 60" }] }
+  - name: availability
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "run_minutes / planned_minutes" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent"}'
+  - name: performance
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "ideal_minutes / run_minutes" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent"}'
+  - name: quality
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "good / produced" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent"}'
+  - name: oee
+    description: Availability × performance × quality
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "availability * performance * quality" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent"}'
+
+custom_extensions:
+  - vendor_name: TIDEPOOL                  # a stop reason narrows the tree to where it happened
+    data: '{"filter_direction": "both"}'

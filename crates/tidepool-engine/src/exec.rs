@@ -71,6 +71,8 @@ impl KeyIndex {
 struct Reader<'a> {
     snapshot: &'a Snapshot,
     indexes: HashMap<TableId, KeyIndex>,
+    /// The trees of hierarchies read at a level.
+    trees: HashMap<TableId, Arc<crate::hierarchy::Hierarchy>>,
 }
 
 /// One stored value as an expression value.
@@ -134,7 +136,7 @@ fn shifted(shift: tidepool_expr::temporal::Shift, value: Scalar) -> Scalar {
 /// field is evaluated over those NULLs (`COALESCE(name, 'n/a')` is 'n/a').
 fn missing(access: &Access) -> Scalar {
     match &access.target {
-        Target::Column(_) => Scalar::Null,
+        Target::Column(_) | Target::Ancestor { .. } => Scalar::Null,
         Target::Derived(expr) => eval(expr, &Vec::new()),
     }
 }
@@ -183,6 +185,18 @@ impl Reader<'_> {
                 &table.layouts[*index],
                 segment.data.columns[*index].get(row.offset as usize),
             )),
+            Target::Ancestor { column, depth } => {
+                let Raw::Code(code) = segment.data.columns[*column].get(row.offset as usize) else {
+                    return Scalar::Null;
+                };
+                self.trees
+                    .get(&access.field.table)
+                    .and_then(|tree| {
+                        let node = tree.ancestor(tree.of_code(code)?, *depth)?;
+                        Some(tree.nodes()[node].key.clone())
+                    })
+                    .unwrap_or(Scalar::Null)
+            }
             Target::Derived(expr) => eval(
                 expr,
                 &TableRow {
@@ -543,7 +557,22 @@ pub(crate) fn execute(
             }
         }
     }
-    let reader = Reader { snapshot, indexes };
+    let trees = plan
+        .anchors
+        .iter()
+        .flat_map(|a| &a.accesses)
+        .filter(|a| matches!(a.target, Target::Ancestor { .. }))
+        .filter_map(|a| {
+            let columns = crate::hierarchy::columns(model, &a.field)?;
+            let tree = crate::hierarchy::get(snapshot, caches, a.field.table, &columns).ok()?;
+            Some((a.field.table, tree))
+        })
+        .collect();
+    let reader = Reader {
+        snapshot,
+        indexes,
+        trees,
+    };
 
     let mut rows: HashMap<Vec<Key>, (Vec<Scalar>, Vec<Scalar>)> = HashMap::new();
     let width = plan.metrics.len();

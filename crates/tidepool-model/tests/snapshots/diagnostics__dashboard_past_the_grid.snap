@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `top_products` ends at column 13, past the grid's 12
-  --> dashboards/sales.yaml:33:9
+  --> dashboards/sales.yaml:35:9
    |
-33 |     at: { x: 9, y: 0, w: 4, h: 4 }
+35 |     at: { x: 9, y: 0, w: 4, h: 4 }
    |         ^
 
 1 error, 0 warnings

@@ -259,6 +259,15 @@ fn a_removed_column_and_table_are_gone() {
     to_columns: [product_id]
 ",
                     "",
+                )
+                .replace(
+                    "  - name: product_category
+    from: products
+    to: categories
+    from_columns: [category]
+    to_columns: [category]
+",
+                    "",
                 );
         }
     }
@@ -266,7 +275,7 @@ fn a_removed_column_and_table_are_gone() {
     store.change_model(v2);
     let snapshot = publish(&mut store);
     assert!(snapshot.model.table_named("products").is_none());
-    assert_eq!(snapshot.tables.len(), 2);
+    assert_eq!(snapshot.tables.len(), 3);
     let got = rows(&snapshot, "orders");
     assert_eq!(got.len(), 17);
     assert!(got.iter().all(|r| !r.contains("note=")));
@@ -624,4 +633,56 @@ fn the_writer_rebuilds_in_the_background_and_takes_the_new_epoch_interval() {
         tokio::time::timeout(Duration::from_secs(2), writer.visible(receipt.epoch)).await
     });
     assert!(soon.is_ok(), "visible again once the interval is back");
+}
+
+/// The retail model without its category tree: the parent column held
+/// apart from the key's dictionary.
+const NO_TREE: (&str, &str, &str) = (
+    "model.ossie.yaml",
+    "    custom_extensions:
+      - vendor_name: TIDEPOOL                # a parent–child hierarchy (plan §5.6): a tree
+        data: '{\"hierarchy\": {\"name\": \"tree\", \"parent\": \"parent\", \"kind\": \"level\"}}'
+",
+    "",
+);
+
+#[test]
+fn a_hierarchy_over_a_populated_table_puts_its_parents_in_the_key_dictionary() {
+    let v1 = version(None, files(&[NO_TREE]));
+    let mut store = Store::with_version(v1.clone(), 8);
+    let tree = r#"[{"category":"outdoor","parent":null,"level":"department"},
+        {"category":"camping","parent":"outdoor","level":"aisle"},
+        {"category":"tents","parent":"camping","level":"category"},
+        {"category":"lost","parent":"nowhere","level":"category"}]"#;
+    write(&mut store, "categories", tree);
+    let before = publish(&mut store);
+    let expected = rows(&before, "categories");
+    let dict = |snapshot: &Snapshot, column: &str| {
+        snapshot
+            .table(table(&snapshot.model, "categories"))
+            .and_then(|t| t.layouts.iter().find(|l| l.name == column))
+            .and_then(|l| l.dict)
+    };
+    assert_ne!(dict(&before, "parent"), dict(&before, "category"));
+
+    let v2 = version(Some(&v1), files(&[]));
+    let migration = store.plan_migration(v2);
+    assert!(migration.rows() > 0, "the parents are re-encoded");
+    store.migrate(migration, Rebuilt::default());
+    write(
+        &mut store,
+        "categories",
+        r#"[{"category":"stoves","parent":"camping","level":"category"}]"#,
+    );
+    let after = publish(&mut store);
+    assert!(dict(&after, "parent").is_some());
+    assert_eq!(
+        dict(&after, "parent"),
+        dict(&after, "category"),
+        "one dictionary"
+    );
+    let mut expected = expected;
+    expected.push(r#"category="stoves" parent="camping" level="category""#.to_string());
+    expected.sort();
+    assert_eq!(rows(&after, "categories"), expected);
 }

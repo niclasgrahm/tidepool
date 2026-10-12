@@ -205,7 +205,7 @@ impl<'a> Associations<'a> {
 
 /// `field` must also be in `set`: added to `selection`, or combined with
 /// what it holds for `field` already (both must hold).
-fn add(selection: &mut Selection, field: FieldRef, set: &Arc<ValueSet>) {
+pub(crate) fn add(selection: &mut Selection, field: FieldRef, set: &Arc<ValueSet>) {
     let combined = match selection.0.get(&field) {
         None => Condition::Set(Arc::clone(set)),
         Some(Condition::Set(other)) => Condition::Set(Arc::new(ValueSet::new(

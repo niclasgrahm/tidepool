@@ -365,3 +365,65 @@ async fn relative_filters_that_cant_be_windows_are_400s() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_hierarchy_groups_by_a_level_and_filters_by_subtree() {
+    // boats sit under water, under outdoor
+    let state = loaded().await;
+    let reply = post(
+        &state,
+        "/v1/tables/categories/rows?wait=visible",
+        &json!([
+            {"category": "outdoor", "parent": null, "level": "department"},
+            {"category": "water", "parent": "outdoor", "level": "aisle"},
+            {"category": "boats", "parent": "water", "level": "category"},
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    for (level, node) in [(0, "outdoor"), (1, "water"), (2, "boats")] {
+        let reply = post(
+            &state,
+            "/v1/query",
+            &json!({"metrics": ["revenue"],
+                    "dimensions": [{"field": "categories.tree", "level": level}]}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        assert_eq!(
+            reply.json()["rows"],
+            json!([[node, "21.75"]]),
+            "level {level}"
+        );
+    }
+    // a level past the deepest node: everything groups as null
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["revenue"], "dimensions": [{"field": "categories.tree", "level": 3}]}),
+    )
+    .await;
+    assert_eq!(reply.json()["rows"], json!([[null, "21.75"]]));
+    // selecting a node filters by its subtree
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["revenue"],
+                "filters": [{"field": "categories.tree", "in": ["water"]}]}),
+    )
+    .await;
+    assert_eq!(reply.json()["rows"], json!([["21.75"]]), "{}", reply.text());
+    // a level on a field that isn't a hierarchy
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["revenue"], "dimensions": [{"field": "customers.region", "level": 1}]}),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text());
+    assert!(
+        reply.text().contains("isn't a hierarchy"),
+        "{}",
+        reply.text()
+    );
+}

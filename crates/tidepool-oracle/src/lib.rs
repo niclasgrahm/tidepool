@@ -86,7 +86,7 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
     let dimensions = query
         .dims
         .iter()
-        .map(|(table, name, grain)| {
+        .map(|(table, name, grain, level)| {
             Ok(Dim {
                 field: field(table, name)?,
                 grain: grain.map(|g| match g {
@@ -96,16 +96,13 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
                     "quarter" => tidepool_config::ossie::TimeGrain::Quarter,
                     _ => tidepool_config::ossie::TimeGrain::Year,
                 }),
+                level: *level,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut selection = Selection::default();
     for (table, column, cond) in &query.selection {
-        let source = schema
-            .table(table)
-            .and_then(|t| t.column(column))
-            .map(|c| c.values.clone())
-            .ok_or("unknown column")?;
+        let source = schema.values_of(table, column).ok_or("unknown column")?;
         let condition = match cond {
             Cond::In(values) => Condition::In(values.iter().map(|v| scalar(v, &source)).collect()),
             Cond::Range(from, to) => Condition::Range {
@@ -226,7 +223,7 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
             .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
         // the filter list of the query's first plain dimension, under its
         // selection
-        if let Some((table, name, None)) = query.dims.first() {
+        if let Some((table, name, None, None)) = query.dims.first() {
             let sql = duck::values_sql(&schema, table, name, &query);
             let theirs = duck::run(&db, &sql, 2)
                 .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
@@ -403,7 +400,12 @@ fn before(schema: &Schema, rng: &mut Rng) -> Vec<(String, String)> {
             out.push_str("  scratch: { type: string, nullable: true }\n");
             files.push((path, out));
         } else if path == "model.ossie.yaml" {
-            let datasets = text.split("relationships:").next().unwrap_or_default();
+            // no hierarchy either: its parent may be `plain` now
+            let datasets = text
+                .split("relationships:")
+                .next()
+                .unwrap_or_default()
+                .replace(generate::TREE_EXTENSION, "");
             files.push((path, format!("{datasets}relationships: []\nmetrics: []\n")));
         } else {
             files.push((path, text));

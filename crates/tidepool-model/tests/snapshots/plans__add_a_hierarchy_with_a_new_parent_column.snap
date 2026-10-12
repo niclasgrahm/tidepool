@@ -1,0 +1,8 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_between(&\n[Replace(\"model.ossie.yaml\", TREE_EXTENSION, \"    primary_key: [category]\\n\"),\nReplace(\"dashboards/sales.yaml\", TREE_FILTER, \"\"),\nReplace(\"tables/categories.yaml\",\n\"  parent:   { type: string, nullable: true }   # the parent category; NULL at the top\\n\",\n\"\")], &\n[Replace(\"tables/categories.yaml\", \"  level:\",\n\"  parent:   { type: string, nullable: true }\\n  level:\"),\nReplace(\"model.ossie.yaml\", \"    primary_key: [category]\\n\", TREE_EXTENSION)])"
+---
+2 changes (2 safe, 0 rebuild, 0 destructive)
+
+  + column       categories.parent  string  safe
+  + hierarchy    categories.tree            safe

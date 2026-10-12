@@ -56,8 +56,8 @@ impl Op {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Change {
     pub op: Op,
-    /// `table`, `column`, `relationship`, `dataset`, `field`, `metric`,
-    /// `dashboard` or `setting`.
+    /// `table`, `column`, `relationship`, `dataset`, `field`, `hierarchy`,
+    /// `metric`, `dashboard` or `setting`.
     pub kind: &'static str,
     /// What changed, e.g. `orders.quantity`.
     pub subject: String,
@@ -489,6 +489,10 @@ fn datasets(plan: &mut Plan, old: &Model, new: &Model) {
         let (was, now) = (declared(before), declared(dataset));
         for (name, field) in &now {
             let subject = format!("{}.{name}", dataset.name);
+            if let Some(h) = field.hierarchy() {
+                hierarchy(plan, old, dataset.table, subject, h, was.get(name));
+                continue;
+            }
             match was.get(name) {
                 None if matches!(field.source, crate::ir::FieldSource::Derived { .. }) => {
                     plan.push(Op::Add, "field", subject, ChangeClass::Safe);
@@ -501,11 +505,19 @@ fn datasets(plan: &mut Plan, old: &Model, new: &Model) {
         }
         for (name, field) in &was {
             if !now.contains_key(name)
-                && matches!(field.source, crate::ir::FieldSource::Derived { .. })
+                && matches!(
+                    field.source,
+                    crate::ir::FieldSource::Derived { .. } | crate::ir::FieldSource::Hierarchy(_)
+                )
             {
+                let kind = if field.hierarchy().is_some() {
+                    "hierarchy"
+                } else {
+                    "field"
+                };
                 plan.push(
                     Op::Remove,
-                    "field",
+                    kind,
                     format!("{}.{name}", dataset.name),
                     ChangeClass::Safe,
                 );
@@ -516,6 +528,38 @@ fn datasets(plan: &mut Plan, old: &Model, new: &Model) {
         if new.dataset(dataset.table).is_none() {
             plan.push(Op::Remove, "dataset", &dataset.name, ChangeClass::Safe);
         }
+    }
+}
+
+/// A hierarchy field, added or changed. Like a relationship, a parent column
+/// that held data apart from the key's dictionary must be re-encoded into
+/// it.
+fn hierarchy(
+    plan: &mut Plan,
+    old: &Model,
+    table: TableId,
+    subject: String,
+    now: &crate::ir::Hierarchy,
+    before: Option<&crate::ir::Field>,
+) {
+    let was = before.and_then(crate::ir::Field::hierarchy);
+    if was == Some(now) {
+        return;
+    }
+    let op = if was.is_some() { Op::Change } else { Op::Add };
+    let parent_existed = old
+        .table(table)
+        .and_then(|t| t.column(now.parent))
+        .is_some();
+    let key_existed = old.table(table).and_then(|t| t.column(now.key)).is_some();
+    if parent_existed
+        && key_existed
+        && !domain_of(old, table, now.key).contains(&(table, now.parent))
+    {
+        plan.push(op, "hierarchy", subject, ChangeClass::Rebuild)
+            .note("the parent column joins the key's dictionary: existing parents are re-encoded");
+    } else {
+        plan.push(op, "hierarchy", subject, ChangeClass::Safe);
     }
 }
 

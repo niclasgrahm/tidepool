@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: relationship `order_customer` points to unknown dataset `customer`
-  --> model.ossie.yaml:37:9
+  --> model.ossie.yaml:43:9
    |
-37 |     to: customer
+43 |     to: customer
    |         ^^^^^^^^
    = help: did you mean `customers`?
 

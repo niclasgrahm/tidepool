@@ -64,6 +64,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::GetSchema => route_of(method, handlers::schema),
         Operation::IngestRows => route_of(method, tables::ingest_rows),
         Operation::DeleteRows => route_of(method, tables::delete_rows),
+        Operation::ReplaceRows => route_of(method, tables::replace_rows),
         Operation::ListTables => route_of(method, tables::list_tables),
         Operation::GetTable => route_of(method, tables::get_table),
         Operation::PreviewTable => route_of(method, tables::preview_table),

@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `avg_order_value` refers to `order_cnt`, which is not a metric
-  --> model.ossie.yaml:60:63
+  --> model.ossie.yaml:71:63
    |
-60 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_cnt" }] }
+71 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_cnt" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^
    = help: did you mean `order_count`?
 

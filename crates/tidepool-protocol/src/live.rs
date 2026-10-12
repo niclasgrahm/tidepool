@@ -69,6 +69,14 @@ pub enum ClientMessage {
         #[serde(default)]
         search: Option<String>,
     },
+    /// Open or close nodes of a tree filter (a hierarchy field), by key:
+    /// an open node's children are listed.
+    FilterOpen {
+        field: String,
+        keys: Vec<Value>,
+        #[serde(default = "yes")]
+        open: bool,
+    },
     /// Sort a visual by one of its result columns, for this session.
     Sort {
         visual: String,
@@ -83,6 +91,10 @@ pub enum ClientMessage {
 
 fn default_window() -> usize {
     100
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// How [`ClientMessage::Select`] combines with what's selected.
@@ -229,7 +241,7 @@ pub struct DashboardInfo {
 pub struct FilterInfo {
     /// `dataset.field`.
     pub field: String,
-    /// `list` or `date_range`.
+    /// `list`, `tree` or `date_range`.
     pub widget: String,
     /// Whether the field has a time of day, so windows of hours and
     /// minutes apply to it (a date has none).
@@ -238,6 +250,12 @@ pub struct FilterInfo {
     /// The window a `date_range` starts with when the dashboard is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<RelativeWindow>,
+    /// The metric shown beside each value instead of its rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<String>,
+    /// Its display hint: `int`, `decimal`, `percent` or `currency:XXX`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure_format: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -296,14 +314,21 @@ pub struct VisualFrame {
     pub compare: Option<Value>,
 }
 
-/// A filter list's window: Qlik's states, per value.
+/// A filter list's window: Qlik's states, per value. A tree filter's
+/// window is of `nodes` instead: the visible ones, depth first.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FilterFrame {
     pub field: String,
-    /// Values there are (matching the search, if any).
+    /// Values there are (matching the search, if any), or visible nodes.
     pub total: usize,
     pub offset: usize,
     pub values: Vec<FilterValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<TreeNode>,
+    /// A tree's selected nodes, with their paths: for the selection's
+    /// chips, whether or not the nodes are in the window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<ChosenNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -312,6 +337,45 @@ pub struct FilterValue {
     pub state: ValueState,
     /// Rows with this value under the selection (0 when excluded).
     pub rows: i64,
+    /// The filter's measure for this value, under the rest of the
+    /// selection (null when excluded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<Value>,
+}
+
+/// One visible node of a tree filter (plan §5.6).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[allow(clippy::struct_excessive_bools)] // independent facts a client reads as such
+pub struct TreeNode {
+    /// What selecting it sends.
+    pub key: Value,
+    pub label: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Value>,
+    /// 0 for a root.
+    pub depth: u32,
+    pub has_children: bool,
+    /// Its children are listed (after it).
+    pub open: bool,
+    /// Selected, or possible when it or anything below it passes every
+    /// other field's selection.
+    pub state: ValueState,
+    /// A node above it is selected, so it is too.
+    pub inside: bool,
+    /// Something below it is selected.
+    pub holds: bool,
+    /// Nodes in its subtree that pass every other field's selection.
+    pub rows: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<Value>,
+}
+
+/// A selected node of a tree filter, and the labels from its root down to
+/// it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChosenNode {
+    pub key: Value,
+    pub path: Vec<Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

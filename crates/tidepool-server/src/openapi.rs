@@ -89,7 +89,11 @@ fn paths(model: &Model) -> Value {
             continue;
         }
         for table in &model.tables {
-            if endpoint.operation == Operation::DeleteRows && table.mode != TableMode::Upsert {
+            let keyed = matches!(
+                endpoint.operation,
+                Operation::DeleteRows | Operation::ReplaceRows
+            );
+            if keyed && table.mode != TableMode::Upsert {
                 continue;
             }
             insert(

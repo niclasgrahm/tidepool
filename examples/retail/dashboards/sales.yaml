@@ -2,6 +2,8 @@ name: Sales overview
 layout: { columns: 12, row_height: 80 }
 filters:
   - field: customers.region
+    measure: revenue                     # shown beside each region instead of its row count
+  - field: categories.tree               # a hierarchy: shown as a tree
   - field: products.category
   - field: orders.ordered_at
     widget: date_range

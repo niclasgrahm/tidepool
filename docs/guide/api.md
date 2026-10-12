@@ -14,7 +14,13 @@ Endpoints that need a token say which in the document (`x-tidepool-access`:
 ```
 POST   /v1/tables/{table}/rows        insert (upsert tables: replace by key)
 DELETE /v1/tables/{table}/rows        delete by key (upsert tables)
+PUT    /v1/tables/{table}/rows        the table's whole contents (upsert tables)
 ```
+
+`PUT` is for a dimension kept in step with a system that can only be read
+whole (an asset tree, a product catalogue): send all of it every time, and
+rows whose keys aren't in it are deleted, in the same step that writes the
+rest. `replaced` counts the rows replaced and the rows deleted.
 
 The body is a JSON array of row objects (`application/json`),
 newline-delimited JSON (`application/x-ndjson`) or an Arrow IPC stream
@@ -62,6 +68,12 @@ engine dashboards use, without a subscription.
 }
 ```
 
+A dimension on a hierarchy field can take a `level`: `{"field":
+"namespace.asset", "level": 1}` groups by each node's ancestor one below the
+roots (the roots are level 0), and nodes that aren't that deep group as
+null. A filter on a hierarchy field selects the listed nodes and everything
+below them.
+
 Names are the model's (`dataset.field`, metric names); a wrong one comes back
 as a `400` with a suggestion. A filter on a date or time field can also be a
 window relative to the server's clock, the way a dashboard's period is:
@@ -88,7 +100,10 @@ whatever changed on it. `select`, `select_range`, `select_relative`
 comes back in `selection` with where it is now (`from`, `to`), and again
 whenever the clock moves it into a new period; `pause` and
 `resume` stop and restart frames; `filter_window` pages through a filter
-list; `sort` re-sorts a table visual. When the model changes, the session
+list (or a tree's visible nodes, or searches it); `filter_open`
+(`{"field": …, "keys": [...], "open": true}`) opens or closes nodes of a
+tree filter, whose frames carry `nodes` instead of `values`; `sort`
+re-sorts a table visual. When the model changes, the session
 gets `model` again.
 
 ## The config API

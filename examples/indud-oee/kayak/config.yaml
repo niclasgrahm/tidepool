@@ -1,0 +1,14 @@
+# Kayak: Indu's namespace into Tidepool's `namespace` table, whole, every
+# minute. A node moved, renamed or deleted in Indu is the same in Tidepool
+# at the next read (`write: replace`: each batch is the whole tree).
+- id: namespace_to_tidepool
+  inputs:
+  - type: indu_namespace
+    connection: indu
+    interval_secs: 60
+    kinds: [org, device]
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: namespace
+    write: replace

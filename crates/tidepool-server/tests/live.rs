@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
-use common::{ready_state, request, retail_with, send, state};
+use common::{ready_state, request, retail, retail_with, send, state};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tidepool_server::AppState;
@@ -175,12 +175,13 @@ async fn a_dashboard_opens_follows_selections_and_goes_back() {
         Some(filter) => filter["values"].clone(),
         None => panic!("no region filter in {frame}"),
     };
-    // its own selection doesn't narrow a field's alternatives
+    // its own selection doesn't narrow a field's alternatives, nor their
+    // measures (the region filter shows revenue)
     assert_eq!(
         regions,
         json!([
-            {"value": "north", "state": "selected", "rows": 1},
-            {"value": "south", "state": "possible", "rows": 1},
+            {"value": "north", "state": "selected", "rows": 1, "measure": "10.00"},
+            {"value": "south", "state": "possible", "rows": 1, "measure": "5.00"},
         ])
     );
 
@@ -220,8 +221,16 @@ async fn new_data_arrives_as_a_frame() {
     );
     // only what changed: filter lists count rows of their own tables
     // (customers per region, products per category), and an order changes
-    // neither, so none is resent
-    assert_eq!(frame["filters"], json!([]), "{frame}");
+    // neither; but the region list shows revenue per region, which it does
+    // change, so that one alone is resent
+    assert_eq!(
+        frame["filters"],
+        json!([{"field": "customers.region", "offset": 0, "total": 2, "values": [
+            {"value": "north", "state": "possible", "rows": 1, "measure": "10.00"},
+            {"value": "south", "state": "possible", "rows": 1, "measure": "12.50"},
+        ]}]),
+        "{frame}"
+    );
 }
 
 #[tokio::test]
@@ -430,16 +439,22 @@ async fn selections_flow_from_orders_to_customers_when_the_model_says_both() {
     assert_eq!(
         regions,
         Some(json!([
-            {"value": "north", "state": "possible", "rows": 1},
-            {"value": "south", "state": "excluded", "rows": 0},
+            {"value": "north", "state": "possible", "rows": 1, "measure": "3.00"},
+            {"value": "south", "state": "excluded", "rows": 0, "measure": null},
         ]))
     );
     assert_eq!(by_region, json!([["north", "3.00"]]));
 
-    // one way only, every customer stays possible: the list doesn't change,
-    // so the frame leaves it out
+    // one way only, every customer stays possible, though their revenue
+    // (the list's measure) is of paddles now: none for the south
     let (regions, by_region) = regions_after_selecting_paddles("one_to_many").await;
-    assert_eq!(regions, None);
+    assert_eq!(
+        regions,
+        Some(json!([
+            {"value": "north", "state": "possible", "rows": 1, "measure": "3.00"},
+            {"value": "south", "state": "possible", "rows": 1, "measure": null},
+        ]))
+    );
     assert_eq!(by_region, json!([["north", "3.00"]]));
 }
 
@@ -567,5 +582,312 @@ async fn a_dashboard_opens_on_its_default_window_the_first_time_only() {
     assert_eq!(
         selection["fields"],
         json!([{"field": "customers.region", "values": ["north"]}])
+    );
+}
+
+// --- tree filters (plan §5.6) ------------------------------------------------------
+
+/// The retail server (`model`) with a category tree and two products in
+/// it, and a tent order beside the kayak ones:
+///
+/// ```text
+/// navigation ─ maps
+/// outdoor ─┬─ camping ─ tents (p2: o3, 7.00)
+///          └─ water ─┬─ kayaks (p1: o1, o2, 15.00)
+///                    └─ paddles
+/// ```
+async fn categories(model: Arc<tidepool_model::ir::Model>) -> (Arc<AppState>, Socket) {
+    let (state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    let node = |category: &str, parent: Option<&str>, level: &str| json!({"category": category, "parent": parent, "level": level});
+    post(
+        &state,
+        "/v1/tables/categories/rows?wait=visible",
+        &json!([
+            node("outdoor", None, "department"),
+            node("water", Some("outdoor"), "aisle"),
+            node("camping", Some("outdoor"), "aisle"),
+            node("kayaks", Some("water"), "category"),
+            node("paddles", Some("water"), "category"),
+            node("tents", Some("camping"), "category"),
+            node("navigation", None, "department"),
+            node("maps", Some("navigation"), "category"),
+        ]),
+    )
+    .await;
+    post(
+        &state,
+        "/v1/tables/products/rows?wait=visible",
+        &json!([
+            {"product_id": "p1", "name": "Kayak", "category": "kayaks", "list_price": "900.00"},
+            {"product_id": "p2", "name": "Tent", "category": "tents", "list_price": "300.00"},
+        ]),
+    )
+    .await;
+    let mut tent = order("o3", "c2", "paid", "7.00");
+    tent["product_id"] = json!("p2");
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([tent]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    (state, socket)
+}
+
+/// The tree filter in a frame: (key, depth, state, flags) per visible
+/// node, flags being `o`pen, `i`nside a selection, `h`olds one.
+fn tree(frame: &Value) -> Vec<String> {
+    let Some(filter) = frame["filters"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["field"] == "categories.tree"))
+    else {
+        panic!("no tree in {frame}");
+    };
+    filter["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|n| {
+            let flag = |name: &str, c: char| if n[name] == true { c } else { '.' };
+            format!(
+                "{}{} {} {}{}{} {}",
+                "  ".repeat(usize::try_from(n["depth"].as_u64().unwrap_or(0)).unwrap_or(0)),
+                n["key"].as_str().unwrap_or("?"),
+                n["state"].as_str().unwrap_or("?"),
+                flag("open", 'o'),
+                flag("inside", 'i'),
+                flag("holds", 'h'),
+                n["rows"],
+            )
+        })
+        .collect()
+}
+
+/// The next frame that has the tree in it.
+async fn next_tree(socket: &mut Socket) -> Value {
+    loop {
+        let frame = next(socket, "frame").await;
+        if frame["filters"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["field"] == "categories.tree"))
+        {
+            return frame;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tree_filter_opens_selects_subtrees_and_follows_moves() {
+    let (state, mut socket) = categories(retail()).await;
+    let frame = next_tree(&mut socket).await;
+    // roots only, by label; rows count the nodes below that pass
+    assert_eq!(
+        tree(&frame),
+        ["navigation possible ... 2", "outdoor possible ... 6"]
+    );
+
+    say(
+        &mut socket,
+        json!({"type": "filter_open", "field": "categories.tree", "keys": ["outdoor", "water"]}),
+    )
+    .await;
+    let frame = next_tree(&mut socket).await;
+    assert_eq!(
+        tree(&frame),
+        [
+            "navigation possible ... 2",
+            "outdoor possible o.. 6",
+            "  camping possible ... 2",
+            "  water possible o.. 3",
+            "    kayaks possible ... 1",
+            "    paddles possible ... 1",
+        ]
+    );
+
+    // selecting a node selects everything below it
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "categories.tree", "values": ["water"]}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(
+        selection["fields"],
+        json!([{"field": "categories.tree", "values": ["water"]}])
+    );
+    let frame = next_tree(&mut socket).await;
+    assert_eq!(
+        rows(&frame, "by_region"),
+        json!([["north", "10.00"], ["south", "5.00"]])
+    );
+    assert_eq!(
+        tree(&frame),
+        [
+            "navigation possible ... 2",
+            "outdoor possible o.h 6",
+            "  camping possible ... 2",
+            "  water selected o.. 3",
+            "    kayaks possible .i. 1",
+            "    paddles possible .i. 1",
+        ]
+    );
+    let chosen = frame["filters"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["field"] == "categories.tree"))
+        .map(|f| f["chosen"].clone());
+    assert_eq!(
+        chosen,
+        Some(json!([{"key": "water", "path": ["outdoor", "water"]}]))
+    );
+
+    // kayaks move to camping: the same selection, a new answer
+    post(
+        &state,
+        "/v1/tables/categories/rows",
+        &json!([{"category": "kayaks", "parent": "camping", "level": "category"}]),
+    )
+    .await;
+    let frame = next_tree(&mut socket).await;
+    assert_eq!(rows(&frame, "by_region"), json!([]));
+    assert_eq!(
+        tree(&frame),
+        [
+            "navigation possible ... 2",
+            "outdoor possible o.h 6",
+            "  camping possible ... 3",
+            "  water selected o.. 2",
+            "    paddles possible .i. 1",
+        ]
+    );
+
+    // a search shows the matches and what's above them, open
+    say(
+        &mut socket,
+        json!({"type": "filter_window", "field": "categories.tree", "search": "AYA"}),
+    )
+    .await;
+    let frame = next_tree(&mut socket).await;
+    assert_eq!(
+        tree(&frame),
+        [
+            "outdoor possible o.h 6",
+            "  camping possible o.. 3",
+            "    kayaks possible o.. 1",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_tree_rolls_up_what_other_selections_leave() {
+    let model = retail_with(
+        "model.ossie.yaml",
+        r#"{"filter_direction": "one_to_many"}"#,
+        r#"{"filter_direction": "both"}"#,
+    );
+    let (_state, mut socket) = categories(model).await;
+    next_tree(&mut socket).await;
+    say(
+        &mut socket,
+        json!({"type": "filter_open", "field": "categories.tree",
+               "keys": ["outdoor", "water", "camping", "navigation"]}),
+    )
+    .await;
+    next_tree(&mut socket).await;
+    // the tent: only its branch of the tree is left, possible because
+    // something below passes (rows count the passing nodes below)
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "products.name", "values": ["Tent"]}),
+    )
+    .await;
+    let frame = next_tree(&mut socket).await;
+    assert_eq!(
+        tree(&frame),
+        [
+            "navigation excluded o.. 0",
+            "  maps excluded ... 0",
+            "outdoor possible o.. 1",
+            "  camping possible o.. 1",
+            "    tents possible ... 1",
+            "  water excluded o.. 0",
+            "    kayaks excluded ... 0",
+            "    paddles excluded ... 0",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_tree_measure_is_computed_per_level_not_added_up() {
+    // the average order value, a ratio: outdoor's is over all three orders
+    // (22.00 / 3), not the mean of its aisles' (7.50 and 7.00)
+    let model = retail_with(
+        "dashboards/sales.yaml",
+        "  - field: categories.tree               # a hierarchy: shown as a tree\n",
+        "  - field: categories.tree\n    measure: avg_order_value\n",
+    );
+    let (_state, mut socket) = categories(model).await;
+    next_tree(&mut socket).await;
+    say(
+        &mut socket,
+        json!({"type": "filter_open", "field": "categories.tree", "keys": ["outdoor"]}),
+    )
+    .await;
+    let frame = next_tree(&mut socket).await;
+    let Some(nodes) = frame["filters"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["field"] == "categories.tree"))
+        .and_then(|f| f["nodes"].as_array())
+    else {
+        panic!("no tree in {frame}");
+    };
+    let measures: Vec<(String, Value)> = nodes
+        .iter()
+        .map(|n| {
+            (
+                n["key"].as_str().unwrap_or("?").to_string(),
+                n["measure"].clone(),
+            )
+        })
+        .collect();
+    let third = 22.0 / 3.0;
+    assert_eq!(
+        measures,
+        [
+            ("navigation".to_string(), Value::Null),
+            ("outdoor".to_string(), json!(third)),
+            ("camping".to_string(), json!(7.0)),
+            ("water".to_string(), json!(7.5)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_measured_list_measures_its_null_value_too() {
+    // no customer has a segment: the list's one value is null, and the
+    // revenue measured for it is all of it
+    let model = retail_with(
+        "dashboards/sales.yaml",
+        "  - field: products.category\n",
+        "  - field: products.category\n  - field: customers.segment\n    measure: revenue\n",
+    );
+    let (_state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        filter_values(&frame, "customers.segment"),
+        Some(json!([{"value": null, "state": "possible", "rows": 2, "measure": "15.00"}]))
     );
 }

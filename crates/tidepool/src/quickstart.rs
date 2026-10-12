@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The project `init` writes: the retail example, compiled in.
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 8] = [
     (
         "model.ossie.yaml",
         include_str!("../../../examples/retail/model.ossie.yaml"),
@@ -25,6 +25,10 @@ const FILES: [(&str, &str); 7] = [
     (
         "tables/products.yaml",
         include_str!("../../../examples/retail/tables/products.yaml"),
+    ),
+    (
+        "tables/categories.yaml",
+        include_str!("../../../examples/retail/tables/categories.yaml"),
     ),
     (
         "dashboards/sales.yaml",
@@ -102,6 +106,23 @@ impl Rng {
 const REGIONS: [&str; 6] = ["north", "south", "east", "west", "central", "islands"];
 const CATEGORIES: [&str; 8] = [
     "kayaks", "paddles", "dry bags", "wetsuits", "maps", "lights", "tents", "stoves",
+];
+/// The category tree: (category, parent, level). Ragged on purpose: maps
+/// sit right under their department.
+const CATEGORY_TREE: [(&str, Option<&str>, &str); 13] = [
+    ("outdoor", None, "department"),
+    ("on the water", Some("outdoor"), "aisle"),
+    ("camping", Some("outdoor"), "aisle"),
+    ("kayaks", Some("on the water"), "category"),
+    ("paddles", Some("on the water"), "category"),
+    ("dry bags", Some("on the water"), "category"),
+    ("wetsuits", Some("on the water"), "category"),
+    ("tents", Some("camping"), "category"),
+    ("stoves", Some("camping"), "category"),
+    ("lights", Some("camping"), "category"),
+    ("navigation", None, "department"),
+    ("maps", Some("navigation"), "category"),
+    ("charts", Some("navigation"), "category"),
 ];
 const CUSTOMERS: u64 = 500;
 const PRODUCTS: u64 = 60;
@@ -233,6 +254,19 @@ fn run_feed(
         token,
         "/v1/tables/customers/rows",
         &customers.join("\n"),
+    )?;
+    let categories: Vec<String> = CATEGORY_TREE
+        .iter()
+        .map(|(category, parent, level)| {
+            let parent = parent.map_or_else(|| "null".to_string(), |p| format!("\"{p}\""));
+            format!(r#"{{"category":"{category}","parent":{parent},"level":"{level}"}}"#)
+        })
+        .collect();
+    post(
+        &address,
+        token,
+        "/v1/tables/categories/rows",
+        &categories.join("\n"),
     )?;
     let products: Vec<String> = (0..PRODUCTS)
         .map(|p| {

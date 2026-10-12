@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: hierarchy `categories.tree`: parent `parent` is `encoding: plain`
+  --> model.ossie.yaml:38:15
+   |
+38 |         data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "level"}}'
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: a parent shares the key's dictionary; remove `encoding: plain` from the column
+
+1 error, 0 warnings

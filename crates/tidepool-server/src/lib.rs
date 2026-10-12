@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod config;
 mod endpoints;
+mod filters;
 mod handlers;
 mod idempotency;
 mod live;

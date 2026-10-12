@@ -58,6 +58,10 @@ pub struct FilterSpec {
     /// passes; a viewer can change or clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<RelativeWindow>,
+    /// A metric shown beside each value instead of its row count, computed
+    /// for that value under the rest of the selection (OEE per line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<String>,
 }
 
 /// Whole periods relative to now: the `last` ones of `unit`, ending with the
@@ -93,6 +97,9 @@ pub enum FilterWidget {
     List,
     /// A from/to range, for time fields.
     DateRange,
+    /// An expandable tree, for a dataset's hierarchy field (the default
+    /// for one).
+    Tree,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

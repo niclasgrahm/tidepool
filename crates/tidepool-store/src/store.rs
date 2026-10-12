@@ -161,6 +161,19 @@ impl PkIndex {
             }
         }
     }
+
+    /// Every key there is, with its row.
+    fn entries(&self) -> Vec<(Box<[u32]>, u64)> {
+        match self {
+            Self::Single(rows) => rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| **row != ABSENT)
+                .map(|(code, row)| (vec![u32::try_from(code).unwrap_or(u32::MAX)].into(), *row))
+                .collect(),
+            Self::Composite(rows) => rows.iter().map(|(k, r)| (k.clone(), *r)).collect(),
+        }
+    }
 }
 
 /// What a write does.
@@ -170,6 +183,11 @@ pub enum Op {
     Write,
     /// Delete rows by key (upsert tables only). The batch holds key columns only.
     Delete,
+    /// The table's whole contents (upsert tables only): its rows are
+    /// written as by [`Op::Write`], and every live row whose key isn't
+    /// among them is deleted. Rows that are already as written change
+    /// nothing downstream.
+    Replace,
 }
 
 /// What applying a batch did.
@@ -177,7 +195,8 @@ pub enum Op {
 pub struct Applied {
     /// Rows written.
     pub written: usize,
-    /// Rows that replaced or deleted an existing row.
+    /// Rows that replaced or deleted an existing row (for a replace, the
+    /// live rows it left out too).
     pub replaced: usize,
     /// Keys that matched no row (deletes only).
     pub missing: usize,
@@ -327,7 +346,8 @@ impl TableStore {
         versions: &mut u64,
     ) -> Applied {
         let mut applied = Applied::default();
-        if batch.rows == 0 {
+        // an empty replace still empties the table
+        if batch.rows == 0 && op != Op::Replace {
             return applied;
         }
         self.dirty = true;
@@ -397,6 +417,25 @@ impl TableStore {
             self.next_row += 1;
             self.live_rows += 1;
             applied.written += 1;
+        }
+        // a replace: whatever it didn't write is gone (its own rows are the
+        // ones from this batch on, row ids being in write order)
+        if op == Op::Replace
+            && let Some(pk) = &self.pk
+        {
+            let first = self.next_row - applied.written as u64;
+            let gone: Vec<(Box<[u32]>, u64)> = pk
+                .entries()
+                .into_iter()
+                .filter(|(_, row)| *row < first)
+                .collect();
+            for (key, row) in gone {
+                self.delete_row(row, versions);
+                if let Some(pk) = &mut self.pk {
+                    pk.remove(&key);
+                }
+                applied.replaced += 1;
+            }
         }
         self.written_total += applied.written as u64;
         applied
@@ -839,7 +878,7 @@ impl Store {
             .table
             .columns
             .iter()
-            .filter(|c| op == Op::Write || store.table.primary_key.contains(&c.id))
+            .filter(|c| op != Op::Delete || store.table.primary_key.contains(&c.id))
             .collect();
         let fits = batch.shape.is_empty()
             || (batch.shape.len() == wanted.len()

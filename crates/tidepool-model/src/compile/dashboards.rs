@@ -58,40 +58,21 @@ fn dashboard(
     let root = YamlPath::root();
     let errors_before = cx.diagnostics.iter().filter(|d| d.is_error()).count();
 
-    let mut filters = Vec::new();
-    for (i, filter) in spec.filters.iter().enumerate() {
-        let path = root.key("filters").index(i);
-        match semantic.resolve_qualified(&filter.field) {
-            Err(None) => {}
-            Err(Some(message)) => {
-                cx.push(
-                    Diagnostic::error(format!("filter: {message}")).at(file, path.key("field")),
-                );
-            }
-            Ok((table, field)) => {
-                if filter.widget == FilterWidget::DateRange && !field.is_time {
-                    cx.push(
-                        Diagnostic::error(format!(
-                            "`{}` is not a time field, so it can't have a date_range",
-                            filter.field
-                        ))
-                        .at(file, path.key("widget")),
-                    );
-                }
-                if let Some(window) = filter.default {
-                    check_default(cx, file, &path, filter, field, window);
-                }
-                filters.push(Filter {
-                    field: FieldRef {
-                        table,
-                        field: field.name.clone(),
-                    },
-                    widget: filter.widget,
-                    default: filter.default,
-                });
-            }
-        }
-    }
+    let filters: Vec<Filter> = spec
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            filter(
+                cx,
+                file,
+                &root.key("filters").index(i),
+                f,
+                semantic,
+                metrics,
+            )
+        })
+        .collect();
 
     let mut ids = BTreeSet::new();
     let mut visuals = Vec::new();
@@ -147,6 +128,67 @@ fn dashboard(
         row_height: spec.layout.row_height,
         filters,
         visuals,
+    })
+}
+
+/// One filter: its field resolved, its widget fitting the field, and its
+/// default and measure checked.
+fn filter(
+    cx: &mut Cx,
+    file: &Path,
+    path: &YamlPath,
+    filter: &tidepool_config::dashboard::FilterSpec,
+    semantic: &Semantic,
+    metrics: &Metrics,
+) -> Option<Filter> {
+    let (table, field) = match semantic.resolve_qualified(&filter.field) {
+        Ok(found) => found,
+        Err(None) => return None,
+        Err(Some(message)) => {
+            cx.push(Diagnostic::error(format!("filter: {message}")).at(file, path.key("field")));
+            return None;
+        }
+    };
+    if filter.widget == FilterWidget::DateRange && !field.is_time {
+        cx.push(
+            Diagnostic::error(format!(
+                "`{}` is not a time field, so it can't have a date_range",
+                filter.field
+            ))
+            .at(file, path.key("widget")),
+        );
+    }
+    // a hierarchy is shown as a tree, whatever the default says
+    let widget = match (filter.widget, field.hierarchy().is_some()) {
+        (FilterWidget::List, true) => FilterWidget::Tree,
+        (FilterWidget::Tree, false) => {
+            cx.push(
+                Diagnostic::error(format!(
+                    "`{}` is not a hierarchy, so it can't be shown as a tree",
+                    filter.field
+                ))
+                .at(file, path.key("widget"))
+                .help("a tree shows a dataset's hierarchy field; declare one with a TIDEPOOL extension on the dataset: {\"hierarchy\": {\"name\": …, \"parent\": …}}"),
+            );
+            filter.widget
+        }
+        (widget, _) => widget,
+    };
+    if let Some(window) = filter.default {
+        check_default(cx, file, path, filter, field, window);
+    }
+    let measure = filter
+        .measure
+        .as_ref()
+        .and_then(|name| measure(cx, file, path, filter, name, table, semantic, metrics));
+    Some(Filter {
+        field: FieldRef {
+            table,
+            field: field.name.clone(),
+        },
+        widget,
+        default: filter.default,
+        measure,
     })
 }
 
@@ -467,6 +509,69 @@ fn visual_sort(
     )
 }
 
+/// A filter's measure: a metric that can be grouped by the filter's field,
+/// on a filter that lists values.
+#[allow(clippy::too_many_arguments)]
+fn measure(
+    cx: &mut Cx,
+    file: &Path,
+    path: &YamlPath,
+    filter: &tidepool_config::dashboard::FilterSpec,
+    name: &str,
+    table: TableId,
+    semantic: &Semantic,
+    metrics: &Metrics,
+) -> Option<MetricId> {
+    let at = path.key("measure");
+    let Some(id) = metrics.by_name.get(name).copied() else {
+        cx.push(
+            Diagnostic::error(format!(
+                "filter `{}` measures unknown metric `{name}`",
+                filter.field
+            ))
+            .at(file, at)
+            .help(suggest(
+                "metrics",
+                name,
+                metrics.by_name.keys().map(String::as_str),
+            )),
+        );
+        return None;
+    };
+    if filter.widget == FilterWidget::DateRange {
+        cx.push(
+            Diagnostic::error(format!(
+                "`{}` is a date_range, which shows no values to measure",
+                filter.field
+            ))
+            .at(file, at),
+        );
+        return None;
+    }
+    let mut ok = true;
+    for anchor in metrics.anchors(id) {
+        if semantic.graph.reaches(anchor, table) {
+            continue;
+        }
+        ok = false;
+        if !semantic.maybe_reaches(anchor, table) {
+            let anchor_name = semantic.dataset_name(anchor);
+            cx.push(
+                Diagnostic::error(format!(
+                    "filter `{}`: metric `{name}` counts rows of `{anchor_name}`, which can't be grouped by `{}`",
+                    filter.field, filter.field
+                ))
+                .at(file, at.clone())
+                .help(format!(
+                    "no relationship path leads from `{anchor_name}` to `{}`",
+                    semantic.dataset_name(table)
+                )),
+            );
+        }
+    }
+    ok.then_some(id)
+}
+
 /// A filter's default window: on a `date_range`, at least one period long,
 /// and in units its field has.
 fn check_default(
@@ -482,8 +587,13 @@ fn check_default(
         Some((
             at,
             format!(
-                "`{}` is a list; only a date_range can start on a window",
-                filter.field
+                "`{}` is a {}; only a date_range can start on a window",
+                filter.field,
+                if field.hierarchy().is_some() {
+                    "tree"
+                } else {
+                    "list"
+                }
             ),
         ))
     } else if window.last == 0 {

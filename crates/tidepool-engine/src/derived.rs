@@ -56,6 +56,16 @@ impl DerivedDict {
         }
     }
 
+    /// A dictionary built elsewhere (a hierarchy's ancestors): `values` by
+    /// code, `map` from base codes into them. Not to be extended.
+    pub(crate) fn from_parts(map: Vec<u32>, values: Vec<Scalar>) -> Self {
+        Self {
+            map,
+            values,
+            index: HashMap::new(),
+        }
+    }
+
     /// `self` with every code of `dict` mapped, evaluating `expr` (whose only
     /// column is `slot`) for the codes it hasn't seen.
     pub(crate) fn extend(

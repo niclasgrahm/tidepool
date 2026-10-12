@@ -152,6 +152,10 @@ pub struct QueryDimension {
     /// For time fields: `day`, `week`, `month`, `quarter` or `year`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<String>,
+    /// For hierarchy fields: group by each node's ancestor at this depth
+    /// (0 is the roots); nodes not that deep group as null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u32>,
 }
 
 /// A condition on a field: `in`, a half-open range `from <= value < to`
@@ -237,6 +241,22 @@ pub struct FieldInfo {
     pub is_time: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// For a hierarchy field: the columns its tree is made of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy: Option<HierarchyInfo>,
+}
+
+/// A hierarchy field's columns (plan §5.6).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HierarchyInfo {
+    /// The key: a node's identity, and the field's values.
+    pub key: String,
+    /// The parent's key.
+    pub parent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

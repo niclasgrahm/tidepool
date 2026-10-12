@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use tidepool_protocol::live::{
-    FilterFrame, RelativeUnit, RelativeWindow, SelectedField, ServerMessage, VisualFrame,
+    FilterFrame, RelativeUnit, RelativeWindow, SelectedField, ServerMessage, TreeNode, ValueState,
+    VisualFrame,
 };
 
 /// The open dashboard's latest content.
@@ -369,6 +370,84 @@ pub fn layers(tables: &[String], edges: &[(String, String)]) -> Vec<(String, usi
         .collect()
 }
 
+/// A filter row's classes: its state, and for a tree node whether it is
+/// inside a selected branch or holds a selection below it.
+#[must_use]
+pub fn value_class(state: ValueState, inside: bool, holds: bool) -> String {
+    let mut class = String::from(match state {
+        ValueState::Selected => "value selected",
+        ValueState::Possible => "value possible",
+        ValueState::Excluded => "value excluded",
+    });
+    if inside && state != ValueState::Selected {
+        class.push_str(" inside");
+    }
+    if holds {
+        class.push_str(" holds");
+    }
+    class
+}
+
+/// A tree node's row: its classes, and what its twist shows.
+#[must_use]
+pub fn node_class(node: &TreeNode) -> String {
+    value_class(node.state, node.inside, node.holds)
+}
+
+/// A filter's measure as it reads beside a value: by the metric's
+/// display hint (`percent` is a fraction), or as any value.
+#[must_use]
+pub fn measured(value: &Value, format: Option<&str>) -> String {
+    match (format, number(value)) {
+        (Some("percent"), Some(n)) => format!("{:.1}%", n * 100.0),
+        (Some(f), Some(n)) if f.starts_with("currency:") => {
+            format!(
+                "{} {}",
+                &f["currency:".len()..],
+                grouped(&format!("{n:.2}"))
+            )
+        }
+        (_, Some(n)) if matches!(value, Value::Number(_)) && n.fract() != 0.0 => {
+            grouped(&format!("{n:.2}"))
+        }
+        _ => display(value),
+    }
+}
+
+/// What a filter row shows on the right: its measure when the filter has one
+/// (a missing one, sent as null, reads as no value), otherwise its rows.
+#[must_use]
+pub fn beside(
+    measured_by: bool,
+    measure: Option<&Value>,
+    rows: i64,
+    format: Option<&str>,
+) -> String {
+    if measured_by {
+        return measured(measure.unwrap_or(&Value::Null), format);
+    }
+    if rows > 0 {
+        display(&Value::from(rows))
+    } else {
+        String::new()
+    }
+}
+
+/// What a selected field reads as in a chip, with a tree's nodes by their
+/// paths ("outdoor › water") when the tree's frame has them.
+#[must_use]
+pub fn chip_label(selected: &SelectedField, frame: Option<&FilterFrame>) -> String {
+    match frame.filter(|f| !f.chosen.is_empty()) {
+        Some(frame) => frame
+            .chosen
+            .iter()
+            .map(|c| c.path.iter().map(display).collect::<Vec<_>>().join(" › "))
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => selected_label(selected),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -393,7 +472,10 @@ mod tests {
                     value: json!("north"),
                     state: ValueState::Possible,
                     rows: 1,
+                    measure: None,
                 }],
+                nodes: Vec::new(),
+                chosen: Vec::new(),
             }],
         }
     }
@@ -582,6 +664,7 @@ mod tests {
             dimensions: vec![tidepool_protocol::QueryDimension {
                 field: "customers.region".into(),
                 grain: None,
+                level: None,
             }],
             metrics: vec!["revenue".into()],
             compare: None,
@@ -634,5 +717,97 @@ mod tests {
             "a date has no hours"
         );
         assert!(presets(true).iter().any(|w| w.unit == RelativeUnit::Hour));
+    }
+
+    fn node(state: ValueState, inside: bool, holds: bool) -> TreeNode {
+        TreeNode {
+            key: json!("water"),
+            label: json!("water"),
+            kind: None,
+            depth: 1,
+            has_children: true,
+            open: false,
+            state,
+            inside,
+            holds,
+            rows: 3,
+            measure: None,
+        }
+    }
+
+    #[test]
+    fn tree_rows_say_inside_and_holds_beside_their_state() {
+        assert_eq!(
+            node_class(&node(ValueState::Possible, false, false)),
+            "value possible"
+        );
+        assert_eq!(
+            node_class(&node(ValueState::Possible, true, false)),
+            "value possible inside"
+        );
+        // selected says it all; holding a selection below still shows
+        assert_eq!(
+            node_class(&node(ValueState::Selected, true, true)),
+            "value selected holds"
+        );
+        assert_eq!(
+            value_class(ValueState::Excluded, false, true),
+            "value excluded holds"
+        );
+    }
+
+    #[test]
+    fn a_measured_row_shows_its_measure_even_when_there_is_none() {
+        assert_eq!(beside(false, None, 1234, None), "1,234");
+        assert_eq!(beside(false, None, 0, None), "");
+        assert_eq!(beside(true, Some(&json!(0.5)), 9, Some("percent")), "50.0%");
+        // null arrives as None: no value, not the rows
+        assert_eq!(beside(true, None, 9, Some("percent")), "–");
+    }
+
+    #[test]
+    fn measures_read_by_their_metrics_hint() {
+        assert_eq!(measured(&json!(0.8234), Some("percent")), "82.3%");
+        assert_eq!(
+            measured(&json!("1234.5"), Some("currency:EUR")),
+            "EUR 1,234.50"
+        );
+        assert_eq!(measured(&json!(7.333_333), None), "7.33");
+        assert_eq!(measured(&json!("10.00"), None), "10.00");
+        assert_eq!(measured(&json!(null), Some("percent")), "–");
+    }
+
+    #[test]
+    fn a_tree_chip_shows_the_paths_of_its_nodes() {
+        let selected = SelectedField {
+            field: "categories.tree".into(),
+            values: Some(vec![json!("water"), json!("maps")]),
+            from: None,
+            to: None,
+            relative: None,
+        };
+        let mut frame = FilterFrame {
+            field: "categories.tree".into(),
+            total: 0,
+            offset: 0,
+            values: Vec::new(),
+            nodes: Vec::new(),
+            chosen: Vec::new(),
+        };
+        assert_eq!(chip_label(&selected, Some(&frame)), "water, maps");
+        frame.chosen = vec![
+            tidepool_protocol::live::ChosenNode {
+                key: json!("water"),
+                path: vec![json!("outdoor"), json!("water")],
+            },
+            tidepool_protocol::live::ChosenNode {
+                key: json!("maps"),
+                path: vec![json!("navigation"), json!("maps")],
+            },
+        ];
+        assert_eq!(
+            chip_label(&selected, Some(&frame)),
+            "outdoor › water, navigation › maps"
+        );
     }
 }

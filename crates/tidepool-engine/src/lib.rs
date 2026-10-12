@@ -10,8 +10,11 @@ mod cache;
 mod derived;
 mod exec;
 mod fast;
+pub mod hierarchy;
 mod plan;
 pub mod query;
+
+use std::sync::Arc;
 
 use tidepool_expr::Scalar;
 use tidepool_model::ir::FieldRef;
@@ -92,6 +95,22 @@ impl Engine {
         values_with(snapshot, field, selection, Some(&self.caches))
     }
 
+    /// The tree of a hierarchy field (plan §5.6), kept while its table is
+    /// unchanged; `None` if `field` isn't one.
+    ///
+    /// # Errors
+    /// The field's table isn't in the snapshot.
+    pub fn hierarchy(
+        &self,
+        snapshot: &Snapshot,
+        field: &FieldRef,
+    ) -> Result<Option<Arc<hierarchy::Hierarchy>>, QueryError> {
+        let Some(columns) = hierarchy::columns(&snapshot.model, field) else {
+            return Ok(None);
+        };
+        hierarchy::get(snapshot, Some(&self.caches), field.table, &columns).map(Some)
+    }
+
     /// Bytes held by the caches (join columns and kept answers).
     #[must_use]
     pub fn cache_bytes(&self) -> usize {
@@ -123,7 +142,8 @@ fn values_with(
     selection: &Selection,
     caches: Option<&cache::Caches>,
 ) -> Result<Vec<(Scalar, i64)>, QueryError> {
-    let selection = assoc::Associations::new(snapshot, caches).expand(field.table, selection)?;
+    let selection = hierarchy::resolve(snapshot, caches, selection)?;
+    let selection = assoc::Associations::new(snapshot, caches).expand(field.table, &selection)?;
     raw_values(snapshot, field, &selection, caches)
 }
 
@@ -169,7 +189,9 @@ fn answer(
     let model = &snapshot.model;
     let associations = assoc::Associations::new(snapshot, caches);
     let plan = plan::plan(model, query, &|anchor, visible| {
-        associations.expand(anchor, visible)
+        // after `ignore_selection`: a metric ignoring a hierarchy must not
+        // see the subtrees it selects
+        associations.expand(anchor, &hierarchy::resolve(snapshot, caches, visible)?)
     })?;
     let mut columns: Vec<ResultColumn> = query
         .dimensions

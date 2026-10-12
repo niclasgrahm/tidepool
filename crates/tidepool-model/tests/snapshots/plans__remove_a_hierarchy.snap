@@ -1,0 +1,8 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"model.ossie.yaml\", TREE_EXTENSION, \"    primary_key: [category]\\n\"),\nReplace(\"dashboards/sales.yaml\", TREE_FILTER, \"\")])"
+---
+2 changes (2 safe, 0 rebuild, 0 destructive)
+
+  - hierarchy    categories.tree  safe
+  ~ dashboard    sales            safe

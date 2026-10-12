@@ -84,6 +84,7 @@ pub enum Operation {
     GetSchema,
     IngestRows,
     DeleteRows,
+    ReplaceRows,
     ListTables,
     GetTable,
     PreviewTable,
@@ -107,7 +108,7 @@ pub enum Operation {
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 27] = [
+pub const OPERATIONS: [Operation; 28] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -115,6 +116,7 @@ pub const OPERATIONS: [Operation; 27] = [
     Operation::GetSchema,
     Operation::IngestRows,
     Operation::DeleteRows,
+    Operation::ReplaceRows,
     Operation::ListTables,
     Operation::GetTable,
     Operation::PreviewTable,
@@ -149,6 +151,7 @@ impl Operation {
             Self::GetSchema => "getSchema",
             Self::IngestRows => "ingestRows",
             Self::DeleteRows => "deleteRows",
+            Self::ReplaceRows => "replaceRows",
             Self::ListTables => "listTables",
             Self::GetTable => "getTable",
             Self::PreviewTable => "previewTable",
@@ -504,6 +507,70 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 ResponseDoc {
                     status: 503,
                     description: "Busy: retry after `Retry-After` seconds.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/tables/{table}/rows",
+            method: Method::Put,
+            operation: Operation::ReplaceRows,
+            summary: "Replace an upsert table's contents",
+            description: "The body is the table's complete new contents, in the same formats as \
+                          writing: its rows are written (a row whose key exists replaces the old \
+                          one), and every row whose key isn't among them is deleted, in one \
+                          batch that becomes visible at once. For keeping a dimension in step \
+                          with a system of record that can only be read whole (an asset tree, a \
+                          product catalogue): send all of it every time, and what disappeared \
+                          there disappears here. `replaced` counts rows replaced and rows \
+                          deleted. Only upsert tables have keys, so only they can be replaced.",
+            tag: Tag::Tables,
+            access: Access::Ingest,
+            params: vec![ParamDoc {
+                name: "table",
+                description: "The table, by name.",
+                example: "customers",
+            }],
+            query: vec![ParamDoc {
+                name: "wait",
+                description: "`visible`: answer once the new contents are visible to queries.",
+                example: "visible",
+            }],
+            request: Some(RequestDoc {
+                description: "Every row the table should hold.",
+                body: Body::Rows,
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Replaced.",
+                    body: Body::Json("IngestResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The body didn't decode, a value doesn't fit its column, or the \
+                                  table isn't an upsert table. Nothing was written.",
+                    body: Body::Json("IngestError"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such table.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "A request with the same `Idempotency-Key` is still being processed, \
+                                  or the table was removed by a config change meanwhile.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 415,
+                    description: "A `Content-Type` that isn't one of the three formats.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 503,
+                    description: "Busy: the write queue is full. Retry after `Retry-After` seconds.",
                     body: Body::Json("ApiError"),
                 },
             ],

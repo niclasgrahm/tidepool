@@ -232,6 +232,7 @@ custom_extensions:
 | metric | `time_offset`, `time_field` | evaluate with the time selection shifted (M8) |
 | metric | `format` | display hint: `currency:EUR`, `percent`, `int`, … |
 | field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`) |
+| dataset | `hierarchy` | `{name, parent, label?, kind?}`: a parent–child tree over the dataset's rows, as a field of its own (§5.6) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
 | model | `filter_direction` | `one_to_many` (default) or `both`: selections also flow from the many side to the one side (§5.4) |
 
@@ -245,6 +246,8 @@ name: Sales overview
 layout: { columns: 12, row_height: 80 }
 filters:
   - field: customers.region
+    measure: revenue                   # shown beside each value instead of its row count
+  - field: categories.tree             # a hierarchy field: shown as a tree (§5.6)
   - field: products.category
   - field: orders.ordered_at
     widget: date_range
@@ -431,6 +434,7 @@ to a background job is a later optimisation.
 ```
 POST   /v1/tables/{table}/rows        body: application/json (array) | application/x-ndjson | application/vnd.apache.arrow.stream
 DELETE /v1/tables/{table}/rows        body: keys (upsert tables only)
+PUT    /v1/tables/{table}/rows        body: the table's whole contents (upsert tables only)
 headers: Authorization: Bearer <ingest token>, Idempotency-Key: <string> (optional)
 query:   ?wait=visible                (respond only after the rows' epoch is published)
 → 200 { "accepted": 5000, "epoch": 81723, "config_version": 12 }
@@ -445,6 +449,7 @@ query:   ?wait=visible                (respond only after the rows' epoch is pub
 - **Batches are atomic:** either the whole batch is accepted or none of it.
 - **Durability:** the normalized batch is appended to the WAL. The response is sent after group-commit fsync (`durability: fsync`) or immediately (`async`). Then the batch is queued for the writer thread.
 - **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data.
+- **Replace** (`PUT`, `Op::Replace`, done 2026-10-10): for a dimension kept in step with a system of record that can only be read whole (indud's namespace, a catalogue). The batch's rows are written as upserts, then every live row whose key it didn't list is deleted, in one writer batch, so one epoch and one WAL record (op codes 5/6). Replay applies it to the same state, so it needs no expanded deletes in the log; the crash suite mixes replaces into its workload and catches one logged as a plain write. `replaced` counts rows replaced and rows deleted (the receipt keeps its three counts). An empty body empties the table.
 - **Backpressure:** a bounded writer queue. When it's full, respond `503` with `Retry-After`.
 - **Discovery:**
   - `GET /v1/tables`: list tables
@@ -592,6 +597,19 @@ longer. Like Looker's "in the last 7 days", the current period counts, so
   independently (a window one period too long fails all three suites).
 
 ---
+
+### 5.6 Hierarchies (parent–child, ragged)
+
+**Status: done 2026-10-10, after v0.1.** A dataset declares a tree over its rows with the extension `{"hierarchy": {"name": "asset", "parent": "parent_id", "label": "label", "kind": "kind"}}`: each row is a node keyed by the table's (single-column) primary key, and `parent` holds its parent's key. Depth is whatever the data says, so a plant tree (site → hall → line → cell → machine), an org chart or indud's untyped org tree all fit. The extension adds one field, `dataset.asset`, whose values are node keys.
+
+- **Not a relationship.** The compiler still refuses a self-relationship (and its help points here): `plan::path`, `assoc` and the cycle checks walk relationships, and a self-edge would loop them. The parent column joins the key's dictionary through the key-domain union-find instead (so a parent code *is* a key code); adding a hierarchy over a populated parent column is a **rebuild** (its codes are re-encoded, as for a new relationship), removing one is safe.
+- **Selection keeps node keys.** `Select { field: "dataset.asset", values: [keys] }` is the ordinary message. Per query, `engine::hierarchy::resolve` swaps the condition for a `Condition::Set` of every key in the selected subtrees on the key field, against the snapshot the query runs on, so a node moved under another parent is filtered with its new one at the next epoch without anyone selecting again. It runs inside the planner's per-anchor closure, after `ignore_selection` (a metric ignoring the hierarchy must not see its subtrees), and before `assoc`. Neither executor knows hierarchies exist.
+- **The tree** (`engine::hierarchy::Hierarchy`) is built from the table's live rows and cached by the table snapshot's identity (§6.5): nodes depth first, so a subtree is a range. A parent that is NULL, absent or the node itself makes a root (an *orphan*, when it named a parent); a cycle is broken at its smallest key. Children are ordered by label, then key.
+- **Levels.** A query dimension can carry `level: d`: grouped by each node's ancestor at depth `d` (NULL for nodes not that deep). On the fast path that is a derived dictionary over the key column (key code → ancestor's key code), built from the tree and keyed in the map cache as `ancestor:d`; never in the engine's own derived dictionaries, whose "a code's value never changes" doesn't hold for a tree that moves. A move changes the map, so an incremental answer over it recomputes (the prefix check fails).
+- **Tree filters** (`widget: tree`, the default for a hierarchy field): the frame carries the *visible* nodes, depth first through the nodes a session has opened (`FilterOpen`), or every match of a search with the nodes above it, windowed like a list. Each node: `selected`, or `possible` when it or anything below it passes every *other* field's selection (Qlik's rule), else `excluded`; `inside` (an ancestor is selected) and `holds` (something below is), so a selection stays findable with its branch closed; and `rows`, the passing nodes in its subtree. The selected nodes' paths come with every frame (`chosen`) for the chips.
+- **Measures on filters** (`measure: metric`, any list or tree): each value shows the metric under the rest of the selection instead of its row count. For a tree, one query per depth on screen (grouped by `level`), so a ratio (OEE, an average) is exact at every level rather than added up from the one below.
+- **Tested** by the oracle: a generated dimension sometimes points at an earlier row of itself (`up`), rewritten (moves), deleted (orphans), with subtree selections and level dimensions checked against DuckDB's recursive CTEs. Planted bugs it catches: a subtree without its own node, a tree cached by anything but the table's identity, a level off by one on the fast path, an incremental answer kept across a move. Cycle breaking is unit-tested (DuckDB can't express it).
+- **Limits.** Placement is current-state: past facts roll up to where a node is now. Under one-directional filtering fact selections don't narrow the tree (D5); `both` does. A hierarchy field as a visual dimension groups by key.
 
 ## 6. Query execution
 
@@ -1025,6 +1043,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 12. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
 13. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
 14. ~~Relative time windows ("Today", "Last 7 days") on time selections and dashboard defaults~~ (done: §5.5)
+15. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
 
 ---
 
@@ -1093,6 +1112,10 @@ When a feature request could land on either side, this table decides. They stay 
 ### 15.3 Later: the Kayak `tidepool` input
 
 Subscribes to a live metric query over the WebSocket protocol (§7), or a lightweight SSE variant, and emits a message per update. That makes "a metric as a stream" possible for alerting, webhooks or writing KPIs back to other systems. It needs no new Tidepool concepts, only a non-browser client of the existing protocol.
+
+### 15.5 Dimensions from indud: `indu_namespace` and `write: replace`
+
+**Status: done 2026-10-10** (in the Kayak repo). Kayak's `indu_namespace` input reads indud's unified namespace (`GET /api/v1/namespace/nodes`) whole on a timer, a branch at a time where indud caps a reply (5 000 nodes, five levels, `truncated`), and hands each read on as **one batch**: every node a message `{id, parent_id, label, kind, unit}` with indud's kind-prefixed ids. The `tidepool` output's `write: replace` sends each batch as a `PUT` (§4.5), so a node moved, renamed or deleted in indud is the same in Tidepool at the next read; indud keeps no change feed for its tree, so reading it whole is the only way to notice. Kayak only builds a replace output in a pipeline whose batches are whole snapshots (one unbuffered `indu_namespace` input, transforms only `map`/`filter`), refuses an append table on start, and never sends a snapshot its mapping skipped entirely. `examples/indud-oee` is the project it feeds: the namespace as a hierarchy (§5.6), and an OEE dashboard over per-machine minutes.
 
 ### 15.4 The demo
 

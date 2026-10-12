@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `customer_count` refers to `customer_id`, which is in more than one dataset
-  --> model.ossie.yaml:58:63
+  --> model.ossie.yaml:69:63
    |
-58 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customer_id)" }] }
+69 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customer_id)" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: write orders.customer_id or customers.customer_id
 

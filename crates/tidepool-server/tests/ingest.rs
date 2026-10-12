@@ -257,6 +257,75 @@ async fn upserts_replace_and_deletes_remove_by_key() {
 }
 
 #[tokio::test]
+async fn a_put_replaces_a_tables_contents() {
+    let state = ready_state();
+    let customer =
+        |id: &str, region: &str| json!({ "customer_id": id, "name": "Ann", "region": region });
+    post(
+        &state,
+        "/v1/tables/customers/rows",
+        &[JSON],
+        json!([customer("c1", "north"), customer("c2", "south")]).to_string(),
+    )
+    .await;
+    let put = |body: Value, headers: &[(&'static str, &'static str)]| {
+        request(
+            Method::PUT,
+            "/v1/tables/customers/rows?wait=visible",
+            headers,
+            body.to_string(),
+        )
+    };
+    // c2 isn't listed any more, c3 is new: c1 replaced, c2 deleted
+    let body = json!([customer("c1", "east"), customer("c3", "west")]);
+    let reply = send(
+        Arc::clone(&state),
+        put(body.clone(), &[JSON, ("idempotency-key", "sync-1")]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        (
+            reply.json()["written"].clone(),
+            reply.json()["replaced"].clone()
+        ),
+        (json!(2), json!(2))
+    );
+    let rows = preview(&state, "customers").await["rows"].clone();
+    let mut ids: Vec<String> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| r[0].to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, [r#""c1""#, r#""c3""#]);
+
+    // a retry gets the first answer and changes nothing
+    let retry = send(
+        Arc::clone(&state),
+        put(body, &[JSON, ("idempotency-key", "sync-1")]),
+    )
+    .await;
+    assert_eq!(retry.json(), reply.json());
+
+    // only upsert tables have keys to replace by
+    let append = send(
+        Arc::clone(&state),
+        request(Method::PUT, "/v1/tables/orders/rows", &[JSON], "[]"),
+    )
+    .await;
+    assert_eq!(append.status, StatusCode::BAD_REQUEST);
+    assert!(
+        append.json()["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("append table")),
+        "{}",
+        append.text()
+    );
+}
+
+#[tokio::test]
 async fn a_retry_with_the_same_idempotency_key_writes_nothing() {
     let state = ready_state();
     let body = Value::Array(vec![order(1)]).to_string();
@@ -424,8 +493,8 @@ async fn tables_are_listed_with_their_columns() {
         .flatten()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert_eq!(names, ["customers", "orders", "products"]);
-    let orders = &tables[1];
+    assert_eq!(names, ["categories", "customers", "orders", "products"]);
+    let orders = &tables[2];
     assert_eq!(orders["mode"], "append");
     assert_eq!(
         orders["columns"][6],
@@ -451,6 +520,11 @@ async fn the_spec_has_a_typed_rows_endpoint_per_table() {
         "orders is append-only"
     );
     assert!(paths["/v1/tables/customers/rows"]["delete"].is_object());
+    assert!(paths["/v1/tables/customers/rows"]["put"].is_object());
+    assert!(
+        paths["/v1/tables/orders/rows"].get("put").is_none(),
+        "an append table can't be replaced"
+    );
     assert_eq!(
         paths["/v1/tables/orders/rows"]["post"]["operationId"],
         "ingestRows_orders"

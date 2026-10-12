@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::ossie::{
-    self, CustomExtension, FieldExtension, ModelExtension, RelationshipExtension,
-    tidepool_extension,
+    self, CustomExtension, DatasetExtension, FieldExtension, HierarchyExtension, ModelExtension,
+    RelationshipExtension, tidepool_extension,
 };
 use tidepool_config::source::YamlPath;
 use tidepool_config::table::{Encoding, TableMode};
@@ -17,8 +17,8 @@ use tidepool_expr::syntax;
 use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
-    ColumnId, Dataset, DomainId, Field, FieldSource, KeyDomain, Relationship, RelationshipId,
-    TableId, Type, type_of,
+    ColumnId, Dataset, DomainId, Field, FieldSource, Hierarchy, KeyDomain, Relationship,
+    RelationshipId, TableId, Type, type_of,
 };
 
 pub(super) struct Semantic {
@@ -27,12 +27,17 @@ pub(super) struct Semantic {
     pub dataset_names: BTreeMap<String, TableId>,
     pub relationships: Vec<Relationship>,
     pub key_domains: Vec<KeyDomain>,
+    /// Hierarchies' (table, key, parent): the parent shares the key's
+    /// dictionary, as a relationship's columns do.
+    pub hierarchies: Vec<(TableId, ColumnId, ColumnId)>,
     pub graph: Graph,
     /// The model file, for later stages' diagnostics.
     pub file: PathBuf,
     /// Datasets that exist but couldn't be compiled (already reported):
     /// references to them are skipped silently instead of cascading.
     pub broken: BTreeSet<String>,
+    /// Fields (`dataset.field`) declared but broken, likewise skipped.
+    pub broken_fields: BTreeSet<String>,
     /// Tables a broken relationship leads out of: what they reach is unknown.
     pub uncertain_from: BTreeSet<TableId>,
     /// A broken relationship whose many side is unknown too.
@@ -55,7 +60,7 @@ impl Semantic {
         let Some((dataset, field)) = text.split_once('.') else {
             return Err(Some(format!("`{text}` should be written `dataset.field`")));
         };
-        if self.broken.contains(dataset) {
+        if self.broken.contains(dataset) || self.broken_fields.contains(text) {
             return Err(None);
         }
         let Some(table) = self.dataset_names.get(dataset) else {
@@ -213,9 +218,11 @@ pub(super) fn compile(cx: &mut Cx, tables: &Tables) -> Semantic {
         dataset_names: BTreeMap::new(),
         relationships: Vec::new(),
         key_domains: Vec::new(),
+        hierarchies: Vec::new(),
         graph: Graph::default(),
         file: PathBuf::new(),
         broken: BTreeSet::new(),
+        broken_fields: BTreeSet::new(),
         uncertain_from: BTreeSet::new(),
         uncertain_all: false,
         direction: crate::ir::Direction::OneToMany,
@@ -249,7 +256,7 @@ pub(super) fn compile(cx: &mut Cx, tables: &Tables) -> Semantic {
     if semantic.direction == crate::ir::Direction::Both {
         check_loops(cx, &file, model, &semantic);
     }
-    semantic.key_domains = key_domains(&semantic.relationships);
+    semantic.key_domains = key_domains(&semantic.relationships, &semantic.hierarchies);
     semantic
 }
 
@@ -311,7 +318,26 @@ fn datasets(
 
         dataset_keys(cx, file, &path, spec, table, tables);
 
-        let fields = fields(cx, file, &path, spec, table);
+        let (ext, ext_path): (DatasetExtension, _) =
+            extension(cx, file, &path, &spec.custom_extensions);
+        let mut fields = fields(cx, file, &path, spec, table);
+        if let Some(hierarchy) = &ext.hierarchy {
+            match hierarchy_field(cx, file, &ext_path, spec, hierarchy, table, tables, &fields) {
+                Some(field) => {
+                    if let FieldSource::Hierarchy(h) = &field.source {
+                        semantic.hierarchies.push((table.id, h.key, h.parent));
+                    }
+                    fields.push(field);
+                }
+                // a name taken by a field still names that field
+                None if fields.iter().any(|f| f.name == hierarchy.name) => {}
+                None => {
+                    semantic
+                        .broken_fields
+                        .insert(format!("{}.{}", spec.name, hierarchy.name));
+                }
+            }
+        }
         semantic.dataset_names.insert(spec.name.clone(), table.id);
         semantic.datasets.push(Dataset {
             name: spec.name.clone(),
@@ -425,6 +451,8 @@ fn declared_field(
         FieldSource::Column(id) => table
             .column(*id)
             .map_or(Type::Null, |c| type_of(c.column_type)),
+        // never declared: hierarchies come from the dataset's extension
+        FieldSource::Hierarchy(_) => return None,
         FieldSource::Derived { .. } => match tidepool_expr::check_row(
             &ast,
             &TableScope {
@@ -444,7 +472,7 @@ fn declared_field(
         FieldSource::Column(id) => table
             .column(*id)
             .is_some_and(|c| c.column_type.is_temporal()),
-        FieldSource::Derived { .. } => false,
+        FieldSource::Derived { .. } | FieldSource::Hierarchy(_) => false,
     };
     let datatype_is_temporal = matches!(
         field.datatype,
@@ -635,6 +663,147 @@ fn fields(
     fields
 }
 
+/// A dataset's hierarchy (plan §5.6): a field whose values are node keys,
+/// over a parent column that shares the key's dictionary. Problems are
+/// reported at the extension's `data`.
+#[allow(clippy::too_many_arguments)]
+fn hierarchy_field(
+    cx: &mut Cx,
+    file: &Path,
+    at: &YamlPath,
+    spec: &ossie::Dataset,
+    hierarchy: &HierarchyExtension,
+    table: &crate::ir::Table,
+    tables: &Tables,
+    fields: &[Field],
+) -> Option<Field> {
+    let what = format!("hierarchy `{}.{}`", spec.name, hierarchy.name);
+    let error = |cx: &mut Cx, message: String, help: Option<String>| {
+        let diagnostic = Diagnostic::error(message).at(file, at.clone());
+        cx.push(match help {
+            Some(help) => diagnostic.help(help),
+            None => diagnostic,
+        });
+    };
+    if !is_identifier(&hierarchy.name) {
+        error(
+            cx,
+            format!("`{}` can't be used as a hierarchy name", hierarchy.name),
+            Some(IDENTIFIER_HELP.into()),
+        );
+        return None;
+    }
+    if fields.iter().any(|f| f.name == hierarchy.name) {
+        error(
+            cx,
+            format!("{what} has the same name as a field of `{}`", spec.name),
+            Some("a hierarchy adds a field of its own; give it another name".into()),
+        );
+        return None;
+    }
+    if tables.key_broken.contains(&table.id) {
+        return None;
+    }
+    let key = hierarchy_key(table).map_err(|message| {
+        error(
+            cx,
+            format!("{what} is over `{}`, {message}", table.name),
+            Some("a hierarchy's nodes are rows of an upsert table keyed by one column".into()),
+        );
+    });
+    let key = key.ok()?;
+    let column = |cx: &mut Cx, role: &str, name: &str| -> Option<&crate::ir::Column> {
+        let found = table.column_named(name);
+        if found.is_none() {
+            error(
+                cx,
+                format!(
+                    "{what}: its {role} `{name}` is not a column of `{}`",
+                    table.name
+                ),
+                Some(suggest(
+                    "columns",
+                    name,
+                    table.columns.iter().map(|c| c.name.as_str()),
+                )),
+            );
+        }
+        found
+    };
+    let parent = column(cx, "parent", &hierarchy.parent);
+    let label = hierarchy
+        .label
+        .as_ref()
+        .map(|name| column(cx, "label", name));
+    let kind = hierarchy.kind.as_ref().map(|name| column(cx, "kind", name));
+    let (Some(parent), Some(label), Some(kind)) = (
+        parent,
+        label.map_or(Some(None), |c| c.map(Some)),
+        kind.map_or(Some(None), |c| c.map(Some)),
+    ) else {
+        return None;
+    };
+    let key_column = table.column(key)?;
+    let problem = parent_problem(&what, key_column, parent);
+    if let Some((message, help)) = problem {
+        error(cx, message, Some(help));
+        return None;
+    }
+    Some(Field {
+        name: hierarchy.name.clone(),
+        source: FieldSource::Hierarchy(Hierarchy {
+            key,
+            parent: parent.id,
+            label: label.map(|c| c.id),
+            kind: kind.map(|c| c.id),
+        }),
+        ty: type_of(key_column.column_type),
+        is_time: false,
+        grains: Vec::new(),
+        label: None,
+        description: None,
+    })
+}
+
+/// A hierarchy's key: the single-column key of an upsert table, or why not.
+fn hierarchy_key(table: &crate::ir::Table) -> Result<ColumnId, &'static str> {
+    match (table.mode, table.primary_key.as_slice()) {
+        (TableMode::Upsert, [key]) => Ok(*key),
+        (TableMode::Append, _) => Err("an append table"),
+        _ => Err("which is keyed by more than one column"),
+    }
+}
+
+/// What's wrong with a hierarchy's parent column, as (message, help).
+fn parent_problem(
+    what: &str,
+    key: &crate::ir::Column,
+    parent: &crate::ir::Column,
+) -> Option<(String, String)> {
+    if parent.id == key.id {
+        Some((
+            format!("{what}: `{}` is the key itself, not a parent", parent.name),
+            "name the column that holds each node's parent's key".to_string(),
+        ))
+    } else if parent.column_type != key.column_type {
+        Some((
+            format!(
+                "{what}: parent `{}` is {} but the key `{}` is {}",
+                parent.name, parent.column_type, key.name, key.column_type
+            ),
+            "a parent holds a key, so it has the key's type".to_string(),
+        ))
+    } else if parent.encoding == Encoding::Plain {
+        Some((
+            format!("{what}: parent `{}` is `encoding: plain`", parent.name),
+            "a parent shares the key's dictionary; remove `encoding: plain` from the column"
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
 fn relationships(
     cx: &mut Cx,
     tables: &Tables,
@@ -726,7 +895,7 @@ fn relationship(
         cx.push(
             Diagnostic::error(format!("{what} connects `{}` to itself", spec.from))
                 .at(file, path.key("to"))
-                .help("self-relationships (hierarchies) aren't supported yet"),
+                .help("for a parent–child hierarchy, add a TIDEPOOL extension to the dataset instead: {\"hierarchy\": {\"name\": …, \"parent\": …}}"),
         );
         return None;
     }
@@ -1098,20 +1267,31 @@ fn find(
     root
 }
 
-/// Union the columns relationships join into key domains.
-fn key_domains(relationships: &[Relationship]) -> Vec<KeyDomain> {
+/// Union the columns relationships join, and hierarchies' keys and
+/// parents, into key domains.
+fn key_domains(
+    relationships: &[Relationship],
+    hierarchies: &[(TableId, ColumnId, ColumnId)],
+) -> Vec<KeyDomain> {
     let mut parent: BTreeMap<(TableId, ColumnId), (TableId, ColumnId)> = BTreeMap::new();
-    for relationship in relationships {
-        for (f, t) in relationship
-            .from_columns
-            .iter()
-            .zip(&relationship.to_columns)
-        {
-            let a = find(&mut parent, (relationship.from, *f));
-            let b = find(&mut parent, (relationship.to, *t));
-            if a != b {
-                parent.insert(a, b);
-            }
+    let pairs = relationships
+        .iter()
+        .flat_map(|r| {
+            r.from_columns
+                .iter()
+                .zip(&r.to_columns)
+                .map(|(f, t)| ((r.from, *f), (r.to, *t)))
+        })
+        .chain(
+            hierarchies
+                .iter()
+                .map(|(table, key, up)| ((*table, *up), (*table, *key))),
+        );
+    for (from, to) in pairs {
+        let a = find(&mut parent, from);
+        let b = find(&mut parent, to);
+        if a != b {
+            parent.insert(a, b);
         }
     }
     let members: Vec<(TableId, ColumnId)> = parent.keys().copied().collect();

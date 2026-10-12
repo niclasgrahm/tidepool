@@ -30,6 +30,12 @@ datasets:
     fields:
       - name: category
         expression: { dialects: [{ dialect: ANSI_SQL, expression: category }] }
+  - name: categories
+    source: categories
+    primary_key: [category]
+    custom_extensions:
+      - vendor_name: TIDEPOOL                # a parent–child hierarchy (plan §5.6): a tree
+        data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "level"}}'
 
 relationships:
   - name: order_customer
@@ -42,6 +48,11 @@ relationships:
     to: products
     from_columns: [product_id]
     to_columns: [product_id]
+  - name: product_category
+    from: products
+    to: categories
+    from_columns: [category]
+    to_columns: [category]
 
 metrics:
   - name: revenue

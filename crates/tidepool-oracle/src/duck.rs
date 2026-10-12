@@ -147,6 +147,9 @@ pub fn load(schema: &Schema, data: &Data) -> Result<Connection, String> {
 
 /// The SQL of a field (a column, or a derived field's expression).
 fn field_sql(schema: &Schema, table: &str, field: &str) -> String {
+    if schema.is_tree(table, field) {
+        return format!("{table}.key");
+    }
     schema
         .derived
         .iter()
@@ -165,6 +168,16 @@ fn gen_of<'a>(schema: &'a Schema, table: &str, column: &str) -> Option<&'a Gen> 
 fn condition_sql(schema: &Schema, (table, column, cond): &(String, String, Cond)) -> String {
     let field = format!("{table}.{column}");
     let source = gen_of(schema, table, column).cloned().unwrap_or(Gen::Float);
+    // the selected nodes and everything below them, following parents
+    // that are there
+    if let (true, Cond::In(values)) = (schema.is_tree(table, column), cond) {
+        let list: Vec<String> = values.iter().map(|v| literal(v, &Gen::Up)).collect();
+        return format!(
+            "{table}.key IN (WITH RECURSIVE sub(k) AS (SELECT key FROM {table} WHERE key IN ({}) \
+             UNION SELECT c.key FROM {table} c JOIN sub ON c.up = sub.k) SELECT k FROM sub)",
+            list.join(", ")
+        );
+    }
     match cond {
         Cond::In(values) => {
             let list: Vec<String> = values.iter().map(|v| literal(v, &source)).collect();
@@ -344,11 +357,14 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
     let dims: Vec<String> = query
         .dims
         .iter()
-        .map(|(table, field, grain)| {
+        .map(|(table, field, grain, level)| {
             let sql = field_sql(schema, table, field);
-            match grain {
-                Some(grain) => format!("CAST(date_trunc('{grain}', {sql}) AS DATE)"),
-                None => sql,
+            match (grain, level) {
+                (Some(grain), _) => format!("CAST(date_trunc('{grain}', {sql}) AS DATE)"),
+                (None, Some(level)) => format!(
+                    "(SELECT t.anc FROM tree_levels t WHERE t.node = {sql} AND t.level = {level})"
+                ),
+                (None, None) => sql,
             }
         })
         .collect();
@@ -498,7 +514,23 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         .enumerate()
         .map(|(i, m)| format!("{} AS out{i}", value_of(schema, m, &column_of)))
         .collect();
-    let mut sql = format!("WITH {}", ctes.join(", "));
+    if schema.tree {
+        // each node's ancestors by depth: walk up parents that are there
+        ctes.insert(
+            0,
+            "chain(node, anc, steps) AS (SELECT key, key, 0 FROM d0 UNION ALL \
+             SELECT c.node, p.up, c.steps + 1 FROM chain c JOIN d0 p ON p.key = c.anc \
+             WHERE p.up IN (SELECT key FROM d0) AND p.up <> p.key), \
+             tree_levels(node, level, anc) AS (SELECT c.node, d.depth - c.steps, c.anc FROM chain c \
+             JOIN (SELECT node, MAX(steps) AS depth FROM chain GROUP BY node) d ON d.node = c.node)"
+                .to_string(),
+        );
+    }
+    let mut sql = format!(
+        "WITH {}{}",
+        if schema.tree { "RECURSIVE " } else { "" },
+        ctes.join(", ")
+    );
     if dims.is_empty() {
         let from: Vec<String> = (0..n).map(|q| format!("q{q}")).collect();
         let _ = write!(

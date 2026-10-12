@@ -32,6 +32,38 @@
         "target/both-data"
       ],
       "port": 7071
+    },
+    {
+      "name": "tidepool-trees",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/demo-config",
+        "--listen",
+        "127.0.0.1:7072",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/demo-data"
+      ],
+      "port": 7072
+    },
+    {
+      "name": "tidepool-oee",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/oee-config",
+        "--listen",
+        "127.0.0.1:7073",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/oee-data"
+      ],
+      "port": 7073
     }
   ]
 }

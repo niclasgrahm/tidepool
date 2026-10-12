@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `orders.ordered_at` is a date_range, which shows no values to measure
+  --> dashboards/sales.yaml:10:14
+   |
+10 |     measure: revenue
+   |              ^^^^^^^
+
+1 error, 0 warnings

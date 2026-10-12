@@ -55,6 +55,9 @@ pub enum Gen {
     Key(String, usize),
     /// A foreign key into a table's keys; some values point nowhere.
     Ref(String),
+    /// A parent in the same table: the key of a row before this one (so
+    /// the tree has no cycles), NULL for a root, or sometimes nowhere.
+    Up,
     Choice(Vec<&'static str>),
     Int(i64, i64),
     /// Cents, i.e. a decimal with this many places.
@@ -159,7 +162,13 @@ pub struct Schema {
     pub metrics: Vec<Metric>,
     /// `filter_direction: both`: selections also flow one → many.
     pub both: bool,
+    /// `d0` is a tree: its `up` column points at a parent row, and its
+    /// hierarchy field `tree` selects subtrees (plan §5.6).
+    pub tree: bool,
 }
+
+/// `d0`'s hierarchy, as its dataset's extension in the model file.
+pub const TREE_EXTENSION: &str = "    custom_extensions:\n      - vendor_name: TIDEPOOL\n        data: '{\"hierarchy\": {\"name\": \"tree\", \"parent\": \"up\", \"label\": \"name\"}}'\n";
 
 impl Schema {
     #[must_use]
@@ -183,6 +192,24 @@ impl Schema {
             i += 1;
         }
         out
+    }
+
+    /// Whether `table.field` is the hierarchy field.
+    #[must_use]
+    pub fn is_tree(&self, table: &str, field: &str) -> bool {
+        self.tree && table == "d0" && field == "tree"
+    }
+
+    /// How a field's values are made: a column's, or the keys for the
+    /// hierarchy field.
+    #[must_use]
+    pub fn values_of(&self, table: &str, field: &str) -> Option<Gen> {
+        if self.is_tree(table, field) {
+            return Some(Gen::Key("k".into(), 0));
+        }
+        self.table(table)
+            .and_then(|t| t.column(field))
+            .map(|c| c.values.clone())
     }
 
     #[must_use]
@@ -259,6 +286,7 @@ pub fn schema(rng: &mut Rng) -> Schema {
     let dims = 1 + rng.below(3);
     let snowflake = rng.chance(40);
     let second_fact = rng.chance(50);
+    let tree = rng.chance(50);
 
     if snowflake {
         tables.push(Table {
@@ -309,6 +337,9 @@ pub fn schema(rng: &mut Rng) -> Schema {
                 true,
                 Gen::Date(20_000, 20_400),
             ));
+        }
+        if d == 0 && tree {
+            columns.push(column("up", "string", "VARCHAR", true, Gen::Up));
         }
         if d == 0 && snowflake {
             columns.push(column(
@@ -694,6 +725,17 @@ pub fn schema(rng: &mut Rng) -> Schema {
             ),
         ]);
     }
+    if tree {
+        // a metric ignoring the tree: it must not see the subtrees either
+        metrics.push(base(
+            "f0_no_tree",
+            "SUM(f0.amount)",
+            "SUM(f0.amount)",
+            "f0",
+            Some(r#"{"ignore_selection": ["d0.tree"]}"#.into()),
+            Ignore::Fields(vec!["d0.tree".into()]),
+        ));
+    }
     if snowflake {
         metrics.push(base(
             "p0_rows",
@@ -712,6 +754,7 @@ pub fn schema(rng: &mut Rng) -> Schema {
         metrics,
         // relationships always form a tree here, so both ways is valid
         both: rng.chance(50),
+        tree,
     }
 }
 
@@ -758,6 +801,9 @@ pub fn files(schema: &Schema) -> Vec<(String, String)> {
                     field.name, field.model_expr
                 );
             }
+        }
+        if schema.tree && table.name == "d0" {
+            model.push_str(TREE_EXTENSION);
         }
     }
     model.push_str("relationships:\n");
@@ -845,6 +891,15 @@ fn value(rng: &mut Rng, schema: &Schema, column: &Column, index: usize) -> Json 
                 json!("dangling")
             } else {
                 json!(rng.pick(&keys))
+            }
+        }
+        Gen::Up => {
+            if index == 0 || rng.chance(15) {
+                Json::Null
+            } else if rng.chance(5) {
+                json!("dangling")
+            } else {
+                json!(format!("k{}", rng.below(index)))
             }
         }
         Gen::Choice(choices) => json!(rng.pick(choices)),
@@ -1038,8 +1093,9 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
 #[derive(Clone, Debug)]
 pub struct Query {
     pub metrics: Vec<String>,
-    /// `table.field`, and a grain for temporal fields.
-    pub dims: Vec<(String, String, Option<&'static str>)>,
+    /// `table.field`, a grain for temporal fields, and a level for the
+    /// hierarchy field.
+    pub dims: Vec<(String, String, Option<&'static str>, Option<u32>)>,
     /// `table.column` → condition.
     pub selection: Vec<(String, String, Cond)>,
 }
@@ -1083,6 +1139,9 @@ fn fields(schema: &Schema, table: &str) -> Vec<(String, bool)> {
             .filter(|d| d.table == table)
             .map(|d| (d.name.clone(), d.temporal)),
     );
+    if schema.is_tree(table, "tree") {
+        out.push(("tree".into(), false));
+    }
     out
 }
 
@@ -1122,13 +1181,15 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
             let (table, field, temporal) = rng.pick(&candidates).clone();
             if dims
                 .iter()
-                .any(|(t, f, _): &(String, String, _)| *t == table && *f == field)
+                .any(|(t, f, _, _): &(String, String, _, _)| *t == table && *f == field)
             {
                 continue;
             }
             let grain = (temporal && rng.chance(60))
                 .then(|| *rng.pick(&["day", "week", "month", "quarter", "year"]));
-            dims.push((table, field, grain));
+            let level = (schema.is_tree(&table, &field) && rng.chance(70))
+                .then(|| u32::try_from(rng.below(4)).unwrap_or(0));
+            dims.push((table, field, grain, level));
         }
     }
 
@@ -1183,11 +1244,39 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
         };
         selection.push((table.name.clone(), column.name.clone(), cond));
     }
+    if let Some(subtrees) = subtrees(rng, schema, data) {
+        selection.push(subtrees);
+    }
     Query {
         metrics,
         dims,
         selection,
     }
+}
+
+/// Sometimes a selection of subtrees of the hierarchy, sometimes naming a
+/// node that isn't there.
+fn subtrees(rng: &mut Rng, schema: &Schema, data: &Data) -> Option<(String, String, Cond)> {
+    if !schema.tree || !rng.chance(40) {
+        return None;
+    }
+    let keys: Vec<Json> = data
+        .tables
+        .get("d0")
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("key").cloned())
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut picked: Vec<Json> = (0..=rng.below(2))
+        .map(|_| rng.pick(&keys).clone())
+        .collect();
+    if rng.chance(10) {
+        picked.push(json!("nothing"));
+    }
+    Some(("d0".into(), "tree".into(), Cond::In(picked)))
 }
 
 /// A relative window around `near` (a stored value), so it usually holds

@@ -1,0 +1,7 @@
+name: categories
+mode: upsert
+primary_key: [category]
+columns:
+  category: { type: string }
+  parent:   { type: string, nullable: true }   # the parent category; NULL at the top
+  level:    { type: string }                   # department, aisle or category

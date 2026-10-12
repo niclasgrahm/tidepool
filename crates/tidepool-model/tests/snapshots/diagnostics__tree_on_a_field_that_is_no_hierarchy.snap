@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `products.category` is not a hierarchy, so it can't be shown as a tree
+ --> dashboards/sales.yaml:8:13
+  |
+8 |     widget: tree
+  |             ^^^^
+  = help: a tree shows a dataset's hierarchy field; declare one with a TIDEPOOL extension on the dataset: {"hierarchy": {"name": …, "parent": …}}
+
+1 error, 0 warnings

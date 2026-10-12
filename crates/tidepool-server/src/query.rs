@@ -230,6 +230,7 @@ pub(crate) fn resolve(model: &Model, request: &QueryRequest, now: i64) -> Result
             Ok(Dim {
                 field: field(model, &d.field)?.0,
                 grain: d.grain.as_deref().map(grain).transpose()?,
+                level: d.level,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

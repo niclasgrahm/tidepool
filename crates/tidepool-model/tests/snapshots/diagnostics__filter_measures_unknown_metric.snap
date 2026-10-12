@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: filter `customers.region` measures unknown metric `revenu`
+ --> dashboards/sales.yaml:5:14
+  |
+5 |     measure: revenu                     # shown beside each region instead of its row count
+  |              ^^^^^^
+  = help: did you mean `revenue`?
+
+1 error, 0 warnings

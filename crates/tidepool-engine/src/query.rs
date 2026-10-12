@@ -14,6 +14,21 @@ use tidepool_model::ir::{FieldRef, MetricId};
 pub struct Dim {
     pub field: FieldRef,
     pub grain: Option<TimeGrain>,
+    /// For a hierarchy field: group by each node's ancestor at this depth
+    /// (0 is the roots) instead of the node; nodes not that deep are NULL.
+    pub level: Option<u32>,
+}
+
+impl Dim {
+    /// Group by `field` as it is.
+    #[must_use]
+    pub fn of(field: FieldRef) -> Self {
+        Self {
+            field,
+            grain: None,
+            level: None,
+        }
+    }
 }
 
 /// What a selected field must satisfy.

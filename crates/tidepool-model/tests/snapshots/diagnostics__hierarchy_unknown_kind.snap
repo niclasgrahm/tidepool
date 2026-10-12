@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: hierarchy `categories.tree`: its kind `levle` is not a column of `categories`
+  --> model.ossie.yaml:38:15
+   |
+38 |         data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "levle"}}'
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: columns: category, level, parent
+
+1 error, 0 warnings

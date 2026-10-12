@@ -1,0 +1,8 @@
+# What OEE needs to know about a machine that Indu doesn't keep: how long
+# one unit should take. Keyed by the namespace's device id.
+name: devices
+mode: upsert
+primary_key: [device_id]
+columns:
+  device_id:     { type: string }
+  ideal_cycle_s: { type: float64 }

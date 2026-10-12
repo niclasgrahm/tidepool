@@ -14,7 +14,8 @@ use tidepool_expr::syntax::{self, Name};
 use tidepool_expr::temporal::{Part, Shift};
 use tidepool_expr::{AggCall, Expr, Scope, Type, check_aggregation, check_row};
 use tidepool_model::ir::{
-    FieldRef, FieldSource, IgnoreSelection, MetricBody, MetricId, Model, TableId, type_of,
+    FieldRef, FieldSource, Hierarchy, IgnoreSelection, MetricBody, MetricId, Model, TableId,
+    type_of,
 };
 
 use crate::query::{Condition, Query, QueryError, Selection};
@@ -34,11 +35,16 @@ pub(crate) enum Target {
     Column(usize),
     /// An expression whose slots are column positions in its table.
     Derived(Expr),
+    /// A hierarchy's key column (by position), read as each node's ancestor
+    /// at `depth` (see [`crate::hierarchy`]).
+    Ancestor { column: usize, depth: u32 },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Access {
     pub field: FieldRef,
+    /// The tree level a hierarchy field is read at, if any.
+    pub level: Option<u32>,
     pub path: Vec<Hop>,
     pub target: Target,
     pub ty: Type,
@@ -192,7 +198,21 @@ impl AnchorBuilder<'_> {
     /// The access for `field`, adding it if new. `Ok(None)` if the anchor
     /// can't reach the field's table.
     fn access(&mut self, field: &FieldRef) -> Result<Option<usize>, QueryError> {
-        if let Some(index) = self.plan.accesses.iter().position(|a| a.field == *field) {
+        self.access_at(field, None)
+    }
+
+    /// [`Self::access`], for a hierarchy field read at a tree level.
+    fn access_at(
+        &mut self,
+        field: &FieldRef,
+        level: Option<u32>,
+    ) -> Result<Option<usize>, QueryError> {
+        if let Some(index) = self
+            .plan
+            .accesses
+            .iter()
+            .position(|a| a.field == *field && a.level == level)
+        {
             return Ok(Some(index));
         }
 
@@ -208,15 +228,29 @@ impl AnchorBuilder<'_> {
             .dataset(field.table)
             .and_then(|d| d.field(&field.field))
             .ok_or_else(|| error(format!("unknown field `{}`", label(self.model, field))))?;
-        let target = match &found.source {
-            FieldSource::Column(id) => Target::Column(
-                table
-                    .columns
-                    .iter()
-                    .position(|c| c.id == *id)
-                    .ok_or_else(|| error("unknown column"))?,
-            ),
-            FieldSource::Derived { expression, .. } => {
+        let position = |id: &tidepool_model::ir::ColumnId| {
+            table
+                .columns
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or_else(|| error("unknown column"))
+        };
+        let target = match (&found.source, level) {
+            (FieldSource::Hierarchy(Hierarchy { key, .. }), Some(depth)) => Target::Ancestor {
+                column: position(key)?,
+                depth,
+            },
+            (_, Some(_)) => {
+                return Err(error(format!(
+                    "`{}` isn't a hierarchy, so it has no levels",
+                    label(self.model, field)
+                )));
+            }
+            // a hierarchy's values are its node keys
+            (FieldSource::Column(id) | FieldSource::Hierarchy(Hierarchy { key: id, .. }), None) => {
+                Target::Column(position(id)?)
+            }
+            (FieldSource::Derived { expression, .. }, None) => {
                 let ast = syntax::parse(expression).map_err(|e| error(e.0))?;
                 Target::Derived(check_row(&ast, &ColumnScope { table }).map_err(error)?)
             }
@@ -232,6 +266,7 @@ impl AnchorBuilder<'_> {
                     Target::Derived(expr) => expr
                         .slots()
                         .contains(&u32::try_from(*c).unwrap_or(u32::MAX)),
+                    Target::Ancestor { .. } => false,
                 };
                 reads.then_some(AccessShift {
                     by: *by,
@@ -242,6 +277,7 @@ impl AnchorBuilder<'_> {
         };
         self.plan.accesses.push(Access {
             field: field.clone(),
+            level,
             path: route,
             target,
             ty: found.ty,
@@ -465,7 +501,7 @@ pub(crate) fn plan(
             plan: std::mem::replace(anchor, empty(TableId(0))),
         };
         for dim in &query.dimensions {
-            let access = builder.access(&dim.field)?.ok_or_else(|| {
+            let access = builder.access_at(&dim.field, dim.level)?.ok_or_else(|| {
                 let table = model
                     .dataset(builder.plan.table)
                     .map_or("?", |d| d.name.as_str());
@@ -499,10 +535,7 @@ pub(crate) fn values(
     selection: &Selection,
 ) -> Result<Plan, QueryError> {
     let query = Query {
-        dimensions: vec![crate::query::Dim {
-            field: field.clone(),
-            grain: None,
-        }],
+        dimensions: vec![crate::query::Dim::of(field.clone())],
         selection: selection.clone(),
         ..Query::default()
     };
@@ -581,7 +614,7 @@ fn shift_on(model: &Model, field: &FieldRef) -> Result<ShiftOn, QueryError> {
                 .and_then(|t| t.columns.iter().position(|c| c.id == *id))
                 .ok_or_else(|| error("unknown column"))?,
         ),
-        FieldSource::Derived { .. } => ShiftOn::Field(field.clone()),
+        FieldSource::Derived { .. } | FieldSource::Hierarchy(_) => ShiftOn::Field(field.clone()),
     })
 }
 

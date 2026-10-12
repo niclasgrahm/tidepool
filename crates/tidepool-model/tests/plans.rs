@@ -274,3 +274,49 @@ scenario!(
         r#"data: '{"filter_direction": "both"}'"#
     )]
 );
+
+const TREE_EXTENSION: &str = "    primary_key: [category]\n    custom_extensions:\n      - vendor_name: TIDEPOOL                # a parent–child hierarchy (plan §5.6): a tree\n        data: '{\"hierarchy\": {\"name\": \"tree\", \"parent\": \"parent\", \"kind\": \"level\"}}'\n";
+const TREE_FILTER: &str =
+    "  - field: categories.tree               # a hierarchy: shown as a tree\n";
+
+scenario!(
+    add_a_hierarchy_over_a_column_with_data,
+    base: [
+        Replace("model.ossie.yaml", TREE_EXTENSION, "    primary_key: [category]\n"),
+        Replace("dashboards/sales.yaml", TREE_FILTER, ""),
+    ],
+    [
+        Replace("model.ossie.yaml", "    primary_key: [category]\n", TREE_EXTENSION),
+    ]
+);
+scenario!(
+    add_a_hierarchy_with_a_new_parent_column,
+    base: [
+        Replace("model.ossie.yaml", TREE_EXTENSION, "    primary_key: [category]\n"),
+        Replace("dashboards/sales.yaml", TREE_FILTER, ""),
+        Replace("tables/categories.yaml", "  parent:   { type: string, nullable: true }   # the parent category; NULL at the top\n", ""),
+    ],
+    [
+        Replace("tables/categories.yaml", "  level:", "  parent:   { type: string, nullable: true }\n  level:"),
+        Replace("model.ossie.yaml", "    primary_key: [category]\n", TREE_EXTENSION),
+    ]
+);
+scenario!(
+    remove_a_hierarchy,
+    [
+        Replace(
+            "model.ossie.yaml",
+            TREE_EXTENSION,
+            "    primary_key: [category]\n"
+        ),
+        Replace("dashboards/sales.yaml", TREE_FILTER, ""),
+    ]
+);
+scenario!(
+    measure_a_filter,
+    [Replace(
+        "dashboards/sales.yaml",
+        "  - field: products.category\n",
+        "  - field: products.category\n    measure: order_count\n"
+    )]
+);

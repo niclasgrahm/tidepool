@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: relationships form a cycle: customers → products → customers
-  --> model.ossie.yaml:45:11
+  --> model.ossie.yaml:56:11
    |
-45 |   - name: customer_favourite
+56 |   - name: customer_favourite
    |           ^^^^^^^^^^^^^^^^^^
    = help: relationships point from the many side to the one side and can't loop back
 

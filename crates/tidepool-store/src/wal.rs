@@ -77,12 +77,15 @@ fn encode(lsn: u64, entry: &Entry) -> Vec<u8> {
     };
     out.u32(table.0);
     // 0/1: a write/delete; 3/4: the same with a key (records written
-    // before keys were logged are 0/1, and still read)
+    // before keys were logged are 0/1, and still read); 5/6: a replace,
+    // without and with a key
     out.u8(match (op, key) {
         (Op::Write, None) => 0,
         (Op::Delete, None) => 1,
         (Op::Write, Some(_)) => 3,
         (Op::Delete, Some(_)) => 4,
+        (Op::Replace, None) => 5,
+        (Op::Replace, Some(_)) => 6,
     });
     if let Some(key) = key {
         keys::put(&mut out, key);
@@ -128,6 +131,8 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
         1 => (Op::Delete, false),
         3 => (Op::Write, true),
         4 => (Op::Delete, true),
+        5 => (Op::Replace, false),
+        6 => (Op::Replace, true),
         2 => {
             return Ok(Record {
                 lsn,

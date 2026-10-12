@@ -1,0 +1,7 @@
+indu:
+  type: indu
+  url: http://localhost:8080          # indud
+  api_key: ${INDU_API_KEY}            # `indud apps register --kind kayak`
+tidepool:
+  type: tidepool
+  url: http://localhost:7070

@@ -192,6 +192,34 @@ pub enum FieldSource {
         expression: String,
         columns: Vec<ColumnId>,
     },
+    /// A parent–child hierarchy over the table's rows (plan §5.6): its
+    /// values are node keys (the `key` column's), and selecting a node
+    /// selects it and everything below it.
+    Hierarchy(Hierarchy),
+}
+
+/// The columns of a hierarchy field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Hierarchy {
+    /// The table's primary key: a node's identity.
+    pub key: ColumnId,
+    /// The parent node's key; NULL (or a key that isn't there) for a root.
+    pub parent: ColumnId,
+    /// What a node is shown as; the key when `None`.
+    pub label: Option<ColumnId>,
+    /// What kind of node it is.
+    pub kind: Option<ColumnId>,
+}
+
+impl Field {
+    /// The hierarchy this field is, if it is one.
+    #[must_use]
+    pub fn hierarchy(&self) -> Option<&Hierarchy> {
+        match &self.source {
+            FieldSource::Hierarchy(h) => Some(h),
+            _ => None,
+        }
+    }
 }
 
 /// A field, addressed through its dataset's table.
@@ -285,6 +313,8 @@ pub struct Filter {
     pub widget: tidepool_config::dashboard::FilterWidget,
     /// The window it starts with when the dashboard is opened.
     pub default: Option<tidepool_config::dashboard::RelativeWindow>,
+    /// Shown beside each value instead of its row count.
+    pub measure: Option<MetricId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

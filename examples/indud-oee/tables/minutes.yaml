@@ -1,0 +1,15 @@
+# Each machine's minutes: what state it was in, why it wasn't running, and
+# the units it made (good and rejected). One row per machine per minute, as
+# an edge computes them from a state sensor and two counters. Every OEE
+# metric is over these rows, so one time selection narrows all of them.
+name: minutes
+mode: append
+event_time: at
+retention: 30d
+columns:
+  device_id: { type: string }
+  at:        { type: timestamptz }
+  state:     { type: string }                  # running, stopped, setup
+  reason:    { type: string, nullable: true }  # why it wasn't running
+  good:      { type: int32 }
+  reject:    { type: int32 }

@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `by_region`: metric `product_count` counts rows of `products`, which can't be grouped by `customers.region`
-  --> dashboards/sales.yaml:16:18
+  --> dashboards/sales.yaml:18:18
    |
-16 |     dimensions: [customers.region]
+18 |     dimensions: [customers.region]
    |                  ^^^^^^^^^^^^^^^^
    = help: no relationship path leads from `products` to `customers`
 

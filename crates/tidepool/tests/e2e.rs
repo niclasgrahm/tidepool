@@ -417,6 +417,92 @@ fn click_a_bar_watch_it_update_go_back() {
     );
 }
 
+#[test]
+fn open_a_tree_select_a_branch_see_its_path() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "categories",
+        &json!([
+            {"category": "outdoor", "parent": null, "level": "department"},
+            {"category": "water", "parent": "outdoor", "level": "aisle"},
+            {"category": "camping", "parent": "outdoor", "level": "aisle"},
+            {"category": "kayaks", "parent": "water", "level": "category"},
+            {"category": "tents", "parent": "camping", "level": "category"},
+        ]),
+    );
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([
+            {"product_id": "p1", "name": "Kayak", "category": "kayaks", "list_price": "900.00"},
+            {"product_id": "p2", "name": "Tent", "category": "tents", "list_price": "300.00"},
+        ]),
+    );
+    let order = |id: &str, product: &str, amount: &str| {
+        json!({
+            "order_id": id, "customer_id": "c1", "product_id": product, "status": "paid",
+            "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": amount, "note": null,
+        })
+    };
+    post(
+        address,
+        "orders",
+        &json!([order("o1", "p1", "900.00"), order("o2", "p2", "300.00")]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    browser.wait_for(&format!("{KPI} === '1,200.00'"), "the KPI to show 1,200.00");
+
+    // open outdoor, then select its water aisle
+    // a node's own text, without its kind beside it
+    let label = "(n => [...n.childNodes].filter(c => c.nodeType === 3).map(c => c.textContent).join('').trim())";
+    let rows = format!(
+        "[...document.querySelectorAll('.filter.tree .node-label')].map({label}).join(' ')"
+    );
+    browser.wait_for(&format!("{rows} === 'outdoor'"), "the tree's one root");
+    browser.click_element("document.querySelector('.filter.tree .twist')");
+    browser.wait_for(
+        &format!("{rows} === 'outdoor camping water'"),
+        "outdoor's aisles under it",
+    );
+    browser.click_element(
+        "[...document.querySelectorAll('.filter.tree .value')].find(b => b.textContent.startsWith('water'))",
+    );
+    browser.wait_for(
+        &format!("{CHIPS}.includes('outdoor › water')"),
+        "a chip with the aisle's path",
+    );
+    browser.wait_for(
+        &format!("{KPI} === '900.00'"),
+        "the KPI to show water's 900.00",
+    );
+    let holds = browser.eval(&format!(
+        "[...document.querySelectorAll('.filter.tree .value.holds .node-label')].map({label}).join()"
+    ));
+    assert_eq!(
+        holds,
+        json!("outdoor"),
+        "outdoor marks the selection below it"
+    );
+}
+
 /// A time `days` before now, as the API takes it.
 fn days_ago(days: i64) -> String {
     let now = std::time::SystemTime::now()

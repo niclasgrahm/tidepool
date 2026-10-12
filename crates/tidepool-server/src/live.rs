@@ -36,41 +36,25 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde_json::Value as Json;
+use tidepool_config::dashboard::FilterWidget;
 use tidepool_engine::{Condition, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
 use tidepool_protocol::live::{
-    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, FilterValue, GridAt, RelativeUnit,
-    RelativeWindow, SelectMode, SelectedField, ServerMessage, ValueState, VisualFrame, VisualInfo,
+    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, GridAt, RelativeUnit, RelativeWindow,
+    SelectMode, SelectedField, ServerMessage, VisualFrame, VisualInfo,
 };
 use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
 use tokio::sync::mpsc;
 
 use crate::AppState;
+use crate::filters::{self, Window, token};
 use crate::query::{field, json, resolve, result, scalar, window_condition};
 
 /// Messages a session hasn't sent yet, at most; past this a slow client is
 /// dropped rather than buffered without end.
 const BACKLOG: usize = 256;
-
-/// One filter list's window.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Window {
-    offset: usize,
-    limit: usize,
-    search: Option<String>,
-}
-
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            offset: 0,
-            limit: 100,
-            search: None,
-        }
-    }
-}
 
 /// A selection as a session's viewer made it: conditions, and windows
 /// relative to now, which become conditions whenever it's used. A field has
@@ -143,6 +127,8 @@ struct SessionState {
     shown: Option<Selection>,
     paused: bool,
     windows: HashMap<String, Window>,
+    /// Tree filters' open nodes, by field (keys as [`token`]s).
+    open: HashMap<String, BTreeSet<String>>,
     /// Sort overrides by visual: (result column, descending).
     sorts: HashMap<String, (String, bool)>,
     /// What was last sent per visual or filter (a hash of it).
@@ -373,6 +359,9 @@ fn follow(session: &Session, previous: &Model, snapshot: &Snapshot, now: i64) {
             });
         }
         inner.sent.clear();
+        inner.open.retain(|name, _| {
+            field(model, name).is_ok_and(|(at, _)| field_type(previous, &at).is_some())
+        });
         let removed = inner
             .dashboard
             .take_if(|d| !model.dashboards.iter().any(|x| x.slug == *d));
@@ -558,6 +547,34 @@ fn apply(
                 frame: true,
             }
         }
+        ClientMessage::FilterOpen {
+            field: name,
+            keys,
+            open,
+        } => {
+            let (at, ty) = field(model, &name)?;
+            if tidepool_engine::hierarchy::columns(model, &at).is_none() {
+                return Err(format!(
+                    "`{name}` isn't a hierarchy, so it has no nodes to open"
+                ));
+            }
+            let keys = keys
+                .iter()
+                .map(|v| scalar(v, ty).ok_or_else(|| format!("`{v}` isn't a key of `{name}`")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let nodes = inner.open.entry(name).or_default();
+            for key in &keys {
+                if open {
+                    nodes.insert(token(key));
+                } else {
+                    nodes.remove(&token(key));
+                }
+            }
+            Changed {
+                selection: false,
+                frame: true,
+            }
+        }
         ClientMessage::Sort {
             visual,
             column,
@@ -721,6 +738,14 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                     Some(tidepool_expr::Type::Timestamp | tidepool_expr::Type::TimestampTz)
                 ),
                 default: f.default.map(window_of),
+                measure: f
+                    .measure
+                    .and_then(|id| model.metric(id))
+                    .map(|m| m.name.clone()),
+                measure_format: f
+                    .measure
+                    .and_then(|id| model.metric(id))
+                    .and_then(|m| m.format.clone()),
             })
             .collect(),
         visuals: dashboard
@@ -761,6 +786,7 @@ fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
         .map(|d| QueryDimension {
             field: label(model, &d.field),
             grain: d.grain.map(|g| format!("{g:?}").to_lowercase()),
+            level: None,
         })
         .collect();
     let sort = visual
@@ -799,7 +825,7 @@ fn hash_of(value: &impl serde::Serialize) -> u64 {
 /// Send a session what changed on its dashboard as of `snapshot`, as one
 /// frame. Nothing when paused, without a dashboard, or when nothing changed.
 fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
-    let (dashboard, selection, windows, sorts) = {
+    let (dashboard, selection, windows, open, sorts) = {
         let inner = session.lock();
         if inner.paused || inner.out.is_none() {
             return;
@@ -811,6 +837,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
             dashboard,
             inner.selection(),
             inner.windows.clone(),
+            inner.open.clone(),
             inner.sorts.clone(),
         )
     };
@@ -827,11 +854,19 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     let filters: Vec<FilterFrame> = dashboard
         .filters
         .iter()
-        .filter(|f| f.widget == tidepool_config::dashboard::FilterWidget::List)
         .filter_map(|f| {
             let name = label(model, &f.field);
             let window = windows.get(&name).cloned().unwrap_or_default();
-            filter_frame(state, snapshot, &f.field, name, &selection, &window).ok()
+            match f.widget {
+                FilterWidget::List => {
+                    filters::list(state, snapshot, f, name, &selection, &window).ok()
+                }
+                FilterWidget::Tree => {
+                    let open = open.get(&name).cloned().unwrap_or_default();
+                    filters::tree(state, snapshot, f, name, &selection, &window, &open).ok()
+                }
+                FilterWidget::DateRange => None,
+            }
         })
         .collect();
 
@@ -918,71 +953,6 @@ fn visual_frame(
             compare: None,
         },
     }
-}
-
-fn filter_frame(
-    state: &AppState,
-    snapshot: &Snapshot,
-    at: &FieldRef,
-    name: String,
-    selection: &Selection,
-    window: &Window,
-) -> Result<FilterFrame, tidepool_engine::QueryError> {
-    let all = state.engine.values(snapshot, at, &Selection::default())?;
-    // Qlik's rule: a field's own selection doesn't narrow its alternatives
-    let mut others = selection.clone();
-    let own = others.0.remove(at);
-    let possible = state.engine.values(snapshot, at, &others)?;
-    let rows: HashMap<String, i64> = possible
-        .iter()
-        .map(|(v, n)| (format!("{v:?}"), *n))
-        .collect();
-    let selected: BTreeSet<String> = match &own {
-        Some(Condition::In(values)) => values.iter().map(|v| format!("{v:?}")).collect(),
-        _ => BTreeSet::new(),
-    };
-    let in_range = |value: &Scalar| match &own {
-        Some(condition @ Condition::Range { .. }) => condition.matches(value),
-        _ => false,
-    };
-    let search = window.search.as_ref().map(|s| s.to_lowercase());
-    let values: Vec<FilterValue> = all
-        .iter()
-        .map(|(value, _)| {
-            let key = format!("{value:?}");
-            let state = if selected.contains(&key) || in_range(value) {
-                ValueState::Selected
-            } else if rows.contains_key(&key) {
-                ValueState::Possible
-            } else {
-                ValueState::Excluded
-            };
-            FilterValue {
-                value: json(value),
-                state,
-                rows: rows.get(&key).copied().unwrap_or(0),
-            }
-        })
-        .filter(|v| {
-            search.as_ref().is_none_or(|s| {
-                let text = match &v.value {
-                    Json::String(text) => text.to_lowercase(),
-                    other => other.to_string(),
-                };
-                text.contains(s.as_str())
-            })
-        })
-        .collect();
-    Ok(FilterFrame {
-        field: name,
-        total: values.len(),
-        offset: window.offset,
-        values: values
-            .into_iter()
-            .skip(window.offset)
-            .take(window.limit)
-            .collect(),
-    })
 }
 
 /// Start the epoch loop, once per server.

@@ -58,6 +58,10 @@ fn version(previous: Option<&ModelVersion>, variant: bool) -> ModelVersion {
             "tables/products.yaml".to_string(),
             read("tables/products.yaml"),
         ),
+        (
+            "tables/categories.yaml".to_string(),
+            read("tables/categories.yaml"),
+        ),
     ];
     if variant {
         files[1].1 = files[1].1.replace(
@@ -138,7 +142,7 @@ struct Write_(String, Op, Value);
 fn random_write(rng: &mut Rng, serial: &mut u64) -> Write_ {
     *serial += 1;
     let regions = ["north", "south", "east", "west"];
-    match rng.below(10) {
+    match rng.below(11) {
         0..=2 => {
             let rows: Vec<Value> = (0..=rng.below(5))
                 .map(|_| {
@@ -157,6 +161,21 @@ fn random_write(rng: &mut Rng, serial: &mut u64) -> Write_ {
                 .map(|_| json!({"customer_id": format!("c{}", rng.below(30))}))
                 .collect();
             Write_("customers".into(), Op::Delete, Value::Array(keys))
+        }
+        // the customers' whole contents: the ones not listed go
+        10 => {
+            let mut rows: Vec<Value> = Vec::new();
+            for c in 0..30 {
+                if rng.chance(40) {
+                    let region = regions[usize::try_from(rng.below(4)).unwrap_or(0)];
+                    rows.push(json!({
+                        "customer_id": format!("c{c}"),
+                        "name": format!("Name {}", rng.below(1000)),
+                        "region": region,
+                    }));
+                }
+            }
+            Write_("customers".into(), Op::Replace, Value::Array(rows))
         }
         _ => {
             let rows: Vec<Value> = (0..=rng.below(20))

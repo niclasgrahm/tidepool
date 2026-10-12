@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `revenue_prev_year`: time_field `orders.status` is not a time field
-  --> model.ossie.yaml:73:15
+  --> model.ossie.yaml:84:15
    |
-73 |         data: '{"time_offset": "-1y", "time_field": "orders.status"}'
+84 |         data: '{"time_offset": "-1y", "time_field": "orders.status"}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 1 error, 0 warnings

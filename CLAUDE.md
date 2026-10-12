@@ -180,6 +180,9 @@ One writer thread owns the `Store`; everything else reads immutable
   the model enforces, so a single-column key is a dense array by code.
 - **Upserts track changed columns** per epoch (`TableSnapshot::changed`): a
   rewrite with identical values changes nothing downstream.
+- **`Op::Replace`** (`PUT …/rows`): the batch is the table's whole
+  contents; it's written as upserts and every live key it didn't list is
+  deleted, in the same batch (WAL op codes 5/6, replayed as is).
 - **Decoding** (JSON, NDJSON, Arrow) is strict: values are checked, never
   coerced; a batch is all or nothing; every problem is listed by row and
   column. Decimals are parsed from their text, never through `f64`.
@@ -288,6 +291,19 @@ walks the table to prove it.
   (the compiler checks), so this is exact message passing; the executors
   never know.
 
+- **Hierarchies** (`hierarchy.rs`, plan §5.6): a dataset's
+  `{"hierarchy": …}` extension adds a field whose values are node keys
+  (`FieldSource::Hierarchy`); the parent column joins the key's
+  dictionary through `key_domains`, never as a `Relationship` (paths,
+  `assoc` and cycle checks would loop on a self-edge). `resolve` turns a
+  condition on it into a `Condition::Set` of subtree keys on the key
+  field, per anchor after `ignore_selection` and before `assoc`, against
+  the query's snapshot (so moves apply live). The tree is cached by the
+  table's identity like the other caches; `Dim.level` groups by ancestor
+  at a depth via `Target::Ancestor`, a derived dictionary built from the
+  tree (map-cache variant `ancestor:d`) and never put in
+  `Caches::derived`, whose values must not change.
+
 - **Incremental answers** (`Incremental` in `fast.rs`): with an `Engine`,
   each anchor's aggregate state is kept with a row-id high-water mark and
   the deleted rows it accounted for. The next epoch scans only appended
@@ -312,7 +328,11 @@ cut to the fields that can change it (`tidepool_engine::relevant`), which
 is what makes sessions on the same dashboard share work. One epoch loop
 refreshes every session from the newest snapshot (coalescing); selection
 changes are answered at once, outside it. Never hold a session's lock
-while calling `Session::send`: it takes the lock itself. A selection can
+while calling `Session::send`: it takes the lock itself. Filter frames are
+built in `filters.rs`: lists, and trees (visible nodes depth first through
+the session's `open` set, states rolled up, `inside`/`holds`, the chosen
+nodes' paths); a filter's `measure` is one grouped query, per depth on
+screen for a tree. A selection can
 hold windows relative to now (`Chosen::windows`, "Last 7 days"): they are
 resolved into ranges with `AppState::clock` (tests stop it with
 `set_clock`) whenever a query runs, so the engine never sees one, and the
@@ -438,6 +458,9 @@ It is a workspace member, so `just ci` lints and tests it natively.
 
 - Spikes live in `spikes/`, outside the workspace, and are kept for reference
   once their decision is recorded in the plan.
+- `examples/indud-oee/` is an OEE project over indud's namespace (a
+  hierarchy fed by Kayak's `indu_namespace` input with `write: replace`;
+  `simulate.sh --sample` runs it without indud).
 - `examples/retail/` is the example project. Keep it covering every config
   feature as features land. A server run on it writes applied changes back
   into it (`git_commit: false` keeps them out of history); the demo in

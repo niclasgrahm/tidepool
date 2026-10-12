@@ -590,3 +590,150 @@ case!(
         ),
     ]
 );
+
+// --- hierarchies and filter measures ---------------------------------------------
+
+const TREE: &str =
+    r#"data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "level"}}'"#;
+
+case!(
+    hierarchy_named_like_a_column,
+    [
+        // the dashboard names the hierarchy by its old name
+        Replace(
+            "dashboards/sales.yaml",
+            "  - field: categories.tree               # a hierarchy: shown as a tree\n",
+            ""
+        ),
+        Replace(
+            "model.ossie.yaml",
+            TREE,
+            r#"data: '{"hierarchy": {"name": "parent", "parent": "parent", "kind": "level"}}'"#
+        ),
+    ]
+);
+case!(
+    hierarchy_name_not_an_identifier,
+    [
+        // the dashboard names the hierarchy by its old name
+        Replace(
+            "dashboards/sales.yaml",
+            "  - field: categories.tree               # a hierarchy: shown as a tree\n",
+            ""
+        ),
+        Replace(
+            "model.ossie.yaml",
+            TREE,
+            r#"data: '{"hierarchy": {"name": "the tree", "parent": "parent", "kind": "level"}}'"#
+        ),
+    ]
+);
+case!(
+    hierarchy_unknown_parent,
+    [Replace(
+        "model.ossie.yaml",
+        TREE,
+        r#"data: '{"hierarchy": {"name": "tree", "parent": "parnet", "kind": "level"}}'"#
+    )]
+);
+case!(
+    hierarchy_unknown_kind,
+    [Replace(
+        "model.ossie.yaml",
+        TREE,
+        r#"data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "levle"}}'"#
+    )]
+);
+case!(
+    hierarchy_parent_is_the_key,
+    [Replace(
+        "model.ossie.yaml",
+        TREE,
+        r#"data: '{"hierarchy": {"name": "tree", "parent": "category", "kind": "level"}}'"#
+    )]
+);
+case!(
+    hierarchy_parent_of_another_type,
+    [Replace(
+        "tables/categories.yaml",
+        "  parent:   { type: string, nullable: true }",
+        "  parent:   { type: int64, nullable: true }"
+    )]
+);
+case!(
+    hierarchy_parent_plain,
+    [Replace(
+        "tables/categories.yaml",
+        "  parent:   { type: string, nullable: true }",
+        "  parent:   { type: string, nullable: true, encoding: plain }"
+    )]
+);
+case!(
+    hierarchy_on_an_append_table,
+    [Replace(
+        "model.ossie.yaml",
+        "      - name: status\n        expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }\n",
+        "      - name: status\n        expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }\n    custom_extensions:\n      - vendor_name: TIDEPOOL\n        data: '{\"hierarchy\": {\"name\": \"tree\", \"parent\": \"status\"}}'\n"
+    )]
+);
+case!(
+    hierarchy_over_a_two_column_key,
+    [
+        Add(
+            "tables/shelves.yaml",
+            "name: shelves\nmode: upsert\nprimary_key: [aisle, shelf]\ncolumns:\n  aisle: { type: string }\n  shelf: { type: string }\n  above: { type: string, nullable: true }\n"
+        ),
+        Replace(
+            "model.ossie.yaml",
+            "\nrelationships:\n",
+            "  - name: shelves\n    source: shelves\n    custom_extensions:\n      - vendor_name: TIDEPOOL\n        data: '{\"hierarchy\": {\"name\": \"stack\", \"parent\": \"above\"}}'\n\nrelationships:\n"
+        ),
+    ]
+);
+case!(
+    self_relationship,
+    [Replace(
+        "model.ossie.yaml",
+        "  - name: product_category\n",
+        "  - name: category_parent\n    from: categories\n    to: categories\n    from_columns: [parent]\n    to_columns: [category]\n  - name: product_category\n"
+    )]
+);
+case!(
+    tree_on_a_field_that_is_no_hierarchy,
+    [Replace(
+        "dashboards/sales.yaml",
+        "  - field: products.category\n",
+        "  - field: products.category\n    widget: tree\n"
+    )]
+);
+case!(
+    filter_measures_unknown_metric,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    measure: revenue ",
+        "    measure: revenu "
+    )]
+);
+case!(
+    filter_measure_on_a_date_range,
+    [Replace(
+        "dashboards/sales.yaml",
+        "  - field: orders.ordered_at\n    widget: date_range\n",
+        "  - field: orders.ordered_at\n    widget: date_range\n    measure: revenue\n"
+    )]
+);
+case!(
+    filter_measure_unreachable,
+    [
+        Replace(
+            "model.ossie.yaml",
+            "\ncustom_extensions:\n  - vendor_name: TIDEPOOL\n    data: '{\"filter_direction\"",
+            "  - name: product_count\n    expression: { dialects: [{ dialect: ANSI_SQL, expression: \"COUNT(products.product_id)\" }] }\n\ncustom_extensions:\n  - vendor_name: TIDEPOOL\n    data: '{\"filter_direction\""
+        ),
+        Replace(
+            "dashboards/sales.yaml",
+            "    measure: revenue ",
+            "    measure: product_count "
+        ),
+    ]
+);
