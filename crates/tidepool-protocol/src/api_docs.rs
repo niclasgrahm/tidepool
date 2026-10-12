@@ -1180,7 +1180,8 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           config. Kinds: `server` (tidepool.yaml), `table` (tables/*.yaml), \
                           `model` (model.ossie.yaml), `dashboard` (dashboards/*.yaml), and the \
                           JSON inside TIDEPOOL extensions: `metric-extension`, \
-                          `field-extension`, `relationship-extension`, `model-extension`.",
+                          `field-extension`, `dataset-extension`, `relationship-extension`, \
+                          `model-extension`.",
             tag: Tag::Reference,
             access: Access::Public,
             params: vec![ParamDoc {
