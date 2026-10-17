@@ -102,7 +102,7 @@ agents:
   auto_apply: [safe]             # change classes an agent may apply without human approval
 ```
 
-Planned (§9.2, D15): `listen` as a map of listeners per surface (`public`, `ingest`, `admin`), and `auth.ingest` as a list of named credentials scoped to tables and operations, some of them `public`. The single address and `ingest_token_env` stay accepted.
+Since §9.2 (D15): `listen` can be a map of listeners per surface (`public`, `ingest`, `admin`), and `auth.ingest` a list of named credentials scoped to tables and operations, some of them `public`. The single address and `ingest_token_env` stay accepted.
 
 ### 3.3 Table file
 
@@ -454,7 +454,7 @@ query:   ?wait=visible                (respond only after the rows' epoch is pub
   - Output in every case: a normalized Arrow `RecordBatch`.
 - **Batches are atomic:** either the whole batch is accepted or none of it.
 - **Durability:** the normalized batch is appended to the WAL. The response is sent after group-commit fsync (`durability: fsync`) or immediately (`async`). Then the batch is queued for the writer thread.
-- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data. Planned (§9.2): keys scoped by credential as well, `(credential, table, key)`, with the capacity split per credential, so one producer can neither claim nor evict another's keys.
+- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data. Since §9.2 keys are scoped by credential as well, `(credential, table, key)`, with the 100k capacity per credential, so one producer can neither claim nor evict another's keys.
 - **Replace** (`PUT`, `Op::Replace`, done 2026-10-10): for a dimension kept in step with a system of record that can only be read whole (indud's namespace, a catalogue). The batch's rows are written as upserts, then every live row whose key it didn't list is deleted, in one writer batch, so one epoch and one WAL record (op codes 5/6). Replay applies it to the same state, so it needs no expanded deletes in the log; the crash suite mixes replaces into its workload and catches one logged as a plain write. `replaced` counts rows replaced and rows deleted (the receipt keeps its three counts). An empty body empties the table.
 - **Backpressure:** a bounded writer queue. When it's full, respond `503` with `Retry-After`.
 - **Discovery:**
@@ -773,7 +773,7 @@ source: startup │ file watcher │ PUT /v1/config │ UI editor │ MCP propos
 | **safe** | add table · add nullable column (old segments read it as virtual all-NULL) · add/edit/remove metric · add/edit field expression · add/edit/remove dashboard · change retention · change epoch interval | instant, at next epoch |
 | **rebuild** | add relationship between existing populated tables (dictionaries must be merged into one key domain, and one side's key codes remapped) · change encoding · widen type (int32→int64, decimal precision up) · add non-nullable column with default · change PK of upsert table | background job builds new segment versions, swapped at an epoch; progress shown in the UI; old version keeps serving until the swap |
 | **destructive** | drop table/column · narrow type · change table mode · remove a relationship used by dashboards | needs explicit approval (human) |
-| **security** (planned, §9.2) | any change to `auth`, `listen` or `agents` in `tidepool.yaml`: a credential added, a table granted publicly, an operation widened, `auto_apply` changed | needs explicit approval (human); never in `auto_apply` |
+| **security** (§9.2) | any change to `auth`, `listen` or `agents` in `tidepool.yaml`: a credential added, a table granted publicly, an operation widened, `auto_apply` changed | needs explicit approval (human); never in `auto_apply` |
 
 ### 8.3 Plans are first-class
 
@@ -823,7 +823,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 - **Roles:** `viewer` and `admin` (config apply, MCP write tools), declared per endpoint in the endpoint table.
 - **Humans:** HTTP Basic + session cookie, or **JWT** validated against an identity provider's JWKS.
 - **Embedding:** Kayak's iframe handshake (`?auth_token=` exchanged at `POST /v1/auth/token` for a session cookie), so Tidepool dashboards can be embedded in other apps.
-- **Off by default on loopback.** The server warns at startup when it's bound to anything else without auth. Planned (§9.2): it refuses to start instead, when ingest or admin is open off loopback.
+- **Off by default on loopback.** Since §9.2 the server refuses to start when ingest or admin is open off loopback (`--insecure-open` for demos), and warns for an open read level.
 - **Exposure** (§9.2, D15): listeners per surface, named and scoped ingest credentials, public grants with limits.
 
 ### 9.1 MCP tools
@@ -840,7 +840,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 
 ### 9.2 Exposure: listeners and ingest credentials
 
-**Status: designed 2026-10-17, not built.** D15 is the decision; this is how it works.
+**Status: done 2026-10-17.** D15 is the decision; this is how it works. Changes from the design, as built: the idempotency capacity is 100k keys per credential, the same for public ones (a flood evicts only its own keys); the credential is in the WAL records of keyed writes (op codes 7/8/9; checkpoints `TPC4`), which is what recovery needs, and per batch only in metrics; new values are counted on the writer thread against its own dictionaries (`Store::new_values`) and a batch over the budget is refused there whole, which is exact per batch where a snapshot count wasn't; the CORS preflight (`OPTIONS` on the rows path) is the one route outside the endpoint table; tokens, credentials and listeners are read at startup, so a `security` change takes effect on restart; a token for something else where some credential needs none counts as no token, as at any open level; `tidepool_ingest_requests_total` labels a table that doesn't exist `(none)`, so the public listener can't grow it with made-up names; the bare Docker image and the compose demos start with `--insecure-open ingest,admin`. Tests: `tidepool-server/tests/exposure.rs` (placement per listener, the credential matrix, limits, the queue share, CORS, filled columns, OpenAPI and MCP per listener, fail closed; six planted bugs each fail it), `config.rs` and `mcp.rs` for the `security` class, 18 golden diagnostics and 7 plan scenarios, the crash suite with two credentials sharing keys, and migration, decoder and writer cases.
 
 **The problem.** Today one address (`listen`) serves everything, so putting the UI on the internet also puts ingest, config, `/metrics` and `/mcp` there. An access level without a token is open, and away from loopback that only gets a warning. A deployment that sets only `TIDEPOOL_READ_TOKEN` has a protected dashboard and an ingest API anyone can write to, `PUT` (an empty body empties a table) and `DELETE` included. There is one ingest token, good for every table and every operation. Idempotency keys are scoped by `(table, key)` with one shared capacity, so any ingest caller can claim a key another producer will use (its batch is then answered "already done" and never written), or evict other producers' live keys by sending fresh ones. And `tidepool.yaml` goes through the config pipeline, but `auth` and `agents` changes don't appear in plans, and every setting change is `safe`, so `agents.auto_apply: [safe]` lets an agent rewrite either.
 
@@ -883,7 +883,7 @@ auth:
 - `operations`: `append` is `POST` to an append table, `upsert` is `POST` to an upsert table, `delete` is `DELETE`, `replace` is `PUT`.
 - `ingest_token_env` stays accepted and means one private credential named `ingest` with every table and operation, so existing deployments and Kayak's `tidepool` output keep working unchanged.
 - Grants live in `tidepool.yaml` (the deployment), not in table files (the model): the same model runs in dev and in production with different exposure, and secrets don't belong in files that go into git. Tokens are named by environment variable, as now.
-- The credential's name is in each batch's WAL record and in metrics (`tidepool_ingest_rows_total{credential="…"}`), so which producer wrote which batch is on record. Records written before the change replay as the `ingest` credential.
+- The credential's name is in the WAL record of each keyed write and in metrics (`tidepool_rows_written_total{credential="…"}`, `tidepool_ingest_refused_total{credential, limit}`). Records and checkpoints written before the change read as the `ingest` credential's.
 
 #### Guardrails for public grants
 
@@ -892,13 +892,13 @@ What's acceptable from Kayak isn't acceptable from the internet:
 - **Append only by default.** A public grant with `upsert`, `delete` or `replace` is allowed but gets a warning at startup and in its plan: anyone with the key can overwrite rows by key or empty the table.
 - **Limits are mandatory**, with defaults where a public grant leaves them out. Over the rate it's `429 Too Many Requests` with `Retry-After` (`503` stays "the server is busy"). Too many rows or too large a body is `413`.
 - **Reserved writer capacity.** Public batches together may hold at most a quarter of the writer queue (16 of 64), so a flood gets that caller 429s while private producers still get through.
-- **Caps on new dictionary values.** Dictionaries never shrink (risk, §13), so a public caller sending unique strings is a memory leak that lasts until compaction. The decoder counts values missing from the latest snapshot's dictionaries, per credential per window, and rejects a batch over the cap with the column named. This is an approximate count against a snapshot, which is enough for a limit.
+- **Caps on new dictionary values.** Dictionaries never shrink (risk, §13), so a public caller sending unique strings is a memory leak that lasts until compaction. The writer counts a batch's values missing from its dictionaries before applying it and refuses the batch whole when they exceed what the credential has left (a token bucket per credential), naming the column with the most. The budget is approximate under concurrency (requests in flight can each see the same budget), which is enough for a limit.
 - **Server-filled columns** (table file, model side): `ingested_by: { type: string, filled: credential }` and `received_at: { type: timestamp, filled: received }`. A producer that sends one is refused with a 400. When a public key is abused, you can find the bad rows with a filter and remove them, instead of guessing.
 - **Anonymous grants** (`token: none`) are possible only when written out in full, and only for `append`. A browser beacon's key is public by nature, so there the limits are the only protection.
 
 #### Idempotency keys per credential
 
-Keys are scoped by `(credential, table, key)`, and the capacity (§4.5) is split per credential, with public grants getting a smaller share. One producer can then neither claim nor evict another's keys. The key's credential is in the WAL record, so recovery rebuilds the same scoping. This fixes the eviction and claiming problems for a leaked ingest token too, so it comes first.
+Keys are scoped by `(credential, table, key)`, and the capacity (§4.5) is per credential. One producer can then neither claim nor evict another's keys. The key's credential is in the WAL record, so recovery rebuilds the same scoping. This fixes the eviction and claiming problems for a leaked ingest token too, so it comes first.
 
 #### Fail closed
 
@@ -1131,7 +1131,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 ### After v0.1 (ordered by expected value)
 
 1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
-2. Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns. Needed before any internet-facing deployment
+2. ~~Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns~~ (done 2026-10-17)
 3. Late binding of dimension attributes (no fact rescans on dimension upserts)
 4. Percentiles/median, approximate distinct
 5. Segment compaction and dictionary compaction

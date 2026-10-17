@@ -76,6 +76,31 @@ checks this.
 `event_time` column. tidepool removes them in the background, a sealed
 segment at a time.
 
+## filled columns
+
+tidepool can fill a column on each write. Producers do not send it:
+
+```yaml
+# fragment
+columns:
+  written_by:  { type: string, filled: credential }
+  received_at: { type: timestamptz, filled: received }
+```
+
+| `filled` | the value | the column type |
+| --- | --- | --- |
+| `credential` | the name of the [ingest credential](/operating/access#ingest-credentials) that wrote the row | `string` |
+| `received` | the time when tidepool received the row | `timestamp` or `timestamptz` |
+
+A row that sends a filled column gets `400`. A filled column cannot be part
+of the primary key. `GET /v1/tables/<name>` marks each filled column, and
+the OpenAPI document leaves them out of the rows.
+
+Use `credential` to find the rows of one producer, for example to delete
+them when its token leaked. Do not use `received` on a table that you send
+again and again as a whole. Each upsert then changes the row, and tidepool
+cannot skip the rows that did not change.
+
 ## renames
 
 Add `renamed_from` to a table or a column to keep its data when you rename

@@ -462,7 +462,13 @@ fn Editor(shared: Shared) -> impl IntoView {
                 .iter()
                 .map(|w| view! { <li class="warning">{w.clone()}</li> })
                 .collect_view();
-            let destructive = plan.class.as_deref() == Some("destructive");
+            // destructive and security changes are applied only when confirmed
+            let confirm = match plan.class.as_deref() {
+                Some("destructive") => Some(" Apply it although it deletes data"),
+                Some("security") => Some(" Apply it although it changes who can reach the server"),
+                _ => None,
+            };
+            let destructive = confirm.is_some();
             let valid = plan.valid;
             let empty = plan.changes.is_empty();
             view! {
@@ -475,11 +481,11 @@ fn Editor(shared: Shared) -> impl IntoView {
                         view! { <ul class="changes">{changes}</ul> }.into_any()
                     }}
                     <ul class="warnings">{warnings}</ul>
-                    {destructive.then(|| view! {
+                    {confirm.map(|label| view! {
                         <label class="confirm">
                             <input type="checkbox" prop:checked=move || destroy_ok.get()
                                 on:change=move |ev| destroy_ok.set(event_target_checked(&ev)) />
-                            " Apply it although it deletes data"
+                            {label}
                         </label>
                     })}
                     <div class="actions">
@@ -659,7 +665,7 @@ fn VersionDetail(shared: Shared, version: u64, current: u64) -> impl IntoView {
                                     <label class="confirm">
                                         <input type="checkbox" prop:checked=move || destroy_ok.get()
                                             on:change=move |ev| destroy_ok.set(event_target_checked(&ev)) />
-                                        " Apply it even if it deletes data"
+                                        " Apply it even if it deletes data or changes who can reach the server"
                                     </label>
                                     <div class="actions">
                                         <button on:click=move |_| revert(then.clone())>{format!("Revert to v{version}")}</button>

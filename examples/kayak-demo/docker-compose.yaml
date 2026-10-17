@@ -27,7 +27,8 @@ services:
     build:
       context: ../..
     image: tidepool:demo
-    command: ["serve", "--config", "/demo", "--data", "/data", "--listen", "0.0.0.0:7070"]
+    # a local demo: no tokens, so ingest and admin are open on purpose
+    command: ["serve", "--config", "/demo", "--data", "/data", "--listen", "0.0.0.0:7070", "--insecure-open", "ingest,admin"]
     ports: ["${TIDEPOOL_PORT:-7070}:7070"]
     volumes:
       - ./tidepool:/demo

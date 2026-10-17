@@ -12,7 +12,12 @@ docker build -t tidepool .
 ```
 
 The image is about 112 MB. It runs as uid 10001. Without arguments, it
-serves the retail example, in memory.
+serves the retail example, in memory, as a demo with ingest and admin open.
+Publish its port on loopback only:
+
+```bash
+docker run -p 127.0.0.1:7070:7070 tidepool
+```
 
 Run it with your project and a volume for the data:
 
@@ -26,8 +31,30 @@ docker run -p 7070:7070 \
 The project directory must be writable by uid 10001. Without that, tidepool
 cannot write back the changes from the web UI.
 
-Set all three tokens when the port is reachable from other machines. See
-[access](/operating/access).
+On an address other than loopback, tidepool does not start without the
+ingest and admin tokens. Set the read token too, unless the dashboards are
+for everyone. See [access](/operating/access).
+
+## a public web UI and private ingest
+
+The web UI must be where its users are. The ingest endpoints must be only
+where the producers are. Give each its own listener:
+
+```yaml
+# fragment: tidepool.yaml
+listen:
+  public: 0.0.0.0:7070
+  ingest: 10.0.0.5:7071
+  admin: 127.0.0.1:7072
+```
+
+Publish only the `public` port to the internet. Put the `ingest` address on
+the network of kayak and the other producers. Reach `admin` through SSH or a
+VPN. To let one producer write from the internet, give it a [public
+credential](/operating/access#public-ingest).
+
+Terminate TLS in front of tidepool, for example in a load balancer or a
+reverse proxy.
 
 ## the binary
 

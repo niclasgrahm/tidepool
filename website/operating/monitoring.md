@@ -10,7 +10,8 @@
 ## metrics
 
 `GET /metrics` gives the state of the server in the Prometheus text format.
-It needs the read token.
+It is on the [admin listener](/operating/access#listeners), and it needs the
+read token.
 
 | metric | type | what it is |
 | --- | --- | --- |
@@ -23,8 +24,9 @@ It needs the read token.
 | `tidepool_table_segments` | gauge | segments, per table |
 | `tidepool_dictionary_bytes` | gauge | memory of the dictionary values |
 | `tidepool_cache_bytes` | gauge | memory of the caches of the query engine |
-| `tidepool_rows_written_total` | counter | rows written or deleted through the ingest API, per table |
-| `tidepool_ingest_requests_total` | counter | ingest requests, per table, operation and status |
+| `tidepool_rows_written_total` | counter | rows written or deleted through the ingest API, per table and credential |
+| `tidepool_ingest_requests_total` | counter | ingest requests, per table, operation and status. A table that does not exist is `(none)`. |
+| `tidepool_ingest_refused_total` | counter | ingest requests that the limits of a credential refused, per credential and limit |
 | `tidepool_epoch_publish_seconds` | summary | the time to publish an epoch |
 | `tidepool_live_refresh_seconds` | summary | the time to update every live session after an epoch |
 | `tidepool_sessions` | gauge | live dashboard sessions |

@@ -463,6 +463,51 @@ async fn stale_invalid_and_destructive_changes_are_refused() {
 }
 
 #[tokio::test]
+async fn changes_to_who_can_reach_the_server_need_approval() {
+    let config = tempdir();
+    copy_example(config.path());
+    let state = opened(config.path(), None).await;
+    let yaml = std::fs::read_to_string(config.path().join("tidepool.yaml")).unwrap_or_default();
+    let granted = format!(
+        "{yaml}auth:\n  ingest:\n    - name: sensors\n      token_env: SENSOR_TOKEN\n      public: true\n      tables: [orders]\n"
+    );
+    let (status, reply) = apply(&state, json!({"tidepool.yaml": &granted}), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+    assert_eq!(reply["plan"]["class"], "security");
+    assert!(
+        reply["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("who can reach")),
+        "{reply}"
+    );
+    let (status, reply) = apply(
+        &state,
+        json!({"tidepool.yaml": &granted}),
+        json!({"approve": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(version(&state).await, 2);
+
+    // the same kind of edit in the directory waits in the queue
+    let wider = granted.replace("tables: [orders]", "tables: [orders, customers]");
+    if let Err(err) = std::fs::write(config.path().join("tidepool.yaml"), &wider) {
+        panic!("{err}");
+    }
+    tidepool_server::config::look(&state).await;
+    let state_now = get(&state, "/v1/config").await;
+    assert!(
+        state_now["external"]["change"].as_u64().is_some(),
+        "{state_now}"
+    );
+    assert_eq!(state_now["version"], 2);
+    assert_eq!(
+        get(&state, "/v1/changes").await[0]["plan"]["class"],
+        "security"
+    );
+}
+
+#[tokio::test]
 async fn proposals_wait_for_approval_and_versions_can_be_reverted_to() {
     let config = tempdir();
     copy_example(config.path());

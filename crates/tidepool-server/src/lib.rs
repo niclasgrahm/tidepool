@@ -242,10 +242,19 @@ pub fn router(state: Arc<AppState>) -> Router {
     router_on(state, Listener::ALL)
 }
 
-/// The HTTP surface as `listener` serves it, the UI included.
+/// The HTTP surface as `listener` serves it, the UI included. A
+/// documented path this listener doesn't serve (`/metrics` on the public
+/// one) is a JSON 404, never the UI.
 pub fn router_on(state: Arc<AppState>, listener: Listener) -> Router {
-    api_router_on(Arc::clone(&state), listener).fallback(move |method, uri| {
-        let response = ui::serve(&state, &method, &uri);
+    api_router_on(Arc::clone(&state), listener).fallback(move |method, uri: axum::http::Uri| {
+        let response = if endpoints::documented(uri.path()) {
+            handlers::api_error(
+                axum::http::StatusCode::NOT_FOUND,
+                format!("`{}` isn't served on this listener", uri.path()),
+            )
+        } else {
+            ui::serve(&state, &method, &uri)
+        };
         async move { response }
     })
 }

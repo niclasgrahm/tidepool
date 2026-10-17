@@ -13,7 +13,8 @@ Runs the server.
 | flag | what it does |
 | --- | --- |
 | `--config <dir>` | the project directory. Without it, the server runs with no tables. |
-| `--listen <address>` | the address to listen on. Overrides `listen` in `tidepool.yaml`. The default is loopback, `127.0.0.1:7070`. |
+| `--listen <address>` | the address to listen on, for every listener. Overrides `listen` in `tidepool.yaml`. The default is loopback, `127.0.0.1:7070`. |
+| `--insecure-open <levels>` | starts with `ingest`, `admin` or both (`ingest,admin`) open on an address other than loopback. Without it, such a server does not start. For demos only. `TIDEPOOL_INSECURE_OPEN` does the same. |
 | `--data <dir>` | keeps the data here. Overrides `data_dir`. Without either, the data is in memory only. |
 | `--ui-dir <dir>` | serves the web UI from this directory, in place of the UI in the binary. For development. |
 | `--allow-destructive` | applies a project directory that changed while the server was stopped, also when the change deletes data |

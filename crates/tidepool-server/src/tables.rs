@@ -223,6 +223,52 @@ fn writer_of(state: &AppState, request: &Request) -> Result<(Table, Writer), Box
     }
 }
 
+/// `OPTIONS /v1/tables/{table}/rows`: a browser's CORS preflight before
+/// it writes from another origin. Answered for an origin that a
+/// credential writing the table here lists; the write itself is then
+/// checked like any other.
+pub async fn preflight(
+    State(state): State<Arc<AppState>>,
+    Extension(listener): Extension<Listener>,
+    Path(table): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let origin = headers.get(header::ORIGIN).cloned();
+    let allowed = origin
+        .as_ref()
+        .and_then(|o| o.to_str().ok())
+        .is_some_and(|o| {
+            state.tokens.ingest.iter().any(|c| {
+                (c.public || !listener.public_only())
+                    && c.writes(&table)
+                    && c.origins.iter().any(|allowed| allowed == o)
+            })
+        });
+    let Some(origin) = origin.filter(|_| allowed) else {
+        return error(
+            StatusCode::FORBIDDEN,
+            "no credential writes this table from that origin",
+        );
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, PUT, DELETE"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("authorization, content-type, idempotency-key"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    response
+}
+
 /// The browser origin a request comes from, if it may write from there:
 /// `Ok(None)` for a request that isn't from a browser elsewhere.
 fn origin(writer: &Writer, headers: &HeaderMap) -> Result<Option<HeaderValue>, Box<Response>> {

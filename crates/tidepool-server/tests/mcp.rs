@@ -276,3 +276,42 @@ async fn tools_need_the_level_their_endpoint_needs() {
     let (failed, _) = tool(&state, Some("admin-secret"), "ingest_rows", rows).await;
     assert!(!failed);
 }
+
+#[tokio::test]
+async fn an_agent_never_applies_a_change_to_who_can_reach_the_server() {
+    let state = server(Tokens::default()).await;
+    let (_, config) = tool(&state, None, "get_config", json!({})).await;
+    let version = config["version"].as_u64().unwrap_or(0);
+    let yaml = config["files"]["tidepool.yaml"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    // a person lets agents apply every class there is
+    let everything = format!("{yaml}agents:\n  auto_apply: [safe, rebuild, destructive]\n");
+    let applied = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/v1/config/apply",
+            &[("content-type", "application/json")],
+            json!({"base_version": version, "files": {"tidepool.yaml": &everything}, "approve": true})
+                .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(applied.status, StatusCode::OK, "{}", applied.text());
+    // and still an agent's new credential waits for a person
+    let credential = format!(
+        "{everything}auth:\n  ingest:\n    - name: agent\n      token_env: AGENT_TOKEN\n      public: true\n      tables: [orders]\n"
+    );
+    let (failed, proposed) = tool(
+        &state,
+        None,
+        "apply_change",
+        json!({"base_version": version + 1, "files": {"tidepool.yaml": credential}}),
+    )
+    .await;
+    assert!(!failed, "{proposed}");
+    assert_eq!(proposed["status"], "queued", "{proposed}");
+    assert_eq!(proposed["plan"]["class"], "security", "{proposed}");
+}

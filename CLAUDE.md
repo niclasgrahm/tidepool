@@ -236,18 +236,37 @@ Rows endpoints exist once in the endpoint table (`/v1/tables/{table}/rows`)
 and dispatch by name at request time, so a table added to the model works
 without touching the router. The OpenAPI document replaces the templated path
 with one typed path per table (`Row_<table>` / `Key_<table>` schemas).
-Decoding runs in `spawn_blocking`. `Idempotency-Key` is per table and kept for
-24 h; with a data directory it's durable: the writer logs the key and the
-response in the batch's WAL record, checkpoints keep the live keys, and
+Decoding runs in `spawn_blocking`. `Idempotency-Key` is per credential and
+table (`keys::Scoped`) and kept for 24 h; with a data directory it's
+durable: the writer logs the key, its credential and the response in the
+batch's WAL record, checkpoints keep the live keys, and
 `AppState::with_writer` restores them (`tidepool_store::keys`).
 
 Access is enforced from the endpoint table: `auth::authorize` wraps every
 route with its declared `Access`, checking the bearer token configured for
-that level (`TIDEPOOL_{INGEST,READ,ADMIN}_TOKEN`, names configurable under
+that level (`TIDEPOOL_{READ,ADMIN}_TOKEN`, names configurable under
 `auth:`; unset = open; the admin token is good for every level) or a
 browser session (`POST /v1/auth/session` trades a token for an `HttpOnly`
 cookie; in memory, like Kayak's). `every_protected_endpoint_wants_its_token`
 walks the table to prove it.
+
+**Exposure** (plan §9.2, D15). Ingest is done by `auth::Credential`s
+(`auth.ingest`, or the single `ingest_token_env` as one named `ingest`),
+each scoped to tables and operations. For ingest routes `authorize` only
+works out the `Caller` and puts it in the request; the handler decides
+with `Caller::writer` once it knows the table and operation, together with
+the `Listener` the request came in on. Each listener (`listen.public`,
+`.ingest`, `.admin`) gets its own fold of the endpoint table
+(`api_router_on`, `endpoints::placed`); only `public` credentials write
+through a public-only listener, and there anything else is a 404 that
+looks like a missing table. Limits (`limits.rs`: rate and new-value token
+buckets per credential, a quarter of the writer queue for public batches)
+and `filled` columns (`batch::fill`) are applied in `tables.rs`; the writer
+refuses a batch over its new-values budget (`Store::new_values`).
+`tidepool_server::serve` refuses to start with ingest or admin open off loopback
+(`exposure`, `--insecure-open`). `tests/exposure.rs` covers all of it; a
+change to `auth`, `listen` or `agents` is class `security`
+(`plan::ChangeClass::needs_approval`), never auto-applied.
 
 ### The query engine (`tidepool-engine`)
 

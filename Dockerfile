@@ -4,14 +4,18 @@
 # compiled in (`embed-assets`), and a debian-slim runtime holds the one
 # binary. The same shape as Kayak's image (plan D14).
 #
-# Started bare, the image serves the retail example (in memory) on :7070:
+# Started bare, the image is a demo: the retail example (in memory) on
+# :7070, with ingest and admin open (`--insecure-open`), so publish it on
+# loopback only:
 #
-#   docker run -p 7070:7070 tidepool
+#   docker run -p 127.0.0.1:7070:7070 tidepool
 #   docker run --network host tidepool feed     # sample data, from the image
 #
-# A real project is mounted and named, with a volume for its data:
+# A real project is mounted and named, with a volume for its data and its
+# tokens; without them it refuses to start on 0.0.0.0 (plan §9.2):
 #
 #   docker run -p 7070:7070 -v ./my-project:/project -v tidepool-data:/data \
+#     -e TIDEPOOL_INGEST_TOKEN -e TIDEPOOL_ADMIN_TOKEN \
 #     tidepool serve --config /project --data /data --listen 0.0.0.0:7070
 
 ARG RUST_VERSION=1.95
@@ -61,7 +65,7 @@ USER 10001:10001
 
 EXPOSE 7070
 ENTRYPOINT ["/usr/local/bin/tidepool"]
-CMD ["serve", "--config", "/project", "--listen", "0.0.0.0:7070"]
+CMD ["serve", "--config", "/project", "--listen", "0.0.0.0:7070", "--insecure-open", "ingest,admin"]
 
 LABEL org.opencontainers.image.title="tidepool" \
   org.opencontainers.image.description="A live, associative analytics server" \

@@ -72,7 +72,9 @@ only when the rows are visible.
 
 Send an `Idempotency-Key` header with each batch. If you send the same key
 again within 24 hours, tidepool writes nothing and sends the first reply
-again. Thus a retry never writes a batch two times. Keys are per table.
+again. Thus a retry never writes a batch two times. Keys are per table and
+per [credential](/operating/access#ingest-credentials). tidepool keeps
+100,000 keys for each credential, and removes the oldest first.
 
 With a data directory, the keys survive a restart. You can retry a batch
 whose reply was lost in a crash.
@@ -82,6 +84,22 @@ whose reply was lost in a crash.
 The write queue of the server holds 64 batches. When it is full, tidepool
 answers `503` with a `Retry-After` header. Wait that number of seconds, then
 send the batch again with the same idempotency key.
+
+A credential with [limits](/operating/access#limits) gets `429` with a
+`Retry-After` header when it sends too fast, and `413` when a request is too
+large. Retry a `429` in the same way.
+
+## refusals
+
+| status | why |
+| --- | --- |
+| `400` | a value, a column or the body is wrong. The reply lists every problem. |
+| `401` | the request has no valid token |
+| `403` | the credential cannot write this table, do this operation, or write from this origin |
+| `404` | no such table. On the `public` listener, also a table that no public credential writes. |
+| `413` | over `batch_rows` or `body` |
+| `429` | over `rate` or `new_values`, or the public share of the queue is full |
+| `503` | the write queue is full |
 
 ## replace a table
 

@@ -12,7 +12,7 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tidepool_config::ConfigSet;
 use tidepool_model::{Catalog, Model, compile};
-use tidepool_server::{AppState, Assets, Tokens, router};
+use tidepool_server::{AppState, Assets, Listener, Tokens, router, router_on};
 use tidepool_store::WriterConfig;
 use tower::ServiceExt;
 
@@ -141,7 +141,17 @@ pub fn request(
 }
 
 pub async fn send(state: Arc<AppState>, request: Request<Body>) -> Reply {
-    let response = match router(state).oneshot(request).await {
+    send_on(state, Listener::ALL, request).await
+}
+
+/// `request`, come in on `listener`.
+pub async fn send_on(state: Arc<AppState>, listener: Listener, request: Request<Body>) -> Reply {
+    let app = if listener == Listener::ALL {
+        router(state)
+    } else {
+        router_on(state, listener)
+    };
+    let response = match app.oneshot(request).await {
         Ok(response) => response,
         Err(err) => panic!("the router is infallible: {err}"),
     };

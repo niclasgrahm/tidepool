@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::handler::Handler;
 use axum::middleware::Next;
-use axum::routing::{MethodRouter, delete, get, post, put};
+use axum::routing::{MethodRouter, delete, get, options, post, put};
 use axum::{Extension, Router};
 use tidepool_protocol::api_docs::{Access, ApiDoc, Body, Method, Operation, endpoints};
 
@@ -33,14 +33,34 @@ pub fn api_router(state: Arc<AppState>) -> Router {
 
 /// The documented JSON surface as `listener` serves it.
 pub fn api_router_on(state: Arc<AppState>, listener: Listener) -> Router {
-    endpoints()
+    let mut router = endpoints()
         .iter()
         .filter(|doc| placed(doc, listener, &state))
         .fold(Router::new(), |router, doc| {
             router.route(doc.path, guarded(doc, &state, listener))
-        })
-        .layer(Extension(listener))
-        .with_state(state)
+        });
+    // a browser asks before it writes from another origin (CORS); not an
+    // endpoint of its own, so not in the table
+    if let Some(rows) = endpoints()
+        .iter()
+        .find(|doc| doc.operation == Operation::IngestRows && placed(doc, listener, &state))
+    {
+        router = router.route(rows.path, options(tables::preflight));
+    }
+    router.layer(Extension(listener)).with_state(state)
+}
+
+/// Whether `path` is one the endpoint table documents (on some listener).
+pub(crate) fn documented(path: &str) -> bool {
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    endpoints().iter().any(|doc| {
+        let template: Vec<&str> = doc.path.split('/').collect();
+        template.len() == parts.len()
+            && template
+                .iter()
+                .zip(&parts)
+                .all(|(t, p)| t == p || (t.starts_with('{') && !p.is_empty()))
+    })
 }
 
 /// Whether `listener` serves `doc`: reading everywhere, config and

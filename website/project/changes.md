@@ -26,6 +26,7 @@ The sources are:
 | **safe** | a table, a nullable column, a field, a metric, a dashboard | live at the next epoch |
 | **rebuild** | a relationship between tables that hold data, an encoding, a wider type, a new primary key | tidepool rewrites the data in the background. The old version serves until the new version is ready. |
 | **destructive** | a table or a column removed, a narrower type, a new mode | needs approval |
+| **security** | a change to `listen`, `auth` or `agents` in `tidepool.yaml` | needs approval. An agent never applies it. See [access](/operating/access#changes-to-access). |
 
 `tidepool plan` shows the class of each part before you apply it:
 
@@ -41,11 +42,13 @@ tidepool applies a safe change from the files at once. A change of another
 class from the files waits for approval on **Config → Waiting for
 approval**.
 
-Over the API, add `"approve": true` to apply a destructive change. Add
+Over the API, add `"approve": true` to apply a destructive or a security
+change. Add
 `"propose": true` to put a change in the queue for a person.
 
 An agent applies only the classes in `agents.auto_apply` (`[safe]` by
-default). The other changes wait for a person.
+default). The other changes wait for a person. `auto_apply` cannot hold
+`security`.
 
 ## history
 
