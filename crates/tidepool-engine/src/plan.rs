@@ -439,6 +439,22 @@ pub(crate) fn plan(
         base_order.push(*id);
     }
 
+    // no metrics, only dimensions: the combinations there are, counted on
+    // the table nearest the one side that reaches every dimension, so a
+    // group with no rows under the selection isn't one
+    if query.metrics.is_empty() && !query.dimensions.is_empty() {
+        let tables: Vec<TableId> = query.dimensions.iter().map(|d| d.field.table).collect();
+        let anchor = rows_anchor(model, &tables)?;
+        let seen = Query {
+            selection: selection_for(anchor, &query.selection)?,
+            ..Query::default()
+        };
+        let mut plan = anchor_plan(model, anchor, &seen, &|_| false, None)?;
+        count_rows(&mut plan);
+        anchors.push(plan);
+        base_order.push(ROWS);
+    }
+
     // derived metrics, each after its inputs
     let mut metrics = base_order;
     let mut derived = Vec::new();
@@ -547,25 +563,7 @@ pub(crate) fn values(
         .access(field)?
         .ok_or_else(|| error(format!("unknown field `{}`", label(model, field))))?;
     builder.plan.dims.push((access, None));
-    let conditions = (0..builder.plan.conditions.len()).collect();
-    builder.plan.aggs.push(AggPlan {
-        call: AggCall {
-            func: tidepool_expr::ir::AggFunc::CountStar,
-            distinct: false,
-            arg: None,
-            filter: None,
-            ty: Type::Int,
-        },
-        conditions,
-    });
-    builder.plan.metrics.push(MetricPlan {
-        id: ROWS,
-        aggs: 0..1,
-        combine: Expr::Column {
-            slot: 0,
-            ty: Type::Int,
-        },
-    });
+    count_rows(&mut builder.plan);
     let ty = builder.plan.accesses[access].ty;
     Ok(Plan {
         anchors: vec![builder.plan],
@@ -573,6 +571,68 @@ pub(crate) fn values(
         derived: Vec::new(),
         dim_types: vec![ty],
     })
+}
+
+/// Count the anchor's rows passing all its conditions, as [`ROWS`].
+fn count_rows(plan: &mut AnchorPlan) {
+    let start = plan.aggs.len();
+    plan.aggs.push(AggPlan {
+        call: AggCall {
+            func: tidepool_expr::ir::AggFunc::CountStar,
+            distinct: false,
+            arg: None,
+            filter: None,
+            ty: Type::Int,
+        },
+        conditions: (0..plan.conditions.len()).collect(),
+    });
+    plan.metrics.push(MetricPlan {
+        id: ROWS,
+        aggs: start..start + 1,
+        combine: Expr::Column {
+            slot: 0,
+            ty: Type::Int,
+        },
+    });
+}
+
+/// Whether `from` reaches `to` along exactly one relationship path.
+fn reaches(model: &Model, from: TableId, to: TableId) -> bool {
+    matches!(path(model, from, to), Ok(Some(_)))
+}
+
+/// The table a query without metrics counts rows of: of the tables that
+/// reach every one of `tables`, the one reaching fewest tables (nearest
+/// the one side), the first by name if several do.
+///
+/// # Errors
+/// No table reaches them all.
+pub(crate) fn rows_anchor(model: &Model, tables: &[TableId]) -> Result<TableId, QueryError> {
+    model
+        .tables
+        .iter()
+        .filter(|t| tables.iter().all(|to| reaches(model, t.id, *to)))
+        .min_by_key(|t| {
+            let reached = model
+                .tables
+                .iter()
+                .filter(|other| reaches(model, t.id, other.id))
+                .count();
+            (reached, t.name.clone())
+        })
+        .map(|t| t.id)
+        .ok_or_else(|| {
+            let mut names: Vec<&str> = tables
+                .iter()
+                .filter_map(|t| model.dataset(*t).map(|d| d.name.as_str()))
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            error(format!(
+                "no table relates `{}`, so their values can't be shown side by side",
+                names.join("`, `")
+            ))
+        })
 }
 
 /// The part of `query`'s selection that changes its answer: conditions on

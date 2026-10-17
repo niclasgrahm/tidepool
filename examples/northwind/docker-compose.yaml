@@ -1,0 +1,64 @@
+# Northwind, live: dimensions in Postgres, orders as events, Kayak moving
+# both into Tidepool, and two dashboards that follow them.
+#
+#   docker compose up --build
+#   open http://localhost:7070/#/d/sales       (Tidepool)
+#        http://localhost:6767                 (Kayak's pipelines)
+#   psql postgresql://northwind:northwind@localhost:5432/northwind
+#
+# Kayak is built from its repository: set KAYAK_SRC if it isn't a sibling
+# of this one at ../../../../rust/kayak.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: northwind
+      POSTGRES_USER: northwind
+      POSTGRES_PASSWORD: northwind
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "northwind", "-d", "northwind"]
+      interval: 1s
+      retries: 30
+
+  tidepool:
+    build:
+      context: ../..
+    image: tidepool:northwind
+    command: ["serve", "--config", "/northwind", "--data", "/data", "--listen", "0.0.0.0:7070"]
+    ports: ["${TIDEPOOL_PORT:-7070}:7070"]
+    volumes:
+      - ./tidepool:/northwind
+      - tidepool-data:/data
+
+  kayak:
+    build:
+      context: ${KAYAK_SRC:-../../../../rust/kayak}
+    image: kayak:northwind
+    depends_on:
+      postgres: { condition: service_healthy }
+      tidepool: { condition: service_started }
+    command: ["--config", "/pipelines/config.yaml"]
+    environment:
+      LEPTOS_SITE_ADDR: 0.0.0.0:6767
+      POSTGRES_PASSWORD: northwind
+    ports: ["${KAYAK_PORT:-6767}:6767"]
+    volumes:
+      - ./kayak:/pipelines
+
+  # Northwind's 830 orders placed again, now, and shipped later
+  publisher:
+    image: python:3.12-alpine
+    depends_on: [kayak]
+    command: ["python", "-u", "/publisher/publish.py"]
+    environment:
+      KAYAK_URL: http://kayak:6767
+      ORDERS_PER_SECOND: ${ORDERS_PER_SECOND:-2}
+      DAY_SECONDS: ${DAY_SECONDS:-2}
+    volumes:
+      - ./publisher:/publisher:ro
+
+volumes:
+  tidepool-data:

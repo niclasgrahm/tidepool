@@ -1,5 +1,7 @@
 //! `dashboards/<id>.yaml`: a dashboard. Its id is the file name.
 
+use std::fmt::Write as _;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +111,9 @@ pub enum VisualType {
     Bar,
     Line,
     Table,
+    /// The values of one dimension as a list on the grid. A click selects a
+    /// value, as in a filter on the rail. It has no metrics.
+    Filter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -118,8 +123,11 @@ pub struct Visual {
     pub id: String,
     #[serde(rename = "type")]
     pub visual_type: VisualType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionRef>,
+    /// Metrics by name. A filter has none. A table without metrics shows
+    /// each combination of its dimensions that the data has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<String>,
     /// KPI tiles: a second metric shown as the comparison.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,4 +198,266 @@ pub struct GridPosition {
     pub y: u16,
     pub w: u16,
     pub h: u16,
+}
+
+impl DashboardFile {
+    /// Read a dashboard file's text.
+    ///
+    /// # Errors
+    /// The text isn't a dashboard file: serde's message, with its line.
+    pub fn from_yaml(text: &str) -> Result<Self, String> {
+        serde_norway::from_str(text).map_err(|err| err.to_string())
+    }
+
+    /// The file's text, written the way the examples are: one key per line,
+    /// short things (`at`, lists of names, a sort) inline. Reading it back
+    /// gives the same dashboard. Comments aren't kept: there are none here.
+    #[must_use]
+    pub fn to_yaml(&self) -> String {
+        let mut out = format!("name: {}\n", scalar(&self.name));
+        let _ = writeln!(
+            out,
+            "layout: {{ columns: {}, row_height: {} }}",
+            self.layout.columns, self.layout.row_height
+        );
+        if !self.filters.is_empty() {
+            out += "filters:\n";
+            for filter in &self.filters {
+                let _ = writeln!(out, "  - field: {}", scalar(&filter.field));
+                if filter.widget != FilterWidget::List {
+                    let _ = writeln!(out, "    widget: {}", word(&filter.widget));
+                }
+                if let Some(window) = filter.default {
+                    let ago = if window.ago == 0 {
+                        String::new()
+                    } else {
+                        format!(", ago: {}", window.ago)
+                    };
+                    let _ = writeln!(
+                        out,
+                        "    default: {{ last: {}, unit: {}{ago} }}",
+                        window.last,
+                        word(&window.unit)
+                    );
+                }
+                if let Some(measure) = &filter.measure {
+                    let _ = writeln!(out, "    measure: {}", scalar(measure));
+                }
+            }
+        }
+        if self.visuals.is_empty() {
+            out += "visuals: []\n";
+            return out;
+        }
+        out += "visuals:\n";
+        for visual in &self.visuals {
+            let _ = writeln!(out, "  - id: {}", scalar(&visual.id));
+            let _ = writeln!(out, "    type: {}", word(&visual.visual_type));
+            if !visual.dimensions.is_empty() {
+                let dimensions: Vec<String> = visual
+                    .dimensions
+                    .iter()
+                    .map(|d| match d {
+                        DimensionRef::Field(field) => scalar(field),
+                        DimensionRef::Grained { field, grain } => {
+                            format!("{{ field: {}, grain: {} }}", scalar(field), word(grain))
+                        }
+                    })
+                    .collect();
+                let _ = writeln!(out, "    dimensions: [{}]", dimensions.join(", "));
+            }
+            if !visual.metrics.is_empty() {
+                let metrics: Vec<String> = visual.metrics.iter().map(|m| scalar(m)).collect();
+                let _ = writeln!(out, "    metrics: [{}]", metrics.join(", "));
+            }
+            if let Some(compare) = &visual.compare {
+                let _ = writeln!(out, "    compare: {}", scalar(compare));
+            }
+            if let Some(sort) = &visual.sort {
+                let desc = if sort.desc { ", desc: true" } else { "" };
+                let _ = writeln!(out, "    sort: {{ by: {}{desc} }}", scalar(&sort.by));
+            }
+            if let Some(limit) = visual.limit {
+                let _ = writeln!(out, "    limit: {limit}");
+            }
+            if let Some(action) = &visual.on_click {
+                let _ = writeln!(out, "    on_click: {}", word(action));
+            }
+            if let Some(action) = &visual.on_brush {
+                let _ = writeln!(out, "    on_brush: {}", word(action));
+            }
+            let at = visual.at;
+            let _ = writeln!(
+                out,
+                "    at: {{ x: {}, y: {}, w: {}, h: {} }}",
+                at.x, at.y, at.w, at.h
+            );
+        }
+        out
+    }
+}
+
+/// An enum's name as it's written (`date_range`).
+fn word(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// A string as YAML: plain when that reads back as the same string (names,
+/// `dataset.field`, titles), double-quoted otherwise. JSON's escapes are
+/// YAML's too.
+fn scalar(text: &str) -> String {
+    let plain = text
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && !text.ends_with(' ')
+        && !text.contains("  ")
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ' ' | '/'))
+        && !matches!(
+            text.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "y" | "n"
+        );
+    if plain {
+        text.to_string()
+    } else {
+        serde_json::to_string(text).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/retail/dashboards")
+            .join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => panic!("reading {}: {err}", path.display()),
+        }
+    }
+
+    fn read(text: &str) -> DashboardFile {
+        match DashboardFile::from_yaml(text) {
+            Ok(file) => file,
+            Err(err) => panic!("not a dashboard file ({err}):\n{text}"),
+        }
+    }
+
+    #[test]
+    fn the_examples_read_back_the_same() {
+        for name in ["sales.yaml", "sales_recent.yaml"] {
+            let file = read(&example(name));
+            assert_eq!(read(&file.to_yaml()), file, "{name}");
+        }
+    }
+
+    #[test]
+    fn it_is_written_as_the_examples_are() {
+        let file = read(&example("sales_recent.yaml"));
+        assert_eq!(
+            file.to_yaml(),
+            "name: Recent sales
+layout: { columns: 12, row_height: 80 }
+filters:
+  - field: orders.ordered_at
+    widget: date_range
+    default: { last: 7, unit: day }
+  - field: customers.region
+visuals:
+  - id: kpi_revenue
+    type: kpi
+    metrics: [revenue]
+    at: { x: 0, y: 0, w: 3, h: 2 }
+  - id: kpi_orders
+    type: kpi
+    metrics: [order_count]
+    at: { x: 3, y: 0, w: 3, h: 2 }
+  - id: by_day
+    type: line
+    dimensions: [{ field: orders.ordered_at, grain: day }]
+    metrics: [revenue, order_count]
+    on_brush: select_range
+    at: { x: 0, y: 2, w: 12, h: 4 }
+  - id: category
+    type: filter
+    dimensions: [products.category]
+    at: { x: 0, y: 6, w: 3, h: 4 }
+  - id: who_buys_what
+    type: table
+    dimensions: [customers.region, products.category]
+    at: { x: 3, y: 6, w: 9, h: 4 }
+"
+        );
+    }
+
+    #[test]
+    fn awkward_names_are_quoted_and_read_back() {
+        for name in [
+            "Sales: Q1",
+            "true",
+            "No",
+            "#1",
+            "",
+            " padded",
+            "a, b",
+            "[x]",
+            "été",
+            "say \"hi\"",
+            "back\\slash",
+            "12",
+            "two  spaces",
+            "line\nbreak",
+            "- dash",
+            "a #b",
+        ] {
+            let file = DashboardFile {
+                name: name.to_string(),
+                layout: Layout::default(),
+                filters: Vec::new(),
+                visuals: vec![Visual {
+                    id: "v".into(),
+                    visual_type: VisualType::Table,
+                    dimensions: vec![DimensionRef::Field(name.to_string())],
+                    metrics: vec![name.to_string()],
+                    compare: None,
+                    sort: Some(Sort {
+                        by: name.to_string(),
+                        desc: false,
+                    }),
+                    limit: None,
+                    on_click: None,
+                    on_brush: None,
+                    at: GridPosition {
+                        x: 0,
+                        y: 0,
+                        w: 1,
+                        h: 1,
+                    },
+                }],
+            };
+            assert_eq!(read(&file.to_yaml()), file, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_dashboard_has_an_empty_list_of_visuals() {
+        let file = DashboardFile {
+            name: "Empty".into(),
+            layout: Layout::default(),
+            filters: Vec::new(),
+            visuals: Vec::new(),
+        };
+        assert_eq!(
+            file.to_yaml(),
+            "name: Empty\nlayout: { columns: 12, row_height: 80 }\nvisuals: []\n"
+        );
+        assert_eq!(read(&file.to_yaml()), file);
+    }
 }

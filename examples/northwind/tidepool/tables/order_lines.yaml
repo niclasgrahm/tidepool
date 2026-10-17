@@ -1,0 +1,14 @@
+# One row per product on an order, written with the order.
+name: order_lines
+mode: append
+event_time: ordered_at
+retention: 7d
+columns:
+  order_id:   { type: string }
+  line:       { type: int32 }
+  product_id: { type: string }
+  ordered_at: { type: timestamptz }
+  quantity:   { type: int32 }
+  unit_price: { type: "decimal(10,2)" }
+  discount:   { type: float64 }
+  amount:     { type: "decimal(12,2)" }   # unit_price × quantity × (1 − discount)

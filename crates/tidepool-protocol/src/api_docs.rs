@@ -402,7 +402,9 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           Values are checked against the table's column types and never coerced. \
                           A batch is all or nothing: one bad value rejects it with every problem \
                           listed by row and column, and nothing is written. On an upsert table a \
-                          row whose key exists replaces the old row.\n\n\
+                          row whose key exists replaces the old row, and a row equal to the one \
+                          stored is skipped: it counts as neither written nor replaced, and a \
+                          batch of such rows changes nothing and is visible at once.\n\n\
                           Rows become visible to queries at the next epoch (within \
                           `epoch_interval`); `?wait=visible` answers only once they are. An \
                           `Idempotency-Key` header makes retries safe: a key seen in the last 24 \
@@ -522,8 +524,10 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           batch that becomes visible at once. For keeping a dimension in step \
                           with a system of record that can only be read whole (an asset tree, a \
                           product catalogue): send all of it every time, and what disappeared \
-                          there disappears here. `replaced` counts rows replaced and rows \
-                          deleted. Only upsert tables have keys, so only they can be replaced.",
+                          there disappears here. Rows that are already as sent are skipped, so \
+                          sending the same contents again changes nothing. `replaced` counts \
+                          rows replaced and rows deleted. Only upsert tables have keys, so only \
+                          they can be replaced.",
             tag: Tag::Tables,
             access: Access::Ingest,
             params: vec![ParamDoc {

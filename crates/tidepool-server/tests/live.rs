@@ -891,3 +891,149 @@ async fn a_measured_list_measures_its_null_value_too() {
         Some(json!([{"value": null, "state": "possible", "rows": 2, "measure": "15.00"}]))
     );
 }
+
+#[tokio::test]
+async fn a_filter_visual_is_a_list_and_a_table_without_metrics_shows_what_there_is() {
+    let model = retail_with(
+        "dashboards/sales.yaml",
+        "  - id: top_products
+    type: table
+    dimensions: [products.name, products.category]
+    metrics: [revenue, order_count, avg_order_value]
+    sort: { by: revenue, desc: true }
+    limit: 50
+    at: { x: 8, y: 0, w: 4, h: 4 }",
+        "  - id: pick_status
+    type: filter
+    dimensions: [orders.status]
+    at: { x: 8, y: 0, w: 4, h: 2 }
+  - id: who_buys_what
+    type: table
+    dimensions: [customers.region, products.category]
+    at: { x: 8, y: 2, w: 4, h: 2 }",
+    );
+    let (state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    // a customer without orders: a region no order has
+    post(
+        &state,
+        "/v1/tables/customers/rows?wait=visible",
+        &json!([{"customer_id": "c3", "name": "Cy", "region": "east"}]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let model = next(&mut socket, "model").await;
+    let visuals = &model["dashboards"][0]["visuals"];
+    let Some(filter) = visuals
+        .as_array()
+        .and_then(|v| v.iter().find(|v| v["id"] == "pick_status"))
+    else {
+        panic!("no filter visual in {model}");
+    };
+    assert_eq!(filter["type"], "filter");
+    assert_eq!(filter["widget"], "list");
+
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    // the filter visual is shown from its field's list, not a query
+    assert_eq!(
+        filter_values(&frame, "orders.status"),
+        Some(json!([{"value": "paid", "state": "possible", "rows": 2}]))
+    );
+    assert!(
+        frame["visuals"]
+            .as_array()
+            .is_some_and(|v| v.iter().all(|v| v["id"] != "pick_status")),
+        "a filter visual has no query frame: {frame}"
+    );
+    // combinations orders have: the east region has no orders, so no row
+    assert_eq!(
+        rows(&frame, "who_buys_what"),
+        json!([["north", "boats"], ["south", "boats"]])
+    );
+
+    // and they follow the selection
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "orders.status", "values": ["paid"]}),
+    )
+    .await;
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["south"]}),
+    )
+    .await;
+    // frames carry only what changed: wait for the one with the table
+    loop {
+        let frame = next(&mut socket, "frame").await;
+        let shown = frame["visuals"]
+            .as_array()
+            .and_then(|v| v.iter().find(|v| v["id"] == "who_buys_what"))
+            .map(|v| v["result"]["rows"].clone());
+        if shown == Some(json!([["south", "boats"]])) {
+            break;
+        }
+    }
+}
+
+/// The type of every message up to the next `done`, skipping status ticks.
+async fn until_done(socket: &mut Socket) -> Vec<String> {
+    let mut kinds = Vec::new();
+    loop {
+        let message = match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+            Ok(Some(Ok(message))) => message,
+            other => panic!("waiting for `done` after {kinds:?}: {other:?}"),
+        };
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let value: Value = match serde_json::from_str(text.as_str()) {
+            Ok(value) => value,
+            Err(err) => panic!("unreadable message {text}: {err}"),
+        };
+        match value["type"].as_str() {
+            Some("done") => return kinds,
+            Some("status") => {}
+            Some(kind) => kinds.push(kind.to_string()),
+            None => panic!("a message without a type: {value}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_message_is_done_after_what_it_caused() {
+    let (_state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    assert_eq!(
+        until_done(&mut socket).await,
+        ["welcome", "model", "selection"]
+    );
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    assert_eq!(until_done(&mut socket).await, ["frame"]);
+    let north = json!({"type": "select", "field": "customers.region", "values": ["north"]});
+    say(&mut socket, north.clone()).await;
+    assert_eq!(until_done(&mut socket).await, ["selection", "frame"]);
+    // the same selection again changes nothing, and is still answered
+    say(&mut socket, north).await;
+    assert_eq!(until_done(&mut socket).await, Vec::<String>::new());
+    say(&mut socket, json!({"type": "back"})).await;
+    say(&mut socket, json!({"type": "forward"})).await;
+    assert_eq!(until_done(&mut socket).await, ["selection", "frame"]);
+    assert_eq!(until_done(&mut socket).await, ["selection", "frame"]);
+    // so are messages the server can't act on
+    say(&mut socket, json!({"type": "open_dashboard", "id": "nope"})).await;
+    assert_eq!(until_done(&mut socket).await, ["error"]);
+    if let Err(err) = socket.send(Message::text("not json")).await {
+        panic!("sending: {err}");
+    }
+    assert_eq!(until_done(&mut socket).await, ["error"]);
+}

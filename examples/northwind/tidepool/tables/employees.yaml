@@ -1,0 +1,11 @@
+# The sales organisation: who reports to whom, shown as a tree.
+name: employees
+mode: upsert
+primary_key: [employee_id]
+columns:
+  employee_id: { type: string }
+  employee:    { type: string }
+  title:       { type: string }
+  city:        { type: string, nullable: true }
+  country:     { type: string }
+  reports_to:  { type: string, nullable: true }   # NULL at the top

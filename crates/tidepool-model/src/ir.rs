@@ -307,6 +307,42 @@ pub struct Dashboard {
     pub visuals: Vec<Visual>,
 }
 
+impl Dashboard {
+    /// Every filter list the dashboard shows: those beside the grid, then
+    /// one per `filter` visual whose field isn't among them (a field's
+    /// list is one, wherever it's shown). A hierarchy is a tree.
+    #[must_use]
+    pub fn lists(&self, model: &Model) -> Vec<Filter> {
+        let mut lists = self.filters.clone();
+        for visual in &self.visuals {
+            if visual.visual_type != tidepool_config::dashboard::VisualType::Filter {
+                continue;
+            }
+            let Some(dimension) = visual.dimensions.first() else {
+                continue;
+            };
+            if lists.iter().any(|f| f.field == dimension.field) {
+                continue;
+            }
+            let tree = model
+                .dataset(dimension.field.table)
+                .and_then(|d| d.field(&dimension.field.field))
+                .is_some_and(|f| matches!(f.source, FieldSource::Hierarchy(_)));
+            lists.push(Filter {
+                field: dimension.field.clone(),
+                widget: if tree {
+                    tidepool_config::dashboard::FilterWidget::Tree
+                } else {
+                    tidepool_config::dashboard::FilterWidget::List
+                },
+                default: None,
+                measure: None,
+            });
+        }
+        lists
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
     pub field: FieldRef,

@@ -1,0 +1,136 @@
+version: "0.2.0"
+name: northwind
+datasets:
+  - name: orders
+    source: orders
+    fields:
+      - name: ordered_at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: ordered_at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+      - name: minute                       # the live trends' buckets
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: "DATE_TRUNC('minute', ordered_at)" }] }
+        datatype: DateTimeTz
+      - name: status
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+      - name: ship_country
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: ship_country }] }
+  - name: order_lines
+    source: order_lines
+  - name: products
+    source: products
+    primary_key: [product_id]
+  - name: categories
+    source: categories
+    primary_key: [category_id]
+  - name: suppliers
+    source: suppliers
+    primary_key: [supplier_id]
+  - name: customers
+    source: customers
+    primary_key: [customer_id]
+  - name: employees
+    source: employees
+    primary_key: [employee_id]
+    custom_extensions:
+      - vendor_name: TIDEPOOL                # the sales organisation as a tree
+        data: '{"hierarchy": {"name": "org", "parent": "reports_to", "label": "employee", "kind": "title"}}'
+  - name: shippers
+    source: shippers
+    primary_key: [shipper_id]
+
+relationships:
+  - name: line_order
+    from: order_lines
+    to: orders
+    from_columns: [order_id]
+    to_columns: [order_id]
+  - name: line_product
+    from: order_lines
+    to: products
+    from_columns: [product_id]
+    to_columns: [product_id]
+  - name: product_category
+    from: products
+    to: categories
+    from_columns: [category_id]
+    to_columns: [category_id]
+  - name: product_supplier
+    from: products
+    to: suppliers
+    from_columns: [supplier_id]
+    to_columns: [supplier_id]
+  - name: order_customer
+    from: orders
+    to: customers
+    from_columns: [customer_id]
+    to_columns: [customer_id]
+  - name: order_employee
+    from: orders
+    to: employees
+    from_columns: [employee_id]
+    to_columns: [employee_id]
+  - name: order_shipper
+    from: orders
+    to: shippers
+    from_columns: [shipper_id]
+    to_columns: [shipper_id]
+
+metrics:
+  - name: revenue
+    description: Order value after discounts
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(order_lines.amount)" }] }
+  - name: units
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(order_lines.quantity)" }] }
+  - name: avg_discount
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "AVG(order_lines.discount)" }] }
+  - name: order_count
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "orders"}'
+  - name: orders_with
+    description: Orders with it on them (for products, categories, suppliers)
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT order_lines.order_id)" }] }
+  - name: avg_order_value
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_count" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived"}'
+  - name: customer_count
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id)" }] }
+  - name: freight
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.freight)" }] }
+  - name: open_orders
+    description: Placed and not shipped yet
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE orders.status = 'open')" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "orders"}'
+  - name: shipped_orders
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE orders.status <> 'open')" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "orders"}'
+  - name: late_orders
+    description: Shipped after the date the customer required
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE orders.status = 'late')" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "orders"}'
+  - name: late_rate
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "late_orders / shipped_orders" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived"}'
+  - name: avg_days_to_ship
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "AVG(orders.days_to_ship)" }] }
+  - name: latest_order
+    description: When the newest order visible was placed (how fresh the data is)
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "MAX(orders.ordered_at)" }] }
+
+# a selection filters everything it is connected to, both ways: pick a
+# category and the order counts, freight and late rates follow
+custom_extensions:
+  - vendor_name: TIDEPOOL
+    data: '{"filter_direction": "both"}'

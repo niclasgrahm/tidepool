@@ -10,7 +10,7 @@ The data: writing rows into tables, and looking at what they hold. Tables are de
 
 The body is the rows, in one of three formats, chosen by `Content-Type`: `application/json` (an array of row objects), `application/x-ndjson` (one row object per line) or `application/vnd.apache.arrow.stream` (an Arrow IPC stream, matched to columns by field name).
 
-Values are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row.
+Values are checked against the table's column types and never coerced. A batch is all or nothing: one bad value rejects it with every problem listed by row and column, and nothing is written. On an upsert table a row whose key exists replaces the old row, and a row equal to the one stored is skipped: it counts as neither written nor replaced, and a batch of such rows changes nothing and is visible at once.
 
 Rows become visible to queries at the next epoch (within `epoch_interval`); `?wait=visible` answers only once they are. An `Idempotency-Key` header makes retries safe: a key seen in the last 24 hours gets the first response again and writes nothing. A `503` means the server is busy; retry after `Retry-After` seconds.
 
@@ -61,7 +61,7 @@ Request: rows: JSON, NDJSON or Arrow IPC. The keys of the rows to delete.
 
 **Replace an upsert table's contents** · access: `ingest`
 
-The body is the table's complete new contents, in the same formats as writing: its rows are written (a row whose key exists replaces the old one), and every row whose key isn't among them is deleted, in one batch that becomes visible at once. For keeping a dimension in step with a system of record that can only be read whole (an asset tree, a product catalogue): send all of it every time, and what disappeared there disappears here. `replaced` counts rows replaced and rows deleted. Only upsert tables have keys, so only they can be replaced.
+The body is the table's complete new contents, in the same formats as writing: its rows are written (a row whose key exists replaces the old one), and every row whose key isn't among them is deleted, in one batch that becomes visible at once. For keeping a dimension in step with a system of record that can only be read whole (an asset tree, a product catalogue): send all of it every time, and what disappeared there disappears here. Rows that are already as sent are skipped, so sending the same contents again changes nothing. `replaced` counts rows replaced and rows deleted. Only upsert tables have keys, so only they can be replaced.
 
 | path parameter | description | example |
 | --- | --- | --- |

@@ -429,6 +429,34 @@ async fn a_hierarchy_groups_by_a_level_and_filters_by_subtree() {
 }
 
 #[tokio::test]
+async fn without_metrics_a_query_lists_the_combinations_there_are() {
+    let state = loaded().await;
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({
+            "metrics": [],
+            "dimensions": [{"field": "customers.region"}, {"field": "orders.status"}],
+        }),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let body = reply.json();
+    assert_eq!(
+        body["columns"],
+        json!([
+            {"name": "customers.region", "type": "string", "role": "dimension"},
+            {"name": "orders.status", "type": "string", "role": "dimension"},
+        ])
+    );
+    // each pair once, however many orders have it
+    assert_eq!(
+        body["rows"],
+        json!([["north", "paid"], ["north", "returned"], ["south", "paid"]])
+    );
+}
+
+#[tokio::test]
 async fn the_model_says_which_way_selections_flow() {
     let model = common::call(loaded().await, Method::GET, "/v1/model")
         .await

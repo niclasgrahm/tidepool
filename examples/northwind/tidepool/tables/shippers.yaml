@@ -1,0 +1,6 @@
+name: shippers
+mode: upsert
+primary_key: [shipper_id]
+columns:
+  shipper_id: { type: string }
+  shipper:    { type: string }

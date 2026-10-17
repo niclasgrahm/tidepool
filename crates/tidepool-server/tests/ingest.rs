@@ -257,6 +257,39 @@ async fn upserts_replace_and_deletes_remove_by_key() {
 }
 
 #[tokio::test]
+async fn sending_a_dimension_again_unchanged_writes_nothing_and_does_not_wait() {
+    // a dimension read whole from its source on a timer, sent as it is
+    let state = ready_state();
+    let body = json!([
+        { "customer_id": "c1", "name": "Ann", "region": "north" },
+        { "customer_id": "c2", "name": "Bo", "region": "south" },
+    ])
+    .to_string();
+    let path = "/v1/tables/customers/rows?wait=visible";
+    let first = post(&state, path, &[JSON], body.clone()).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    // nothing is coming for the same rows again: visible is now, or the
+    // wait would last until something else changed
+    let again = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        post(&state, path, &[JSON], body),
+    )
+    .await;
+    let Ok(again) = again else {
+        panic!("an unchanged batch waited for an epoch that never comes")
+    };
+    assert_eq!(again.status, StatusCode::OK, "{}", again.text());
+    assert_eq!(
+        (
+            again.json()["written"].clone(),
+            again.json()["replaced"].clone(),
+            again.json()["epoch"].clone()
+        ),
+        (json!(0), json!(0), first.json()["epoch"].clone())
+    );
+}
+
+#[tokio::test]
 async fn a_put_replaces_a_tables_contents() {
     let state = ready_state();
     let customer =

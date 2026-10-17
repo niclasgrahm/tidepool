@@ -1,0 +1,9 @@
+name: suppliers
+mode: upsert
+primary_key: [supplier_id]
+columns:
+  supplier_id: { type: string }
+  supplier:    { type: string }
+  contact:     { type: string, nullable: true, encoding: plain }
+  city:        { type: string, nullable: true }
+  country:     { type: string }

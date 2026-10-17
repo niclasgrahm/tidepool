@@ -24,6 +24,12 @@ The reply counts the rows, and gives the epoch from which they are visible:
 `replaced` counts the rows that an upsert replaced or a delete removed.
 `missing` counts the keys of a delete that matched no row.
 
+A row of an upsert table that is equal to the stored row with its key
+changes nothing. tidepool skips it, and does not count it as written or
+replaced. Thus you can send a dimension again and again, for example the full
+product table from a database each few seconds. Only the rows that changed
+cost work, and a batch with no changes does not make a new epoch.
+
 The OpenAPI document of a server, `/v1/openapi.json`, has one typed path for
 each table, with the shape of its rows. The [HTTP API
 reference](/reference/api#api-tables) has every status and body.

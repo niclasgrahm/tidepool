@@ -226,8 +226,14 @@ fn answer(
         .iter()
         .filter_map(|id| plan.metrics.iter().position(|m| m == id))
         .collect();
+    // without metrics, a group is a combination some row under the
+    // selection has
+    let counted = query.metrics.is_empty() && plan.metrics == [plan::ROWS];
     let mut rows: Vec<Vec<Scalar>> = exec::execute(model, snapshot, &plan, fast, caches)
         .into_iter()
+        .filter(|(_, metrics)| {
+            !counted || matches!(metrics.first(), Some(Scalar::Int(n)) if *n > 0)
+        })
         .map(|(mut dims, metrics)| {
             dims.extend(positions.iter().map(|p| metrics[*p].clone()));
             dims

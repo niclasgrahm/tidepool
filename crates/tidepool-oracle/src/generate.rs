@@ -1145,9 +1145,9 @@ fn fields(schema: &Schema, table: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// A random query over `schema`, with selection values taken from `data`.
-#[must_use]
-pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
+/// A query's metrics and the tables they're anchored on; sometimes no
+/// metrics (the `bool`): only dimensions, all reached from one table.
+fn metrics(rng: &mut Rng, schema: &Schema) -> (Vec<String>, Vec<String>, bool) {
     let names: Vec<String> = schema.metrics.iter().map(|m| m.name.clone()).collect();
     let mut metrics: Vec<String> = Vec::new();
     for _ in 0..=rng.below(3) {
@@ -1156,7 +1156,21 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
             metrics.push(name);
         }
     }
-    let anchors: Vec<String> = metrics.iter().flat_map(|m| schema.anchors(m)).collect();
+    if rng.chance(15) {
+        return (
+            Vec::new(),
+            vec![rng.pick(&schema.tables).name.clone()],
+            true,
+        );
+    }
+    let anchors = metrics.iter().flat_map(|m| schema.anchors(m)).collect();
+    (metrics, anchors, false)
+}
+
+/// A random query over `schema`, with selection values taken from `data`.
+#[must_use]
+pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
+    let (metrics, anchors, only_dims) = metrics(rng, schema);
     // tables every anchor reaches
     let mut common: Vec<String> = schema.tables.iter().map(|t| t.name.clone()).collect();
     for anchor in &anchors {
@@ -1177,7 +1191,7 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
         .collect();
     let mut dims = Vec::new();
     if !candidates.is_empty() {
-        for _ in 0..rng.below(3) {
+        for _ in 0..rng.below(3) + usize::from(only_dims) {
             let (table, field, temporal) = rng.pick(&candidates).clone();
             if dims
                 .iter()

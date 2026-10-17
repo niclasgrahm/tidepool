@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `kpi_orders`: a KPI shows metrics, and it has none
+  --> dashboards/sales_recent.yaml:16:11
+   |
+16 |     type: kpi
+   |           ^^^
+   = help: give it `metrics: [...]`
+
+1 error, 0 warnings

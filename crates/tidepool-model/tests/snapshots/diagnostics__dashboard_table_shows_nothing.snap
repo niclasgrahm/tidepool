@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `top_products`: it has no dimensions and no metrics, so there's nothing to show
+  --> dashboards/sales.yaml:30:11
+   |
+30 |     type: table
+   |           ^^^^^
+   = help: give it `dimensions: [...]`, `metrics: [...]` or both
+
+1 error, 0 warnings

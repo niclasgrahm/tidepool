@@ -16,7 +16,7 @@
 //! Row ids never change, which is what lets the primary-key index point at
 //! rows across sealing.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -179,18 +179,22 @@ impl PkIndex {
 /// What a write does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
-    /// Insert rows; for an upsert table, a row with an existing key replaces it.
+    /// Insert rows; for an upsert table, a row with an existing key replaces
+    /// it, and a row equal to the one stored under its key is skipped.
     Write,
     /// Delete rows by key (upsert tables only). The batch holds key columns only.
     Delete,
     /// The table's whole contents (upsert tables only): its rows are
     /// written as by [`Op::Write`], and every live row whose key isn't
-    /// among them is deleted. Rows that are already as written change
-    /// nothing downstream.
+    /// among them is deleted. Rows that are already as written are
+    /// skipped, as by `Write`.
     Replace,
 }
 
-/// What applying a batch did.
+/// What applying a batch did. A row equal to the one stored under its key
+/// counts as neither written nor replaced: it changed nothing, so a batch
+/// of such rows publishes no epoch and keeps every snapshot (and so every
+/// cache keyed by one) as it was.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Applied {
     /// Rows written.
@@ -350,8 +354,9 @@ impl TableStore {
         if batch.rows == 0 && op != Op::Replace {
             return applied;
         }
-        self.dirty = true;
         let mut key = vec![0u32; self.key_columns.len()];
+        // a replace's rows that were already as written: kept, not swept
+        let mut kept = HashSet::new();
         // A delete batch holds the key columns only, in *table* order; the
         // index is keyed in *primary key* order. Batch column j is table
         // column `deleted[j]`, at key position `slot[j]`.
@@ -377,6 +382,7 @@ impl TableStore {
                 match self.pk.as_ref().and_then(|pk| pk.get(&key)) {
                     Some(existing) => {
                         self.delete_row(existing, versions);
+                        self.dirty = true;
                         if let Some(pk) = &mut self.pk {
                             pk.remove(&key);
                         }
@@ -399,10 +405,16 @@ impl TableStore {
                     };
                 }
                 if let Some(existing) = self.pk.as_ref().and_then(|pk| pk.get(&key)) {
+                    let mut same = true;
                     for (index, raw) in raws.iter().enumerate() {
-                        if self.stored(existing, index).is_some_and(|old| old != *raw) {
+                        if self.stored(existing, index) != Some(*raw) {
+                            same = false;
                             self.changed.insert(self.layouts[index].id);
                         }
+                    }
+                    if same {
+                        kept.insert(existing);
+                        continue;
                     }
                     self.delete_row(existing, versions);
                     applied.replaced += 1;
@@ -416,6 +428,7 @@ impl TableStore {
             }
             self.next_row += 1;
             self.live_rows += 1;
+            self.dirty = true;
             applied.written += 1;
         }
         // a replace: whatever it didn't write is gone (its own rows are the
@@ -427,10 +440,11 @@ impl TableStore {
             let gone: Vec<(Box<[u32]>, u64)> = pk
                 .entries()
                 .into_iter()
-                .filter(|(_, row)| *row < first)
+                .filter(|(_, row)| *row < first && !kept.contains(row))
                 .collect();
             for (key, row) in gone {
                 self.delete_row(row, versions);
+                self.dirty = true;
                 if let Some(pk) = &mut self.pk {
                     pk.remove(&key);
                 }
@@ -976,6 +990,15 @@ impl Store {
         self.epoch
     }
 
+    /// The epoch from which everything applied so far is visible: the next
+    /// one if a publish is due, else the current one (a batch that changed
+    /// nothing is visible already, and no epoch is coming for it).
+    #[must_use]
+    pub fn visible_epoch(&self) -> u64 {
+        let due = self.epoch == 0 || self.model_changed || self.tables.values().any(|t| t.dirty);
+        self.epoch + u64::from(due)
+    }
+
     /// Retention (plan §4.6): delete every row of sealed segments whose
     /// event time is entirely older than the table's retention as of `now`.
     /// Returns how many rows went. Expiry isn't logged: after a restart,
@@ -1075,7 +1098,7 @@ impl Store {
     /// Make everything applied so far visible: a new epoch, if anything
     /// changed. `None` if nothing did.
     pub fn publish(&mut self) -> Option<Snapshot> {
-        if !self.tables.values().any(|t| t.dirty) && self.epoch > 0 && !self.model_changed {
+        if self.visible_epoch() == self.epoch {
             return None;
         }
         self.model_changed = false;

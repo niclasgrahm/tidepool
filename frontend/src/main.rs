@@ -10,8 +10,12 @@ mod board;
 mod charts;
 mod configui;
 mod dashboard;
+mod design;
+mod designer;
 mod diagram;
 mod echarts;
+mod highlight;
+mod layout;
 mod live;
 mod pages;
 mod relationships;
@@ -70,7 +74,7 @@ fn App() -> impl IntoView {
         <header class="strip">
             <a class="brand" href="#/">"tidepool"</a>
             <nav class="main-nav" aria-label="Sections">
-                <a href=Route::Home.href() class:current=move || matches!(route.get(), Route::Home | Route::Dashboard(_))>"Dashboards"</a>
+                <a href=Route::Home.href() class:current=move || matches!(route.get(), Route::Home | Route::Dashboard(_) | Route::Edit(_) | Route::NewDashboard)>"Dashboards"</a>
                 <a href=Route::Model(Tab::Tables).href() class:current=move || matches!(route.get(), Route::Model(_) | Route::Table(_))>"Model"</a>
                 <a href=Route::Config(ConfigTab::Edit).href() class:current=move || matches!(route.get(), Route::Config(_))>"Config"</a>
                 <a href=Route::Status.href() class:current=move || route.get() == Route::Status>"Status"</a>
@@ -81,6 +85,10 @@ fn App() -> impl IntoView {
             <div class="toolbar">
                 <h1>{dashboard_name}</h1>
                 <Selection />
+                <a
+                    class="edit-link"
+                    href=move || match route.get() { Route::Dashboard(slug) => Route::Edit(slug).href(), _ => String::new() }
+                >"Edit"</a>
             </div>
         </Show>
         {move || live.problem.get().map(|p| view! {
@@ -91,6 +99,8 @@ fn App() -> impl IntoView {
         {move || match route.get() {
             Route::Home => view! { <pages::Home /> }.into_any(),
             Route::Dashboard(slug) => view! { <dashboard::Dashboard slug=slug /> }.into_any(),
+            Route::Edit(slug) => view! { <designer::Designer slug=Some(slug) /> }.into_any(),
+            Route::NewDashboard => view! { <designer::Designer slug=None /> }.into_any(),
             Route::Model(tab) => view! { <pages::Model tab=tab /> }.into_any(),
             Route::Table(name) => view! { <pages::TablePage name=name /> }.into_any(),
             Route::Status => view! { <pages::Status /> }.into_any(),
@@ -180,8 +190,8 @@ fn Selection() -> impl IntoView {
     };
     view! {
         <nav class="selection" aria-label="Selection">
-            <button disabled=move || !live.can_back.get() on:click=move |_| live.send(&json!({"type": "back"}))>"Back"</button>
-            <button disabled=move || !live.can_forward.get() on:click=move |_| live.send(&json!({"type": "forward"}))>"Forward"</button>
+            <button disabled=move || !live.history.get().0 on:click=move |_| live.send(&json!({"type": "back"}))>"Back"</button>
+            <button disabled=move || !live.history.get().1 on:click=move |_| live.send(&json!({"type": "forward"}))>"Forward"</button>
             <ul class="chips">{chips}</ul>
             {move || live.selection.with(Vec::is_empty).then(|| view! {
                 <span class="quiet hint">"Click a value or a bar to select it; Ctrl/⌘-click adds to the selection."</span>
@@ -190,6 +200,10 @@ fn Selection() -> impl IntoView {
                 disabled=move || live.selection.with(Vec::is_empty)
                 on:click=move |_| live.send(&json!({"type": "clear"}))
             >"Clear all"</button>
+            // a slow selection says so (shown after a moment: see style.css)
+            <span class="updating" role="status">
+                {move || live.busy().then(|| view! { <span class="spinner" aria-hidden="true"></span>"Updating…" })}
+            </span>
         </nav>
     }
 }

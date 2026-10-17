@@ -281,6 +281,35 @@ impl Browser {
         }
     }
 
+    /// A real drag with the mouse: pressed at `from`, moved in steps,
+    /// released at `to`.
+    fn drag(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let event = |kind: &str, (x, y): (f64, f64), buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
+        self.call("Input.dispatchMouseEvent", &event("mouseMoved", from, 0));
+        self.call("Input.dispatchMouseEvent", &event("mousePressed", from, 1));
+        for step in 1..=8 {
+            let t = f64::from(step) / 8.0;
+            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            self.call("Input.dispatchMouseEvent", &event("mouseMoved", at, 1));
+        }
+        self.call("Input.dispatchMouseEvent", &event("mouseReleased", to, 0));
+    }
+
+    /// The middle of the element `selector` finds, once it's there.
+    fn middle(&mut self, selector: &str) -> (f64, f64) {
+        let at = self.wait_for(
+            &format!(
+                "(() => {{ const e = {selector}; if (!e) return null; \
+                 const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"
+            ),
+            &format!("{selector} to be there"),
+        );
+        match (at[0].as_f64(), at[1].as_f64()) {
+            (Some(x), Some(y)) => (x, y),
+            _ => panic!("no position for {selector}: {at}"),
+        }
+    }
+
     /// Click the middle of the element `selector` finds.
     fn click_element(&mut self, selector: &str) {
         let at = self.wait_for(
@@ -651,6 +680,192 @@ fn a_table_added_in_the_config_editor_goes_live() {
         Some((200, _)) => {}
         other => panic!("the new table should be served: {other:?}"),
     }
+}
+
+/// The `n`th visual in the dashboard editor, as a selector.
+fn tile(n: usize) -> String {
+    format!("document.querySelectorAll('.canvas .tile')[{n}]")
+}
+
+/// Where the `n`th visual in the editor sits: its grid placement.
+fn tile_at(browser: &mut Browser, n: usize) -> Value {
+    browser.eval(&format!("{}?.getAttribute('style')", tile(n)))
+}
+
+/// In the editor's picker: tick these fields and metrics, then add.
+fn add_visual(browser: &mut Browser, names: &[&str]) {
+    browser.click_element(
+        "[...document.querySelectorAll('.designer-bar button')].find(b => b.textContent === 'Add visual')",
+    );
+    for name in names {
+        browser.click_element(&format!(
+            "document.querySelector('.picker input[aria-label=\"{name}\"]')"
+        ));
+    }
+    browser.click_element(
+        "[...document.querySelectorAll('.picker button')].find(b => b.textContent === 'Add')",
+    );
+}
+
+/// Two customers in two regions, one product, an order each.
+fn two_regions(address: SocketAddr) {
+    post(
+        address,
+        "customers",
+        &json!([
+            {"customer_id": "c-north", "name": "Nora", "region": "north", "segment": null},
+            {"customer_id": "c-south", "name": "Sami", "region": "south", "segment": null},
+        ]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, customer: &str, amount: &str| {
+        json!({
+            "order_id": id, "customer_id": customer, "product_id": "p1", "status": "paid",
+            "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": amount, "note": null,
+        })
+    };
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "c-north", "100.00"),
+            order("o2", "c-south", "30.00")
+        ]),
+    );
+}
+
+/// In the editor: the second visual resized, refused a place on the
+/// first, then moved into free cells.
+fn arrange_the_bar(browser: &mut Browser) {
+    // a cell is a twelfth of the grid, gap included
+    let cell = browser.eval(
+        "(() => { const r = document.querySelector('.canvas').getBoundingClientRect(); \
+         return (r.width + 16) / 12; })()",
+    );
+    let Some(cell) = cell.as_f64() else {
+        panic!("no cell width: {cell}");
+    };
+    // resized by its corner, two cells narrower and a row shorter
+    let corner = browser.middle(&format!("{}.querySelector('.handle')", tile(1)));
+    browser.drag(corner, (corner.0 - 2.0 * cell, corner.1 - 96.0));
+    browser.wait_for(
+        &format!(
+            "{}.getAttribute('style') === 'grid-column: 4 / span 4; grid-row: 1 / span 3;'",
+            tile(1)
+        ),
+        "the bar 4 wide and 3 tall",
+    );
+    // dropped on the filter, it stays where it was
+    let middle = browser.middle(&tile(1));
+    browser.drag(middle, (middle.0 - 2.0 * cell, middle.1));
+    assert_eq!(
+        tile_at(browser, 1),
+        json!("grid-column: 4 / span 4; grid-row: 1 / span 3;"),
+        "visuals can't overlap"
+    );
+    // moved into free cells, it snaps to them
+    browser.drag(middle, (middle.0 + 3.0 * cell + 10.0, middle.1 + 96.0));
+    browser.wait_for(
+        &format!(
+            "{}.getAttribute('style') === 'grid-column: 7 / span 4; grid-row: 2 / span 3;'",
+            tile(1)
+        ),
+        "the bar three cells right and a row down",
+    );
+}
+
+#[test]
+fn a_dashboard_made_in_the_editor_goes_live() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Emulation.setDeviceMetricsOverride",
+        &json!({ "width": 1400, "height": 1000, "deviceScaleFactor": 1, "mobile": false }),
+    );
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/") }),
+    );
+    browser.click_element("document.querySelector('a.button.primary')");
+    browser.click_element("document.querySelector('.designer-bar input')");
+    browser.call("Input.insertText", &json!({ "text": "Team view" }));
+
+    // one dimension alone is a filter; with a metric, a table
+    add_visual(&mut browser, &["customers.region"]);
+    browser.wait_for(
+        &format!(
+            "{}?.querySelector('.type-tag').textContent === 'Filter'",
+            tile(0)
+        ),
+        "a filter",
+    );
+    add_visual(&mut browser, &["customers.region", "revenue"]);
+    browser.wait_for(
+        &format!(
+            "{}?.querySelector('.type-tag').textContent === 'Table'",
+            tile(1)
+        ),
+        "a table",
+    );
+    assert_eq!(
+        tile_at(&mut browser, 1),
+        json!("grid-column: 4 / span 6; grid-row: 1 / span 4;"),
+        "placed beside the filter"
+    );
+    // then a bar
+    browser.click_element(
+        "[...document.querySelectorAll('.types .type')].find(b => b.textContent === 'Bar')",
+    );
+    browser.wait_for(
+        &format!(
+            "{}.querySelector('.type-tag').textContent === 'Bar'",
+            tile(1)
+        ),
+        "a bar",
+    );
+
+    arrange_the_bar(&mut browser);
+
+    // saved, it's a dashboard
+    browser.click_element(
+        "[...document.querySelectorAll('.designer-bar button')].find(b => b.textContent === 'Save')",
+    );
+    browser.wait_for("location.hash === '#/d/team_view'", "the new dashboard");
+    browser.wait_for(
+        "document.querySelector('.visual.bar .chart canvas') !== null",
+        "its bar chart",
+    );
+    let written = std::fs::read_to_string(config.path().join("dashboards/team_view.yaml"))
+        .unwrap_or_default();
+    assert!(
+        written.starts_with("name: Team view\n")
+            && written.contains("    type: filter\n    dimensions: [customers.region]\n")
+            && written.contains("    type: bar\n")
+            && written.contains("at: { x: 6, y: 1, w: 4, h: 3 }"),
+        "written back: {written}"
+    );
+
+    // the filter on the grid selects
+    browser.click_element(
+        "[...document.querySelectorAll('.filter-visual .value')].find(b => b.textContent.startsWith('north'))",
+    );
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north')"),
+        "a chip for the region",
+    );
 }
 
 #[test]

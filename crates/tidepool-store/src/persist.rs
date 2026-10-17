@@ -888,8 +888,8 @@ impl Durable {
 
     /// Apply and log a batch (fitted to the table's columns now), with its
     /// idempotency key and what it did. Durable after the next
-    /// [`Durable::commit`]; the batch is visible from the epoch after
-    /// [`Store::epoch`].
+    /// [`Durable::commit`]; the batch is visible from
+    /// [`Store::visible_epoch`].
     pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<&str>) -> Applied {
         let Some(fitted) = self.store.fit(table, op, batch) else {
             return Applied {
@@ -906,7 +906,7 @@ impl Durable {
             key: key.to_string(),
             at: keys::now_ms(),
             applied,
-            epoch: self.store.epoch() + 1,
+            epoch: self.store.visible_epoch(),
         });
         if batch.rows > 0 || keyed.is_some() {
             self.wal.append(table, op, batch, keyed.clone());

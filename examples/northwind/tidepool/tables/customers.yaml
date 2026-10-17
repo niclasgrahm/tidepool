@@ -1,0 +1,10 @@
+name: customers
+mode: upsert
+primary_key: [customer_id]
+columns:
+  customer_id: { type: string }
+  customer:    { type: string }
+  contact:     { type: string, nullable: true, encoding: plain }
+  city:        { type: string, nullable: true }
+  region:      { type: string, nullable: true }
+  country:     { type: string }

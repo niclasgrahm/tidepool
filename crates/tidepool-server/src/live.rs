@@ -36,7 +36,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde_json::Value as Json;
-use tidepool_config::dashboard::FilterWidget;
+use tidepool_config::dashboard::{FilterWidget, VisualType};
 use tidepool_engine::{Condition, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
@@ -722,6 +722,7 @@ fn window_of(window: tidepool_config::dashboard::RelativeWindow) -> RelativeWind
 
 fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
     let name = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let lists = dashboard.lists(model);
     DashboardInfo {
         id: dashboard.slug.clone(),
         name: dashboard.name.clone(),
@@ -762,6 +763,14 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                     .map(|m| m.name.clone()),
                 on_click: v.on_click,
                 on_brush: v.on_brush,
+                widget: (v.visual_type == VisualType::Filter)
+                    .then(|| {
+                        lists
+                            .iter()
+                            .find(|f| Some(&f.field) == v.dimensions.first().map(|d| &d.field))
+                            .map(|f| name(&serde_json::to_value(f.widget).unwrap_or_default()))
+                    })
+                    .flatten(),
                 at: GridAt {
                     x: v.at.x,
                     y: v.at.y,
@@ -846,13 +855,15 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
         return;
     };
+    // a filter visual is shown from its list's frames
     let visuals: Vec<VisualFrame> = dashboard
         .visuals
         .iter()
+        .filter(|v| v.visual_type != VisualType::Filter)
         .map(|v| visual_frame(state, snapshot, v, &selection, sorts.get(&v.id)))
         .collect();
     let filters: Vec<FilterFrame> = dashboard
-        .filters
+        .lists(model)
         .iter()
         .filter_map(|f| {
             let name = label(model, &f.field);
@@ -1021,16 +1032,17 @@ async fn serve(state: Arc<AppState>, mut socket: WebSocket) {
                         if send(&mut socket, &reply).await.is_err() {
                             break;
                         }
+                        let _ = out.try_send(ServerMessage::Done);
                         continue;
                     }
                 };
-                let (state, out) = (Arc::clone(&state), out.clone());
+                let (state, queue) = (Arc::clone(&state), out.clone());
                 let current = session.clone();
                 // queries are CPU work: off the async workers
                 let joined = tokio::task::spawn_blocking(move || match (current, message) {
-                    (None, ClientMessage::Hello { session_id }) => state.hub.connect(&state, session_id, out),
+                    (None, ClientMessage::Hello { session_id }) => state.hub.connect(&state, session_id, queue),
                     (None, message) => {
-                        let session = state.hub.connect(&state, None, out);
+                        let session = state.hub.connect(&state, None, queue);
                         state.hub.handle(&state, &session, message);
                         session
                     }
@@ -1044,6 +1056,9 @@ async fn serve(state: Arc<AppState>, mut socket: WebSocket) {
                     Ok(current) => session = Some(current),
                     Err(_) => break,
                 }
+                // behind what the message sent: `out` is the queue its
+                // selection and frame went into (full: the session is gone)
+                let _ = out.try_send(ServerMessage::Done);
             }
             Some(message) = outgoing.recv() => {
                 if send(&mut socket, &message).await.is_err() {

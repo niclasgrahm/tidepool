@@ -42,7 +42,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 
 ### 2.2 Non-goals for v0.1
 
-Distribution or sharding · multi-tenancy · row-level security · bidirectional filtering · drag-and-drop dashboard builder · visual relationship editor · any ingest connector other than HTTP (that's Kayak's job, D12) · full SQL query surface · mobile layouts · user management.
+Distribution or sharding · multi-tenancy · row-level security · bidirectional filtering · visual relationship editor · any ingest connector other than HTTP (that's Kayak's job, D12) · full SQL query surface · mobile layouts · user management.
 
 ### 2.3 Performance targets
 
@@ -280,6 +280,8 @@ visuals:
     at: { x: 8, y: 0, w: 4, h: 4 }
 ```
 
+A visual's `metrics` may be left out: a `filter` visual has none (one dimension, its values as a list on the grid), and a `table` without metrics lists the combinations of its dimensions there are. KPIs, bars and lines need at least one metric.
+
 ### 3.6 Machine-readable schemas
 
 Every config file kind has a JSON Schema, generated from the Rust types with `schemars` and served at `/v1/schemas/*.json`. The UI's YAML editor and external editors (via the `yaml-language-server` modeline) use them for completion and validation. Agents use them to write valid changes.
@@ -415,6 +417,7 @@ to a background job is a later optimisation.
   - If found, set the delete bit for the old row: in the tail via a tail delete bitmap, in a sealed segment via copy-on-write of that segment's delete bitmap, bumping its `version`.
   - Append the new row and update the index.
   - The index key is the PK code (single dict column) or a packed tuple of codes (composite key).
+- **Unchanged upserts are skipped** (2026-10-13): a row equal to the stored row under its key is not written, not counted and doesn't dirty the table, so a dimension re-sent whole on a timer (Kayak's `postgres` input in `snapshot` mode) costs a comparison per row and nothing downstream: no epoch, no tombstones, the same `TableSnapshot` and so every cache keyed by it. The receipt's epoch is then the current one (`Store::visible_epoch`), so `?wait=visible` doesn't wait for an epoch that never comes. A replace keeps such rows rather than sweeping them.
 - **Column-change detection on upsert:** compare old and new codes per column and record the changed `ColumnId`s per table per epoch. Cache invalidation (§6.5) uses this to ignore upserts that don't touch any column a view depends on, e.g. a `last_seen` timestamp that nobody groups by.
 - **Delete-by-key** (`DELETE /v1/tables/{t}/rows` with keys) is supported for upsert tables only.
 
@@ -732,6 +735,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `selection { state, can_back, can_forward }` | authoritative selection state after each change |
 | `frame { epoch, visuals: [{ id, payload_idx \| error }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit |
 | `status { epoch, ingest_rate, lag_ms }` | for the live indicator, ~1 Hz |
+| `done` | one per client message, after everything it caused: the UI shows a selection as under way until its `done` arrives |
 
 ---
 
@@ -839,7 +843,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
   - Leptos 0.8, client-side rendering, built by trunk (D10)
   - Apache ECharts through a small wrapper component (`EChart`, see `spikes/leptos-charts/src/echarts.rs`): an option signal in, click and x-brush callbacks out, `ResizeObserver` sizing. ECharts is vendored with its licence (like Kayak's Scalar).
   - a virtualised list component for filter lists (spike: `vlist.rs`)
-  - a small dashboard grid (CSS grid from the YAML layout, read-only in v1)
+  - a small dashboard grid (CSS grid from the YAML layout), and the dashboard editor on the same grid: written from scratch with pointer events and pointer capture (no grid library); the geometry (`layout.rs`) and the visual rules (`design.rs`) are DOM-free and unit-tested (decided 2026-10-13)
   - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor, through the same kind of thin wrapper as ECharts
   - frames are JSON (decided in M4: small, and serde on both sides); Arrow if frame size ever says so
 - **State:**
@@ -856,11 +860,13 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 
 **Dashboards**
 - Dashboard list. Dashboard view on a 12-column grid from the YAML layout.
+- **Dashboard editor** (`#/new`, `#/d/<id>/edit`; since 2026-10-13): visuals on the dashboard's grid, moved by dragging and resized by a corner handle (or arrow keys, Shift to resize), snapped to whole cells, never overlapping (a blocked drop shows red and doesn't move; the compiler enforces the same rule). A new visual starts from 0+ dimensions and 0+ metrics picked from the model (fields no relationship connects to the choice are greyed out); one dimension alone defaults to a `filter` visual, anything else to a `table`; the type can then be changed among those that fit. Each visual previews its own `/v1/query`. The editor reads and writes `dashboards/<id>.yaml` with `tidepool-config`'s types (`DashboardFile::from_yaml` / `to_yaml`, in the examples' compact style), plans every draft on the server as it changes, and saves through `/v1/config/apply` (admin). Comments in an edited file aren't kept (it says so); rail filters are left as they are.
 - Visuals:
   - KPI tile (value, comparison metric, delta %)
   - bar (vertical/horizontal)
   - line/area with a time axis and grain
-  - table (sortable, uses the server-side sort)
+  - table (sortable, uses the server-side sort). Without metrics (2026-10-13): the distinct combinations of its dimensions, counted on one anchor (of the tables reaching every dimension, the one reaching fewest, ties by name); a group with no rows under the selection isn't one. Covered by the oracle (`SELECT DISTINCT` over the same anchor).
+  - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
   - list box with selected/possible/excluded styling, search and a virtualized window
   - date range picker
@@ -1035,7 +1041,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 4. Segment compaction and dictionary compaction
 5. Row-level deltas in frames for large tables
 6. Bookmarks and shareable selection URLs
-7. Drag-and-drop dashboard builder, visual relationship editor (both writing YAML through the pipeline)
+7. ~~Drag-and-drop dashboard builder~~ (done 2026-10-13: the dashboard editor, §10.2), visual relationship editor (writing YAML through the pipeline), then editors for the other config objects the same way
 8. Row-level security (mandatory per-user selection applied before everything else)
 9. Kayak `tidepool` **input**: subscribe to a live metric query and turn updates into messages (alerting, webhooks), see §15.3
 10. Perspective-based pivot visual
@@ -1058,7 +1064,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 | Ossie spec churn (0.1 → 0.2 → 1.0) | high | low–medium | pin a version; all Ossie handling in `tidepool-config`; an internal IR; migrate with a converter |
 | YAML crate ecosystem churn (serde_yaml deprecated) | medium | low | `serde_norway` (already proven in Kayak), isolated behind `tidepool-config` |
 | Kayak and Tidepool overlapping (aggregation in both, query features in Kayak) | medium | product confusion | D12 boundary: Kayak computes over messages in motion, Tidepool over accumulated history with a selection applied |
-| Scope creep in the UI | high | schedule | v1 UI is read-only except the YAML editor; builders after v0.1 |
+| Scope creep in the UI | high | schedule | every UI editor writes the files through the one pipeline (§8.1), so the files stay the source of truth; one object kind at a time (dashboards first) |
 | SQL expectations beyond the v1 expression set | medium | user friction | clear errors listing supported functions; add functions on demand; `/v1/query` for ad-hoc work |
 
 ---

@@ -79,6 +79,22 @@
         "--strictPort"
       ],
       "port": 5173
+    },
+    {
+      "name": "tidepool-editor",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/editor-config",
+        "--listen",
+        "127.0.0.1:7074",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/editor-data"
+      ],
+      "port": 7074
     }
   ]
 }

@@ -369,6 +369,10 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         })
         .collect();
 
+    if query.metrics.is_empty() {
+        return combinations_sql(schema, query, &dims);
+    }
+
     // group base metrics by (anchor, selections they see, time shift)
     type Group = (String, Vec<usize>, Option<String>);
     let mut groups: BTreeMap<Group, Vec<String>> = BTreeMap::new();
@@ -516,15 +520,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         .collect();
     if schema.tree {
         // each node's ancestors by depth: walk up parents that are there
-        ctes.insert(
-            0,
-            "chain(node, anc, steps) AS (SELECT key, key, 0 FROM d0 UNION ALL \
-             SELECT c.node, p.up, c.steps + 1 FROM chain c JOIN d0 p ON p.key = c.anc \
-             WHERE p.up IN (SELECT key FROM d0) AND p.up <> p.key), \
-             tree_levels(node, level, anc) AS (SELECT c.node, d.depth - c.steps, c.anc FROM chain c \
-             JOIN (SELECT node, MAX(steps) AS depth FROM chain GROUP BY node) d ON d.node = c.node)"
-                .to_string(),
-        );
+        ctes.insert(0, TREE_LEVELS.to_string());
     }
     let mut sql = format!(
         "WITH {}{}",
@@ -639,6 +635,69 @@ pub fn apply(db: &Connection, schema: &Schema, write: &Write) -> Result<(), Stri
 /// DuckDB refused a statement.
 pub fn empty(schema: &Schema) -> Result<Connection, String> {
     load(schema, &Data::default())
+}
+
+/// The `WITH RECURSIVE` that gives each hierarchy node its ancestors by
+/// depth (`tree_levels`), walking up parents that are there.
+const TREE_LEVELS: &str = "chain(node, anc, steps) AS (SELECT key, key, 0 FROM d0 UNION ALL \
+     SELECT c.node, p.up, c.steps + 1 FROM chain c JOIN d0 p ON p.key = c.anc \
+     WHERE p.up IN (SELECT key FROM d0) AND p.up <> p.key), \
+     tree_levels(node, level, anc) AS (SELECT c.node, d.depth - c.steps, c.anc FROM chain c \
+     JOIN (SELECT node, MAX(steps) AS depth FROM chain GROUP BY node) d ON d.node = c.node)";
+
+/// The table a query without metrics reads: of those reaching every
+/// dimension's table, the one reaching fewest, the first by name on a tie.
+fn rows_anchor(schema: &Schema, tables: &[&str]) -> Option<String> {
+    schema
+        .tables
+        .iter()
+        .map(|t| {
+            let reach: Vec<String> = schema
+                .reachable(&t.name)
+                .into_iter()
+                .map(|(r, _)| r)
+                .collect();
+            (t.name.clone(), reach)
+        })
+        .filter(|(_, reach)| tables.iter().all(|t| reach.iter().any(|r| r == t)))
+        .min_by(|(a, ra), (b, rb)| ra.len().cmp(&rb.len()).then_with(|| a.cmp(b)))
+        .map(|(name, _)| name)
+}
+
+/// A query with dimensions and no metrics: the distinct combinations of
+/// the anchor's rows (and what they reach) under the selection.
+fn combinations_sql(schema: &Schema, query: &Query, dims: &[String]) -> String {
+    let tables: Vec<&str> = query.dims.iter().map(|(t, ..)| t.as_str()).collect();
+    let Some(anchor) = rows_anchor(schema, &tables) else {
+        return "SELECT 'no anchor' WHERE false".to_string();
+    };
+    let near: Vec<String> = schema
+        .reachable(&anchor)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    let visible: Vec<&(String, String, Cond)> = query.selection.iter().collect();
+    let mut conditions: Vec<String> = visible
+        .iter()
+        .filter(|(t, _, _)| near.contains(t))
+        .map(|s| condition_sql(schema, s))
+        .collect();
+    conditions.extend(upward(schema, &anchor, None, &visible));
+    let mut sql = if schema.tree {
+        format!("WITH RECURSIVE {TREE_LEVELS} ")
+    } else {
+        String::new()
+    };
+    let _ = write!(
+        sql,
+        "SELECT DISTINCT {} FROM {}",
+        dims.join(", "),
+        joined(schema, &anchor, None)
+    );
+    if !conditions.is_empty() {
+        let _ = write!(sql, " WHERE {}", conditions.join(" AND "));
+    }
+    sql
 }
 
 /// SQL for a filter list: the rows of `table` per value of `field`, under

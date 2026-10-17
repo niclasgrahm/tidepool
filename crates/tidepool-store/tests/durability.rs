@@ -322,7 +322,7 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 let (table, batch) = decode(&model, &write);
                 let key = rng.chance(30).then(|| format!("key-{seed}-{serial}"));
                 let applied = durable.apply(table, write.1, &batch, key.as_deref());
-                let epoch = durable.store().epoch() + 1;
+                let epoch = durable.store().visible_epoch();
                 let key = key.map(|key| (table.0, key, applied, epoch));
                 pending.push(Event::Write(write, key));
                 if rng.chance(30) {

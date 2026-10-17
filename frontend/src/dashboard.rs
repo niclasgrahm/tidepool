@@ -18,7 +18,7 @@ use crate::echarts::{Click, EChart};
 use crate::live::Live;
 
 /// Whether the page is in dark mode (charts can't read CSS).
-fn dark() -> bool {
+pub fn dark() -> bool {
     web_sys::window()
         .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
         .is_some_and(|m| m.matches())
@@ -49,10 +49,13 @@ pub fn Dashboard(slug: String) -> impl IntoView {
         {move || match info.get() {
             None => view! { <p class="quiet page-note">"Loading the dashboard…"</p> }.into_any(),
             Some(dashboard) => view! {
-                <div class="page">
-                    <aside class="rail" aria-label="Filters">
-                        {dashboard.filters.into_iter().map(|f| view! { <Filter info=f /> }).collect_view()}
-                    </aside>
+                <div class="page" class:busy=move || live.busy() aria-busy=move || live.busy().to_string()>
+                    // no rail without filters for it: the grid takes the room
+                    {(!dashboard.filters.is_empty()).then(|| view! {
+                        <aside class="rail" aria-label="Filters">
+                            {dashboard.filters.into_iter().map(|f| view! { <Filter info=f height=LIST_HEIGHT /> }).collect_view()}
+                        </aside>
+                    })}
                     <section
                         class="grid"
                         style=format!(
@@ -60,7 +63,7 @@ pub fn Dashboard(slug: String) -> impl IntoView {
                             dashboard.columns, dashboard.row_height
                         )
                     >
-                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v /> }).collect_view()}
+                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v row_height=dashboard.row_height /> }).collect_view()}
                     </section>
                 </div>
             }
@@ -69,12 +72,14 @@ pub fn Dashboard(slug: String) -> impl IntoView {
     }
 }
 
+/// A filter beside the grid, or a `filter` visual on it: `height` is what
+/// its values may take before they scroll.
 #[component]
-fn Filter(info: FilterInfo) -> impl IntoView {
+fn Filter(info: FilterInfo, height: f64) -> impl IntoView {
     match info.widget.as_str() {
         "date_range" => view! { <DateRange field=info.field timed=info.timed /> }.into_any(),
-        "tree" => view! { <FilterTree field=info.field measured=info.measure.is_some() format=info.measure_format /> }.into_any(),
-        _ => view! { <FilterList field=info.field measured=info.measure.is_some() format=info.measure_format /> }.into_any(),
+        "tree" => view! { <FilterTree field=info.field measured=info.measure.is_some() format=info.measure_format height=height /> }.into_any(),
+        _ => view! { <FilterList field=info.field measured=info.measure.is_some() format=info.measure_format height=height /> }.into_any(),
     }
 }
 
@@ -83,6 +88,7 @@ fn follow_scroll(
     live: Live,
     frame: Memo<Option<FilterFrame>>,
     scroll: RwSignal<f64>,
+    height: f64,
     window: impl Fn(usize, usize) -> Value + 'static,
 ) {
     Effect::new(move |_| {
@@ -91,7 +97,7 @@ fn follow_scroll(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let first = (top / ROW).floor() as usize;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let visible = (LIST_HEIGHT / ROW).ceil() as usize + 1;
+        let visible = (height / ROW).ceil() as usize + 1;
         let have = frame.values.len().max(frame.nodes.len());
         if let Some((offset, limit)) =
             wanted_window(first, visible, (frame.offset, have), frame.total)
@@ -104,11 +110,18 @@ fn follow_scroll(
 const ROW: f64 = 30.0;
 const LIST_HEIGHT: f64 = 300.0;
 
+/// The room a filter visual `rows` tall has for its values: its cells and
+/// the gaps between them, less its padding, title and search box.
+fn list_height(rows: u16, row_height: u16) -> f64 {
+    let cells = f64::from(rows) * f64::from(row_height) + f64::from(rows.saturating_sub(1)) * 16.0;
+    (cells - 100.0).max(ROW * 2.0)
+}
+
 /// A filter list: every value with its state (selected, possible,
 /// excluded), searchable, only the rows on screen in the DOM, fetched from
 /// the server a window at a time.
 #[component]
-fn FilterList(field: String, measured: bool, format: Option<String>) -> impl IntoView {
+fn FilterList(field: String, measured: bool, format: Option<String>, height: f64) -> impl IntoView {
     let live = expect_context::<Live>();
     let key = field.clone();
     // only this list's frame: others mustn't re-render (and so swallow
@@ -125,7 +138,7 @@ fn FilterList(field: String, measured: bool, format: Option<String>) -> impl Int
         })
     };
     // ask for the rows on screen when scrolling leaves the window there is
-    follow_scroll(live, frame, scroll, window);
+    follow_scroll(live, frame, scroll, height, window);
     let on_search = move |event| {
         search.set(event_target_value(&event));
         scroll.set(0.0);
@@ -143,7 +156,7 @@ fn FilterList(field: String, measured: bool, format: Option<String>) -> impl Int
                     // as tall as its values, up to a scrolling window
                     #[allow(clippy::cast_precision_loss)]
                     let rows = frame.with(|f| f.as_ref().map_or(0, |f| f.total)) as f64;
-                    format!("height: {}px", (rows * ROW).min(LIST_HEIGHT))
+                    format!("height: {}px", (rows * ROW).min(height))
                 }
                 on:scroll=move |ev| scroll.set(f64::from(event_target::<web_sys::Element>(&ev).scroll_top()))
             >
@@ -188,7 +201,7 @@ fn FilterList(field: String, measured: bool, format: Option<String>) -> impl Int
 /// one with a selection somewhere below it carries a dot, so a selection
 /// stays findable with its branch closed.
 #[component]
-fn FilterTree(field: String, measured: bool, format: Option<String>) -> impl IntoView {
+fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64) -> impl IntoView {
     let live = expect_context::<Live>();
     let key = field.clone();
     let frame = Memo::new(move |_| live.board.with(|b| b.filters.get(&key).cloned()));
@@ -201,7 +214,7 @@ fn FilterTree(field: String, measured: bool, format: Option<String>) -> impl Int
             "offset": offset, "limit": limit, "search": search.get_untracked(),
         })
     };
-    follow_scroll(live, frame, scroll, window);
+    follow_scroll(live, frame, scroll, height, window);
     let on_search = move |event| {
         search.set(event_target_value(&event));
         scroll.set(0.0);
@@ -219,7 +232,7 @@ fn FilterTree(field: String, measured: bool, format: Option<String>) -> impl Int
                 style=move || {
                     #[allow(clippy::cast_precision_loss)]
                     let rows = frame.with(|f| f.as_ref().map_or(0, |f| f.total)) as f64;
-                    format!("height: {}px", (rows * ROW).min(LIST_HEIGHT))
+                    format!("height: {}px", (rows * ROW).min(height))
                 }
                 on:scroll=move |ev| scroll.set(f64::from(event_target::<web_sys::Element>(&ev).scroll_top()))
             >
@@ -380,7 +393,7 @@ fn DateRange(field: String, timed: bool) -> impl IntoView {
 }
 
 #[component]
-fn Visual(info: VisualInfo) -> AnyView {
+fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
     let live = expect_context::<Live>();
     let id = info.id.clone();
     let frame = Memo::new(move |_| live.board.with(|b| b.visuals.get(&id).cloned()));
@@ -391,11 +404,31 @@ fn Visual(info: VisualInfo) -> AnyView {
         info.at.y + 1,
         info.at.h
     );
-    let title = info.metrics.join(", ")
-        + &info
-            .dimensions
-            .first()
-            .map_or_else(String::new, |d| format!(" by {}", short(&d.field)));
+    if info.visual_type == "filter"
+        && let Some(dimension) = info.dimensions.first()
+    {
+        // its list is the filter frames of its field, as beside the grid
+        let filter = FilterInfo {
+            field: dimension.field.clone(),
+            widget: info.widget.clone().unwrap_or_else(|| "list".into()),
+            timed: false,
+            default: None,
+            measure: None,
+            measure_format: None,
+        };
+        return view! {
+            <article class="visual filter-visual" style=place>
+                <Filter info=filter height=list_height(info.at.h, row_height) />
+            </article>
+        }
+        .into_any();
+    }
+    let dimensions = info.dimensions.iter().map(|d| short(&d.field));
+    let title = match info.dimensions.first() {
+        _ if info.metrics.is_empty() => dimensions.collect::<Vec<_>>().join(", "),
+        Some(first) => format!("{} by {}", info.metrics.join(", "), short(&first.field)),
+        None => info.metrics.join(", "),
+    };
     let class = format!("visual {}", info.visual_type);
     let dims = info.dimensions.len();
     let chart = matches!(info.visual_type.as_str(), "bar" | "line") && dims == 1;

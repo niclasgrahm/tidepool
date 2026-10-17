@@ -1,0 +1,11 @@
+name: products
+mode: upsert
+primary_key: [product_id]
+columns:
+  product_id:   { type: string }
+  product:      { type: string }
+  supplier_id:  { type: string }
+  category_id:  { type: string }
+  unit:         { type: string, nullable: true, encoding: plain }   # quantity per unit
+  list_price:   { type: "decimal(10,2)" }
+  discontinued: { type: bool }

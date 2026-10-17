@@ -1,0 +1,9 @@
+northwind:
+  type: postgres
+  host: postgres
+  database: northwind
+  user: northwind
+  password: ${POSTGRES_PASSWORD}
+tidepool:
+  type: tidepool
+  url: http://tidepool:7070

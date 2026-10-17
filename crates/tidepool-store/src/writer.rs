@@ -205,8 +205,8 @@ impl Backend {
             Self::Memory(store) => store.apply(table, op, batch),
             Self::Disk(durable) => durable.apply(table, op, batch, key),
         };
-        // the next epoch published holds it
-        let epoch = self.store().epoch() + 1;
+        // the next epoch published holds it, unless it changed nothing
+        let epoch = self.store().visible_epoch();
         Receipt { applied, epoch }
     }
 

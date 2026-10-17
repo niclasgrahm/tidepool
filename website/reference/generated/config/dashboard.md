@@ -32,10 +32,10 @@
 | --- | --- | --- | --- |
 | `at` | [`GridPosition`](#dashboard-gridposition) | **required** |  |
 | `compare` | string |  | KPI tiles: a second metric shown as the comparison. |
-| `dimensions` | list of [`DimensionRef`](#dashboard-dimensionref) | `[]` |  |
+| `dimensions` | list of [`DimensionRef`](#dashboard-dimensionref) |  |  |
 | `id` | string | **required** | Unique within the dashboard. |
 | `limit` | integer |  |  |
-| `metrics` | list of string | **required** |  |
+| `metrics` | list of string |  | Metrics by name. A filter has none. A table without metrics shows each combination of its dimensions that the data has. |
 | `on_brush` | [`BrushAction`](#dashboard-brushaction) |  | Line charts: what brushing the time axis does. |
 | `on_click` | [`ClickAction`](#dashboard-clickaction) |  | Bars and table rows: what a click does. |
 | `sort` | [`Sort`](#dashboard-sort) |  |  |
@@ -102,7 +102,10 @@ Type: `select`.
 
 ## `VisualType` {#dashboard-visualtype}
 
-Type: `kpi` · `bar` · `line` · `table`.
+One of:
+
+- `kpi` · `bar` · `line` · `table`
+- `filter`: The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics.
 
 
 ## `WindowUnit` {#dashboard-windowunit}

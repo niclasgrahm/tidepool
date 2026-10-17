@@ -16,12 +16,15 @@ pub fn Home() -> impl IntoView {
     let live = expect_context::<Live>();
     view! {
         <main class="page-single">
-            <h1 class="page-title">"Dashboards"</h1>
+            <div class="title-row">
+                <h1 class="page-title">"Dashboards"</h1>
+                <a class="button primary" href=Route::NewDashboard.href()>"New dashboard"</a>
+            </div>
             {move || {
                 let all = live.dashboards.get();
                 if all.is_empty() {
                     return view! {
-                        <p class="quiet">"No dashboards yet. Add a file to the config's "<code>"dashboards/"</code>" directory."</p>
+                        <p class="quiet">"No dashboards yet. Make one here, or add a file to the config's "<code>"dashboards/"</code>" directory."</p>
                     }.into_any();
                 }
                 view! {

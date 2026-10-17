@@ -131,8 +131,8 @@ Terms of tidepool. Use them with this meaning only:
 | selection | the values selected on a dashboard, over all its fields |
 | epoch | one published state of the data. New rows are visible from the next epoch. |
 | change | a set of config files to set or remove, planned and applied as one |
-| visual | a KPI, bar, line or table on a dashboard. Not "widget", not "chart" for all four. |
-| filter | a list, tree or date range on the rail of a dashboard |
+| visual | a KPI, bar, line, table or filter on the grid of a dashboard. Not "widget", not "chart" for all five. |
+| filter | a list, tree or date range on the rail of a dashboard, or a list or tree on its grid |
 
 ### Things to remove
 

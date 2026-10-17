@@ -16,6 +16,7 @@ use tidepool_protocol::config::{ConfigState, ConfigVersion, PendingChange, PlanI
 use wasm_bindgen::JsCast;
 
 use crate::api::{get_json, post_json};
+use crate::highlight;
 use crate::live::Live;
 use crate::route::{ConfigTab, Route};
 use crate::textdiff::{Line, config_path, diff, hunks, offset_of_line};
@@ -24,7 +25,7 @@ use crate::textdiff::{Line, config_path, diff, hunks, offset_of_line};
 type Draft = BTreeMap<String, Option<String>>;
 
 /// Wait `ms` milliseconds.
-async fn sleep(ms: i32) {
+pub async fn sleep(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
@@ -34,7 +35,7 @@ async fn sleep(ms: i32) {
 }
 
 /// The message of an error reply, or the reply itself.
-fn error_of(reply: &Value) -> String {
+pub fn error_of(reply: &Value) -> String {
     reply["error"]
         .as_str()
         .map_or_else(|| reply.to_string(), str::to_string)
@@ -116,7 +117,7 @@ fn Banner(shared: Shared) -> impl IntoView {
     move || {
         shared.config.with(|c| match c {
             None => view! { <p class="quiet">"Loading…"</p> }.into_any(),
-            Some(Err(err)) => view! { <SignIn shared=shared problem=err.clone() /> }.into_any(),
+            Some(Err(err)) => view! { <SignIn on_done=Callback::new(move |()| shared.refresh()) problem=err.clone() /> }.into_any(),
             Some(Ok(state)) => {
                 let rebuild = state.rebuild.clone().map(|r| {
                     #[allow(clippy::cast_precision_loss)]
@@ -156,10 +157,10 @@ fn Banner(shared: Shared) -> impl IntoView {
     }
 }
 
-/// The config pages need the admin level: a field for the admin token,
-/// traded for a session.
+/// The config pages (and the dashboard editor) need the admin level: a
+/// field for the admin token, traded for a session.
 #[component]
-fn SignIn(shared: Shared, problem: String) -> impl IntoView {
+pub fn SignIn(on_done: Callback<()>, problem: String) -> impl IntoView {
     let token = RwSignal::new(String::new());
     let failed = RwSignal::new(None::<String>);
     let submit = move |ev: leptos::ev::SubmitEvent| {
@@ -169,7 +170,7 @@ fn SignIn(shared: Shared, problem: String) -> impl IntoView {
             match crate::api::start_session(&value).await {
                 Ok(()) => {
                     failed.set(None);
-                    shared.refresh();
+                    on_done.run(());
                 }
                 Err(err) => failed.set(Some(err)),
             }
@@ -177,7 +178,7 @@ fn SignIn(shared: Shared, problem: String) -> impl IntoView {
     };
     view! {
         <form class="sign-in" on:submit=submit>
-            <p>{format!("The config needs the admin token ({problem}).")}</p>
+            <p>"The config needs the admin token ("{problem}")."</p>
             <label>"Admin token "
                 <input type="password" autocomplete="current-password" prop:value=move || token.get()
                     on:input=move |ev| token.set(event_target_value(&ev)) />
@@ -209,6 +210,7 @@ fn Editor(shared: Shared) -> impl IntoView {
     let destroy_ok = RwSignal::new(false);
     let new_path = RwSignal::new(String::new());
     let editor = NodeRef::<leptos::html::Textarea>::new();
+    let shade = NodeRef::<leptos::html::Pre>::new();
 
     // a draft is against the version it started from
     Effect::new(move |_| {
@@ -303,6 +305,25 @@ fn Editor(shared: Shared) -> impl IntoView {
             }
         });
         outcome.set(None);
+    };
+    // what the editor shows; the textarea is rebuilt only when the file
+    // changes or is removed, never per keystroke, so it keeps its caret
+    let shown = Memo::new(move |_| {
+        selected
+            .get()
+            .and_then(|path| text_of(&path))
+            .unwrap_or_default()
+    });
+    let removed = Memo::new(move |_| {
+        selected
+            .get()
+            .is_some_and(|path| draft.with(|d| d.get(&path) == Some(&None)))
+    });
+    let follow_scroll = move || {
+        if let (Some(area), Some(pre)) = (editor.get_untracked(), shade.get_untracked()) {
+            pre.set_scroll_top(area.scroll_top());
+            pre.set_scroll_left(area.scroll_left());
+        }
     };
     let jump = move |file: Option<String>, line: Option<usize>| {
         if let Some(file) = file {
@@ -482,7 +503,7 @@ fn Editor(shared: Shared) -> impl IntoView {
             </aside>
             <section class="editor">
                 {move || selected.get().map(|path| {
-                    let removed = draft.with(|d| d.get(&path) == Some(&None));
+                    let removed = removed.get();
                     let target = path.clone();
                     let restore = path.clone();
                     view! {
@@ -497,10 +518,16 @@ fn Editor(shared: Shared) -> impl IntoView {
                         {if removed {
                             view! { <p class="quiet">"Removed in your edits."</p> }.into_any()
                         } else {
-                            let text = text_of(&path).unwrap_or_default();
+                            // the text is drawn by the highlighted copy behind the
+                            // textarea, which keeps the caret, selection and input
                             view! {
-                                <textarea node_ref=editor class="code-editor" spellcheck="false" wrap="off" aria-label=format!("Contents of {path}")
-                                    prop:value=text on:input=move |ev| edit(event_target_value(&ev))></textarea>
+                                <div class="code-wrap">
+                                    <pre node_ref=shade class="code-shade" aria-hidden="true"
+                                        inner_html=move || shown.with(|t| highlight::html(t) + "\n ")></pre>
+                                    <textarea node_ref=editor class="code-editor" spellcheck="false" wrap="off" aria-label=format!("Contents of {path}")
+                                        prop:value=move || shown.get() on:input=move |ev| edit(event_target_value(&ev))
+                                        on:scroll=move |_| follow_scroll()></textarea>
+                                </div>
                             }.into_any()
                         }}
                     }

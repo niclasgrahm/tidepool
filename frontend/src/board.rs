@@ -1,7 +1,7 @@
 //! What a dashboard shows, as plain data: frames applied to it, values
 //! formatted, bars scaled. No DOM here, so `cargo test` covers all of it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 use tidepool_protocol::live::{
@@ -419,6 +419,39 @@ pub fn chip_label(selected: &SelectedField, frame: Option<&FilterFrame>) -> Stri
     }
 }
 
+/// The messages sent and not answered yet, oldest first: whether each
+/// changes the selection. The server answers each with a `done`, in order,
+/// after everything it caused.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InFlight(VecDeque<bool>);
+
+impl InFlight {
+    /// A message of type `kind` went out.
+    pub fn sent(&mut self, kind: &str) {
+        self.0.push_back(reselects(kind));
+    }
+
+    /// The oldest one is answered.
+    pub fn done(&mut self) {
+        self.0.pop_front();
+    }
+
+    /// A selection is under way: what the dashboard shows is about to
+    /// change.
+    pub fn busy(&self) -> bool {
+        self.0.contains(&true)
+    }
+}
+
+/// Whether a client message of type `kind` changes the selection, so every
+/// visual waits for its answer. (Paging a list or sorting a table doesn't.)
+fn reselects(kind: &str) -> bool {
+    matches!(
+        kind,
+        "select" | "select_range" | "select_relative" | "clear" | "back" | "forward"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -624,6 +657,7 @@ mod tests {
             compare: None,
             on_click: true,
             on_brush: false,
+            widget: None,
             at: GridAt {
                 x: 0,
                 y: 0,
@@ -763,5 +797,30 @@ mod tests {
             chip_label(&selected, Some(&frame)),
             "outdoor › water, navigation › maps"
         );
+    }
+
+    #[test]
+    fn a_selection_is_under_way_until_its_done_arrives() {
+        let mut flight = InFlight::default();
+        flight.sent("hello");
+        flight.sent("open_dashboard");
+        assert!(!flight.busy(), "nothing selected yet");
+        flight.sent("select");
+        flight.sent("filter_window");
+        assert!(flight.busy());
+        flight.done(); // hello
+        flight.done(); // open_dashboard
+        assert!(flight.busy(), "the select isn't answered yet");
+        flight.done(); // select
+        assert!(!flight.busy(), "only a list page is left");
+        flight.done(); // filter_window
+        flight.sent("back");
+        flight.sent("forward");
+        flight.done();
+        assert!(flight.busy(), "forward isn't answered yet");
+        flight.done();
+        assert!(!flight.busy());
+        flight.done(); // one too many does no harm
+        assert_eq!(flight, InFlight::default());
     }
 }

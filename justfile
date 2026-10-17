@@ -99,6 +99,14 @@ docker:
 demo:
   cd examples/kayak-demo && docker compose up --build
 
+# Northwind, live: dims in Postgres, orders as events, Kayak → Tidepool (needs Kayak beside this repo, or KAYAK_SRC)
+northwind:
+  cd examples/northwind && docker compose up --build
+
+# how fresh the Northwind dashboards are: event time → queryable, from the host
+northwind-freshness seconds="30":
+  python3 examples/northwind/freshness.py --url http://localhost:${TIDEPOOL_PORT:-7070} --seconds {{seconds}}
+
 # the Kayak ↔ Tidepool integration test: the demo on its own ports, an outage midway, row counts compared
 demo-check:
   examples/kayak-demo/check.sh

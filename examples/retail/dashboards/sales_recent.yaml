@@ -22,3 +22,13 @@ visuals:
     metrics: [revenue, order_count]
     on_brush: select_range
     at: { x: 0, y: 2, w: 12, h: 4 }
+  # one dimension and no metrics: a filter on the grid, a list to select from
+  - id: category
+    type: filter
+    dimensions: [products.category]
+    at: { x: 0, y: 6, w: 3, h: 4 }
+  # dimensions without metrics: the pairs some order in the selection has
+  - id: who_buys_what
+    type: table
+    dimensions: [customers.region, products.category]
+    at: { x: 3, y: 6, w: 9, h: 4 }

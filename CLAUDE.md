@@ -34,6 +34,7 @@ just docs-dev        # the doc site on :5173 with hot reload (npm; website/ only
 just docs-build      # production build of the doc site
 just docker          # the container image, UI included (tidepool:dev)
 just demo            # the Kayak demo: MQTT → Kayak → Tidepool (docker compose)
+just northwind       # Northwind live: Postgres dims + order events → Kayak → Tidepool
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
@@ -183,8 +184,12 @@ One writer thread owns the `Store`; everything else reads immutable
 - **Row ids never change** (sealing keeps them), so the primary-key index
   points at rows forever. Primary-key columns are dictionary-encoded, which
   the model enforces, so a single-column key is a dense array by code.
-- **Upserts track changed columns** per epoch (`TableSnapshot::changed`): a
-  rewrite with identical values changes nothing downstream.
+- **An upsert equal to the stored row is skipped**: not written, not
+  counted, the table not dirtied, so re-sending a whole dimension on a timer
+  publishes no epoch and keeps every cache keyed by its snapshot.
+  `Store::visible_epoch` is then the current epoch (`?wait=visible` must
+  not wait for one that never comes). Upserts that do change something
+  track which columns did (`TableSnapshot::changed`).
 - **`Op::Replace`** (`PUT …/rows`): the batch is the table's whole
   contents; it's written as upserts and every live key it didn't list is
   deleted, in the same batch (WAL op codes 5/6, replayed as is).
@@ -309,6 +314,12 @@ walks the table to prove it.
   tree (map-cache variant `ancestor:d`) and never put in
   `Caches::derived`, whose values must not change.
 
+- **Queries without metrics** (`plan::rows_anchor`): dimensions only are
+  the combinations there are. They're counted (`ROWS`) on the table that
+  reaches every dimension and reaches fewest tables (ties by name), and
+  groups without rows are dropped. The oracle's `combinations_sql` picks
+  the same table independently; keep the two rules equal.
+
 - **Incremental answers** (`Incremental` in `fast.rs`): with an `Engine`,
   each anchor's aggregate state is kept with a row-id high-water mark and
   the deleted rows it accounted for. The next epoch scans only appended
@@ -333,7 +344,10 @@ cut to the fields that can change it (`tidepool_engine::relevant`), which
 is what makes sessions on the same dashboard share work. One epoch loop
 refreshes every session from the newest snapshot (coalescing); selection
 changes are answered at once, outside it. Never hold a session's lock
-while calling `Session::send`: it takes the lock itself. Filter frames are
+while calling `Session::send`: it takes the lock itself. A `filter` visual
+has no query frame: it's shown from the filter frames of its field
+(`Dashboard::lists` adds one list per filter visual whose field the rail
+doesn't have). Filter frames are
 built in `filters.rs`: lists, and trees (visible nodes depth first through
 the session's `open` set, states rolled up, `inside`/`holds`, the chosen
 nodes' paths); a filter's `measure` is one grouped query, per depth on
@@ -441,8 +455,8 @@ output under `assets/` (`data-target-path` in `index.html`) so the server's
 immutable-cache rule applies to them. It depends on `tidepool-protocol`
 directly: request and response types are shared, never generated or copied.
 
-Pages (hash routes, `route.rs`): the dashboard list, dashboards, the model
-browser (tables with an ingest `curl`, a relationship diagram, the metric
+Pages (hash routes, `route.rs`): the dashboard list, dashboards, the
+dashboard editor (`designer.rs`), the model browser (tables with an ingest `curl`, a relationship diagram, the metric
 catalog; from `GET /v1/model`), the config pages (`configui.rs`: the files
 edited with the plan checked as you type, history with diffs and revert,
 the approval queue) and a status page (`GET /v1/status`, polled).
@@ -462,13 +476,23 @@ are applied to a `Board`. Rules the dashboard follows:
   pitfalls before changing it) only hands them over. ECharts is vendored in
   `frontend/vendor/` with its licence.
 - Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs`,
-  `textdiff.rs` or `diagram.rs` (the relationship diagram's cards, tree
-  layout and Kayak's orthogonal routing) and
-  gets a plain test. The browser path is covered by `just e2e`
+  `textdiff.rs`, `highlight.rs` (the config editor's YAML colours, drawn
+  by a `<pre>` behind a transparent textarea), `layout.rs` (the editor's grid: snapping, moving,
+  resizing, never overlapping), `diagram.rs` (the relationship diagram's
+  cards, tree layout and Kayak's orthogonal routing) or `design.rs` (which visual types fit
+  which fields, ids, what fields can go together) and gets a plain test.
+- **The dashboard editor edits the file.** It reads and writes
+  `dashboards/<id>.yaml` with `tidepool-config`'s own types
+  (`DashboardFile::from_yaml`/`to_yaml`), plans each draft on the server,
+  and saves through `/v1/config/apply`, like every other change. Its drag
+  is pointer events with pointer capture on the tile, followed on the
+  canvas; nothing moves until a drop on free cells. Future editors for
+  other objects should work the same way. The browser path is covered by `just e2e`
   (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
   protocol against the built UI (on a copy of the example: config
   changes are written back), clicking a bar, watching a live update,
-  going back, and adding a table in the config editor. It needs Chrome, so it isn't in `just ci`; run it after UI
+  going back, adding a table in the config editor, and making a dashboard
+  in the dashboard editor (dragging and resizing with real mouse events). It needs Chrome, so it isn't in `just ci`; run it after UI
   changes.
 
 It is a workspace member, so `just ci` lints and tests it natively.
@@ -480,6 +504,11 @@ It is a workspace member, so `just ci` lints and tests it natively.
 - `examples/indud-oee/` is an OEE project over indud's namespace (a
   hierarchy fed by Kayak's `indu_namespace` input with `write: replace`;
   `simulate.sh --sample` runs it without indud).
+- `examples/northwind/` (`just northwind`) is the realtime-BI test bed:
+  Northwind's dimensions in Postgres, read whole by Kayak every 5 s
+  (`snapshot`) into upsert tables (unchanged rows skipped), and a publisher
+  replaying its orders as events through Kayak's `http` input;
+  `freshness.py` measures event → queryable.
 - `examples/retail/` is the example project. Keep it covering every config
   feature as features land. A server run on it writes applied changes back
   into it (`git_commit: false` keeps them out of history); the demo in

@@ -9,7 +9,7 @@ use tidepool_protocol::live::{DashboardInfo, SelectedField, ServerMessage};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
-use crate::board::{Board, socket_url};
+use crate::board::{Board, InFlight, socket_url};
 
 /// Milliseconds on the page's clock.
 pub fn now() -> f64 {
@@ -28,8 +28,8 @@ pub struct Live {
     pub open: RwSignal<Option<String>>,
     pub board: RwSignal<Board>,
     pub selection: RwSignal<Vec<SelectedField>>,
-    pub can_back: RwSignal<bool>,
-    pub can_forward: RwSignal<bool>,
+    /// Whether there's a selection to go back to, and forward to.
+    pub history: RwSignal<(bool, bool)>,
     pub rate: RwSignal<f64>,
     /// The newest epoch the server has published (from status messages).
     pub server_epoch: RwSignal<u64>,
@@ -40,6 +40,9 @@ pub struct Live {
     /// Ticks four times a second, for "updated … ago".
     pub clock: RwSignal<f64>,
     pub problem: RwSignal<Option<String>>,
+    /// What's been sent and not answered: [`Live::busy`] while a selection
+    /// is.
+    pub in_flight: RwSignal<InFlight>,
     /// Each table's sort, by visual id: (column, descending). Kept here
     /// because a table is rebuilt with every frame.
     pub sorts: RwSignal<HashMap<String, (String, bool)>>,
@@ -54,8 +57,7 @@ impl Live {
             open: RwSignal::new(None),
             board: RwSignal::new(Board::default()),
             selection: RwSignal::new(Vec::new()),
-            can_back: RwSignal::new(false),
-            can_forward: RwSignal::new(false),
+            history: RwSignal::new((false, false)),
             rate: RwSignal::new(0.0),
             server_epoch: RwSignal::new(0),
             connected: RwSignal::new(false),
@@ -63,17 +65,27 @@ impl Live {
             updated: RwSignal::new(0.0),
             clock: RwSignal::new(0.0),
             problem: RwSignal::new(None),
+            in_flight: RwSignal::new(InFlight::default()),
             sorts: RwSignal::new(HashMap::new()),
             socket: StoredValue::new_local(None),
         }
     }
 
     pub fn send(self, message: &Value) {
-        self.socket.with_value(|socket| {
-            if let Some(socket) = socket {
-                let _ = socket.send_with_str(&message.to_string());
-            }
+        let sent = self.socket.with_value(|socket| {
+            socket
+                .as_ref()
+                .is_some_and(|s| s.send_with_str(&message.to_string()).is_ok())
         });
+        if sent {
+            let kind = message["type"].as_str().unwrap_or_default();
+            self.in_flight.update(|f| f.sent(kind));
+        }
+    }
+
+    /// A selection is under way: the dashboard is about to change.
+    pub fn busy(self) -> bool {
+        self.in_flight.with(InFlight::busy)
     }
 
     /// Show `slug` (frames for it from now on).
@@ -127,8 +139,7 @@ impl Live {
                 can_forward,
             } => {
                 self.selection.set(fields);
-                self.can_back.set(can_back);
-                self.can_forward.set(can_forward);
+                self.history.set((can_back, can_forward));
             }
             message @ ServerMessage::Frame { .. } => {
                 self.board.update(|board| {
@@ -144,6 +155,7 @@ impl Live {
                 self.rate.set(rows_per_second);
             }
             ServerMessage::Error { message } => self.problem.set(Some(message)),
+            ServerMessage::Done => self.in_flight.update(InFlight::done),
         }
     }
 
@@ -186,6 +198,7 @@ impl Live {
         on_message.forget();
         let on_close = Closure::<dyn Fn()>::new(move || {
             self.connected.set(false);
+            self.in_flight.set(InFlight::default());
             self.problem.set(Some(
                 "Disconnected from the server. Reload to reconnect.".into(),
             ));

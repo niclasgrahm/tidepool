@@ -224,6 +224,10 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    /// One per client message, after everything that message caused (its
+    /// selection and frame, when there are any): a client counting what it
+    /// sent knows when the dashboard has caught up with a click.
+    Done,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -273,6 +277,10 @@ pub struct VisualInfo {
     pub on_click: bool,
     /// Brushing a range selects it.
     pub on_brush: bool,
+    /// A `filter` visual's list: `list` or `tree`. Its frames are the
+    /// filter frames of its dimension's field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget: Option<String>,
     pub at: GridAt,
 }
 

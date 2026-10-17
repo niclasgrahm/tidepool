@@ -1,0 +1,10 @@
+# Dimensions, kept in step with Postgres by Kayak: each table is read whole
+# every few seconds and written here as it is. A row that didn't change is
+# skipped, so the steady re-sending costs nothing downstream.
+name: categories
+mode: upsert
+primary_key: [category_id]
+columns:
+  category_id: { type: string }
+  category:    { type: string }
+  description: { type: string, nullable: true, encoding: plain }

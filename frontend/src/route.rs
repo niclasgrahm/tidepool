@@ -7,6 +7,10 @@ pub enum Route {
     /// The dashboard list.
     Home,
     Dashboard(String),
+    /// A dashboard in the editor.
+    Edit(String),
+    /// A new dashboard, in the editor.
+    NewDashboard,
     /// The model browser, on one of its tabs.
     Model(Tab),
     /// One table in the model browser.
@@ -41,6 +45,8 @@ impl Route {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         match parts.as_slice() {
             ["d", slug] => Self::Dashboard((*slug).to_string()),
+            ["d", slug, "edit"] => Self::Edit((*slug).to_string()),
+            ["new"] => Self::NewDashboard,
             ["model"] | ["model", "tables"] => Self::Model(Tab::Tables),
             ["model", "relationships"] => Self::Model(Tab::Relationships),
             ["model", "metrics"] => Self::Model(Tab::Metrics),
@@ -59,6 +65,8 @@ impl Route {
         match self {
             Self::Home => "#/".into(),
             Self::Dashboard(slug) => format!("#/d/{slug}"),
+            Self::Edit(slug) => format!("#/d/{slug}/edit"),
+            Self::NewDashboard => "#/new".into(),
             Self::Model(Tab::Tables) => "#/model/tables".into(),
             Self::Model(Tab::Relationships) => "#/model/relationships".into(),
             Self::Model(Tab::Metrics) => "#/model/metrics".into(),
@@ -80,6 +88,8 @@ mod tests {
         for route in [
             Route::Home,
             Route::Dashboard("sales".into()),
+            Route::Edit("sales".into()),
+            Route::NewDashboard,
             Route::Model(Tab::Tables),
             Route::Model(Tab::Relationships),
             Route::Model(Tab::Metrics),

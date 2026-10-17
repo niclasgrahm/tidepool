@@ -215,6 +215,8 @@ fn visual(
     let (metric_ids, compare, metrics_ok) = visual_metrics(cx, &site, spec, metrics);
     let (dimensions, dimension_index, dimensions_ok) = visual_dimensions(cx, &site, spec, semantic);
     let shape_ok = visual_shape(cx, &site, spec, semantic, &dimensions);
+    let combinations_ok = dimensions.len() < spec.dimensions.len()
+        || combinations_reach(cx, &site, spec, semantic, &dimensions);
     let reach_ok = visual_reach(
         cx,
         &site,
@@ -238,7 +240,7 @@ fn visual(
         (None, false)
     };
 
-    let ok = metrics_ok && dimensions_ok && shape_ok && reach_ok && sort_ok;
+    let ok = metrics_ok && dimensions_ok && shape_ok && combinations_ok && reach_ok && sort_ok;
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -287,13 +289,6 @@ fn visual_metrics(
         .compare
         .as_ref()
         .and_then(|name| lookup(cx, name, site.path.key("compare")));
-    if spec.metrics.is_empty() {
-        ok = false;
-        cx.push(
-            Diagnostic::error(format!("{} shows no metrics", site.what))
-                .at_key(site.file, site.path.key("metrics")),
-        );
-    }
     (ids, compare, ok)
 }
 
@@ -376,7 +371,29 @@ fn visual_shape(
                 "bar and line charts have exactly one dimension",
             ));
         }
+        VisualType::Filter if dims != 1 => {
+            problems.push((
+                "dimensions",
+                "a filter lists the values of exactly one dimension",
+            ));
+        }
         _ => {}
+    }
+    let grained = spec.visual_type == VisualType::Filter
+        && spec.dimensions.len() == 1
+        && spec.dimensions[0].grain().is_some();
+    if grained {
+        cx.push(
+            Diagnostic::error(format!(
+                "{}: a filter lists a field's own values, so it has no grain",
+                site.what
+            ))
+            .at(site.file, site.path.key("dimensions").index(0).key("grain"))
+            .help("for a range of time, use a `date_range` filter beside the grid"),
+        );
+    }
+    if spec.visual_type == VisualType::Filter && !spec.metrics.is_empty() {
+        problems.push(("metrics", "a filter lists values, so it has no metrics"));
     }
     if spec.compare.is_some() && spec.visual_type != VisualType::Kpi {
         problems.push(("compare", "only KPI tiles have a `compare`"));
@@ -400,13 +417,79 @@ fn visual_shape(
             ));
         }
     }
+    // without metrics, only a table (of its dimensions' values) and a
+    // filter have anything to show: the type is what's wrong
+    let empty = match spec.visual_type {
+        _ if !spec.metrics.is_empty() => None,
+        VisualType::Kpi => Some((
+            "a KPI shows metrics, and it has none",
+            "give it `metrics: [...]`",
+        )),
+        VisualType::Bar | VisualType::Line => Some((
+            "a chart shows metrics, and it has none",
+            "give it `metrics: [...]`, or make it a `filter` or a `table` to list its dimension's values",
+        )),
+        VisualType::Table if dims == 0 => Some((
+            "it has no dimensions and no metrics, so there's nothing to show",
+            "give it `dimensions: [...]`, `metrics: [...]` or both",
+        )),
+        VisualType::Table | VisualType::Filter => None,
+    };
+    if let Some((message, help)) = empty {
+        cx.push(
+            Diagnostic::error(format!("{}: {message}", site.what))
+                .at(site.file, site.path.key("type"))
+                .help(help),
+        );
+    }
     for (key, message) in &problems {
         cx.push(
             Diagnostic::error(format!("{}: {message}", site.what))
                 .at_key(site.file, site.path.key(*key)),
         );
     }
-    problems.is_empty()
+    problems.is_empty() && empty.is_none() && !grained
+}
+
+/// A table without metrics shows the combinations of its dimensions that
+/// rows of one table have, so some table must reach every dimension.
+fn combinations_reach(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    semantic: &Semantic,
+    dimensions: &[Dimension],
+) -> bool {
+    if !spec.metrics.is_empty() || dimensions.len() < 2 {
+        return true;
+    }
+    let tables: Vec<TableId> = semantic.datasets.iter().map(|d| d.table).collect();
+    let relates = |reach: &dyn Fn(TableId, TableId) -> bool| {
+        tables
+            .iter()
+            .any(|from| dimensions.iter().all(|d| reach(*from, d.field.table)))
+    };
+    if relates(&|from, to| semantic.graph.reaches(from, to)) {
+        return true;
+    }
+    if !relates(&|from, to| semantic.maybe_reaches(from, to)) {
+        let mut names: Vec<&str> = dimensions
+            .iter()
+            .map(|d| semantic.dataset_name(d.field.table))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        cx.push(
+            Diagnostic::error(format!(
+                "{}: no table relates `{}`, so their values can't be shown side by side",
+                site.what,
+                names.join("`, `")
+            ))
+            .at_key(site.file, site.path.key("dimensions"))
+            .help("without metrics, a table shows the combinations of its dimensions that rows of one table have: one that reaches all of them through relationships"),
+        );
+    }
+    false
 }
 
 /// Every dimension must be reachable from every metric's anchor. One error

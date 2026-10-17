@@ -163,18 +163,14 @@ fn an_upsert_reports_which_columns_changed() {
     );
     publish(&mut store);
 
-    // same values: nothing changed, so nothing that depends on them is stale
+    // same values: nothing changed, not even the epoch
     write(
         &mut store,
         "customers",
         Op::Write,
         &format!("[{}]", customer("c1", "north")),
     );
-    let same = publish(&mut store);
-    assert_eq!(
-        same.table(customers.id).map(|t| t.changed.clone()),
-        Some(vec![])
-    );
+    assert!(store.publish().is_none());
 
     write(
         &mut store,
@@ -187,6 +183,71 @@ fn an_upsert_reports_which_columns_changed() {
         moved.table(customers.id).map(|t| t.changed.clone()),
         Some(region.into_iter().collect())
     );
+}
+
+#[test]
+fn an_upsert_of_what_is_stored_changes_nothing() {
+    // a dimension read whole from its source and sent on a timer: the same
+    // rows again and again, now and then one changed
+    let mut store = Store::with_seal_rows(model(), 2);
+    let all = |c2: &str| {
+        format!(
+            "[{}, {}, {}]",
+            customer("c1", "north"),
+            customer("c2", c2),
+            customer("c3", "east")
+        )
+    };
+    write(&mut store, "customers", Op::Write, &all("south"));
+    let first = publish(&mut store);
+    let customers = table(&first.model, "customers");
+    let Some(before) = first.table(customers) else {
+        panic!("no customers in the snapshot")
+    };
+
+    let applied = write(&mut store, "customers", Op::Write, &all("south"));
+    assert_eq!((applied.written, applied.replaced), (0, 0));
+    assert_eq!(store.visible_epoch(), first.epoch, "visible already");
+    assert!(store.publish().is_none(), "nothing changed, so no epoch");
+    // and the snapshot a later epoch publishes keeps the table as it was,
+    // so whatever is cached about it still holds
+    write(
+        &mut store,
+        "orders",
+        Op::Write,
+        &format!("[{}]", order(1, "c1")),
+    );
+    let later = publish(&mut store);
+    match later.table(customers) {
+        Some(after) => assert!(std::ptr::eq(before, after), "the same table"),
+        None => panic!("no customers in the later snapshot"),
+    }
+
+    // one changed row is written; the others keep their rows
+    let applied = write(&mut store, "customers", Op::Write, &all("west"));
+    assert_eq!((applied.written, applied.replaced), (1, 1));
+    let moved = publish(&mut store);
+    assert_eq!(moved.table(customers).map(|t| t.live_rows), Some(3));
+    let mut live: Vec<(serde_json::Value, serde_json::Value)> = rows(&moved, "customers", 10)
+        .into_iter()
+        .map(|r| (r[0].clone(), r[2].clone()))
+        .collect();
+    live.sort_by_key(|(id, _)| id.to_string());
+    assert_eq!(
+        live,
+        [
+            (serde_json::json!("c1"), serde_json::json!("north")),
+            (serde_json::json!("c2"), serde_json::json!("west")),
+            (serde_json::json!("c3"), serde_json::json!("east")),
+        ]
+    );
+
+    // a NULL is a value like any other: written once, then skipped
+    let null = r#"[{"customer_id": "c4", "name": "Nc4", "region": "north", "segment": null}]"#;
+    assert_eq!(write(&mut store, "customers", Op::Write, null).written, 1);
+    publish(&mut store);
+    assert_eq!(write(&mut store, "customers", Op::Write, null).written, 0);
+    assert!(store.publish().is_none());
 }
 
 #[test]
@@ -267,8 +328,8 @@ fn a_replace_keeps_what_it_lists_and_deletes_the_rest() {
             customer("c5", "central")
         ),
     );
-    // two rows replaced (c1, c2) and one deleted (c4)
-    assert_eq!((applied.written, applied.replaced), (3, 3));
+    // c1 is skipped, being as it was; c2 replaced and c4 deleted
+    assert_eq!((applied.written, applied.replaced), (2, 2));
     let snapshot = publish(&mut store);
     let mut live: Vec<(serde_json::Value, serde_json::Value)> = rows(&snapshot, "customers", 10)
         .into_iter()
@@ -286,8 +347,8 @@ fn a_replace_keeps_what_it_lists_and_deletes_the_rest() {
     let customers = table(&snapshot.model, "customers");
     assert_eq!(snapshot.table(customers).map(|t| t.live_rows), Some(3));
 
-    // the same contents again change nothing a query sees
-    write(
+    // the same contents again change nothing at all: no epoch
+    let applied = write(
         &mut store,
         "customers",
         Op::Replace,
@@ -298,10 +359,10 @@ fn a_replace_keeps_what_it_lists_and_deletes_the_rest() {
             customer("c5", "central")
         ),
     );
-    let again = publish(&mut store);
-    assert_eq!(
-        again.table(customers).map(|t| t.changed.clone()),
-        Some(vec![])
+    assert_eq!((applied.written, applied.replaced), (0, 0));
+    assert!(
+        store.publish().is_none(),
+        "an unchanged replace is no epoch"
     );
 
     // and an empty one empties the table

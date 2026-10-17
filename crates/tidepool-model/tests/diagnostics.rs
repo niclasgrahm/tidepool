@@ -737,3 +737,62 @@ case!(
         ),
     ]
 );
+case!(
+    dashboard_kpi_without_metrics,
+    [Replace(
+        "dashboards/sales_recent.yaml",
+        "    metrics: [order_count]\n",
+        ""
+    )]
+);
+case!(
+    dashboard_table_shows_nothing,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        ""
+    )]
+);
+case!(
+    dashboard_filter_of_two_dimensions,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        "    type: filter\n    dimensions: [products.name, products.category]\n"
+    )]
+);
+case!(
+    dashboard_filter_with_metrics,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        "    type: filter\n    dimensions: [products.category]\n    metrics: [revenue]\n"
+    )]
+);
+case!(
+    dashboard_filter_with_a_grain,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    type: line\n    dimensions: [{ field: orders.ordered_at, grain: day }]\n    metrics: [revenue, order_count]\n    on_brush: select_range\n",
+        "    type: filter\n    dimensions: [{ field: orders.ordered_at, grain: day }]\n"
+    )]
+);
+case!(
+    dashboard_table_of_unrelated_dimensions,
+    [
+        Add(
+            "tables/stores.yaml",
+            "name: stores\nmode: upsert\nprimary_key: [store_id]\ncolumns:\n  store_id: { type: string }\n  city: { type: string }\n"
+        ),
+        Replace(
+            "model.ossie.yaml",
+            "\nrelationships:\n",
+            "  - name: stores\n    source: stores\n    primary_key: [store_id]\n    fields:\n      - name: city\n        expression: { dialects: [{ dialect: ANSI_SQL, expression: city }] }\n\nrelationships:\n"
+        ),
+        Replace(
+            "dashboards/sales.yaml",
+            "    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+            "    dimensions: [products.category, stores.city]\n"
+        ),
+    ]
+);

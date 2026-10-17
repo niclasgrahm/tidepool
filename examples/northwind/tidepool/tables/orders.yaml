@@ -1,0 +1,20 @@
+# Order headers, as events from the publisher. An order is written twice:
+# when it's placed (`open`), and again when it ships (`shipped`, or `late`
+# when it shipped after it was required), so it's keyed.
+name: orders
+mode: upsert
+primary_key: [order_id]
+event_time: ordered_at
+columns:
+  order_id:     { type: string }
+  customer_id:  { type: string }
+  employee_id:  { type: string }
+  shipper_id:   { type: string }
+  ordered_at:   { type: timestamptz }
+  required_at:  { type: timestamptz }
+  shipped_at:   { type: timestamptz, nullable: true }
+  status:       { type: string }                    # open, shipped, late
+  days_to_ship: { type: int32, nullable: true }     # in Northwind's days
+  freight:      { type: "decimal(10,2)" }
+  ship_city:    { type: string, nullable: true }
+  ship_country: { type: string }

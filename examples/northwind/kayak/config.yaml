@@ -1,0 +1,107 @@
+# Northwind → Tidepool, two ways in.
+#
+# Dimensions: each Postgres table is read whole every 5 seconds (`snapshot`)
+# and sent as one batch to its Tidepool table, an upsert table. The rows are
+# the same nearly every time; Tidepool skips a row equal to the stored one,
+# so only an edit in Postgres costs anything. The queries rename columns to
+# the tables' names and send keys and decimals as text: Tidepool keys are
+# strings, and a decimal's digits survive text exactly.
+#
+# Facts: the publisher posts orders and their lines to the `http` inputs of
+# `orders` and `order_lines` (POST /api/pipelines/{id}/messages); each post
+# is one batch, and one request to Tidepool.
+pipelines:
+- id: categories
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT category_id::text AS category_id, category_name AS category, description FROM categories"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: categories
+- id: suppliers
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT supplier_id::text AS supplier_id, company_name AS supplier, contact_name AS contact, city, country FROM suppliers"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: suppliers
+- id: products
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT product_id::text AS product_id, product_name AS product, supplier_id::text AS supplier_id, category_id::text AS category_id, quantity_per_unit AS unit, unit_price::text AS list_price, discontinued FROM products"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: products
+- id: customers
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT customer_id, company_name AS customer, contact_name AS contact, city, region, country FROM customers"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: customers
+- id: employees
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT employee_id::text AS employee_id, first_name || ' ' || last_name AS employee, title, city, country, reports_to::text AS reports_to FROM employees"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: employees
+- id: shippers
+  inputs:
+  - type: postgres
+    connection: northwind
+    query: "SELECT shipper_id::text AS shipper_id, company_name AS shipper FROM shippers"
+    mode: { type: snapshot }
+    interval_secs: 5
+    max_batch: 1000
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: shippers
+- id: orders
+  inputs:
+  - type: http
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: orders
+- id: order_lines
+  inputs:
+  - type: http
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: tidepool
+    table: order_lines
