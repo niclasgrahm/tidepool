@@ -882,6 +882,44 @@ impl Store {
         self.model_changed = true;
     }
 
+    /// The values in `batch` its table's dictionaries don't hold yet, per
+    /// dictionary-encoded column, each value counted once: what writing it
+    /// would add to dictionaries that never shrink (plan §9.2,
+    /// `new_values`). Columns with none are left out.
+    #[must_use]
+    pub fn new_values(&self, table: TableId, op: Op, batch: &Batch) -> Vec<(String, u64)> {
+        let Some(fitted) = self.fit(table, op, batch) else {
+            return Vec::new();
+        };
+        let batch = fitted.as_ref().unwrap_or(batch);
+        let Some(store) = self.tables.get(&table) else {
+            return Vec::new();
+        };
+        let wanted: Vec<&ColumnLayout> = store
+            .layouts
+            .iter()
+            .filter(|l| op != Op::Delete || store.table.primary_key.contains(&l.id))
+            .collect();
+        let mut counts = Vec::new();
+        for (layout, values) in wanted.iter().zip(&batch.columns) {
+            let Some(id) = layout.dict else {
+                continue;
+            };
+            // a dictionary nothing was written to yet doesn't exist
+            let dict = self.dicts.get(&id);
+            let new: std::collections::HashSet<Key> = values
+                .iter()
+                .flatten()
+                .map(key_of)
+                .filter(|key| dict.is_none_or(|d| d.lookup(key).is_none()))
+                .collect();
+            if !new.is_empty() {
+                counts.push((layout.name.clone(), new.len() as u64));
+            }
+        }
+        counts
+    }
+
     /// `batch`, decoded for `table` under some earlier model, in the
     /// table's columns now: matched by column id, values converted where a
     /// type changed, new columns NULL. `None` if the table is gone.

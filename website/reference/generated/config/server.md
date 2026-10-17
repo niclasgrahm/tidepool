@@ -8,7 +8,7 @@
 | `data_dir` | string |  | Where the server keeps its state. `--data` overrides it. |
 | `durability` | [`Durability`](#server-durability) | `fsync` |  |
 | `epoch_interval` | [`Duration`](#server-duration) | `200ms` | How often new data becomes visible, at most. |
-| `listen` | string |  | Address to listen on. `tidepool serve --listen` overrides it. |
+| `listen` | [`Listen`](#server-listen) |  | Where to listen: one address for everything, or one per surface (`public`, `ingest`, `admin`). `tidepool serve --listen` overrides it with one address. |
 | `memory_budget` | [`MemorySize`](#server-memorysize) | `75%` | Memory for data and caches together. |
 
 
@@ -23,12 +23,15 @@ What an agent's changes over MCP may do without a person (plan §8.5).
 
 ## `AuthSettings` {#server-authsettings}
 
-The environment variables holding the access tokens (plan §9). A level whose variable is unset or empty is open; the admin token is good for every level. Read when the server starts.
+The access tokens (plan §9, §9.2), named by environment variable and read when the server starts. A read or admin level whose variable is unset or empty is open; the admin token is good for every level.
+
+Ingest is either one token for every table and operation (`ingest_token_env`, open when unset, as before), or a list of named credentials (`ingest`), each scoped to tables and operations.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `admin_token_env` | string | `TIDEPOOL_ADMIN_TOKEN` | Changing the config, approving changes. |
-| `ingest_token_env` | string | `TIDEPOOL_INGEST_TOKEN` | Writing and deleting rows. |
+| `ingest` | list of [`IngestCredential`](#server-ingestcredential) |  | Named ingest credentials, in place of `ingest_token_env`. |
+| `ingest_token_env` | string |  | One token for writing and deleting rows in every table, named `ingest`. Default `TIDEPOOL_INGEST_TOKEN`; not used with `ingest`. |
 | `read_token_env` | string | `TIDEPOOL_READ_TOKEN` | Reading data, the model and dashboards. |
 
 
@@ -57,6 +60,16 @@ A duration with a unit: ms, s, m, h or d (e.g. 200ms, 730d).
 Type: string.
 
 
+## `Listen` {#server-listen}
+
+Where the server listens (plan §9.2).
+
+One of:
+
+- string: One address serving everything.
+- [`Surfaces`](#server-surfaces): An address per surface.
+
+
 ## `MemorySize` {#server-memorysize}
 
 A share of system memory (75%) or a size (8GiB).
@@ -69,3 +82,85 @@ Type: string.
 A plan's change class, as written in `tidepool.yaml`.
 
 Type: `safe` · `rebuild` · `destructive`.
+
+
+## `IngestCredential` {#server-ingestcredential}
+
+A producer allowed to write rows (plan §9.2): which tables, which operations, and whether from the public listener.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `limits` | [`Limits`](#server-limits) |  | How much it may send. |
+| `name` | string | **required** | Its name: in metrics, and the scope of its idempotency keys. |
+| `operations` | list of [`IngestOperation`](#server-ingestoperation) |  | What it may do. Default: `append` for a public credential, every operation otherwise. |
+| `origins` | list of string |  | The browser origins it may write from (CORS), e.g. `https://app.example.com`. |
+| `public` | boolean |  | Whether it may write through the public listener. Its limits then apply with defaults for what they leave out. |
+| `tables` | list of string | `["*"]` | The tables it may write; `"*"` is every table. |
+| `token` | [`NoToken`](#server-notoken) |  | `none`: no token at all, for a producer that can't keep a secret (a browser). Only for `public` credentials that only `append`. |
+| `token_env` | [`TokenEnv`](#server-tokenenv) |  | The environment variable holding its token, or several: any of them is accepted, for rotating a token without downtime. A credential whose variables are all unset can't be used. |
+
+
+## `Surfaces` {#server-surfaces}
+
+An address per surface. A surface left out is served by `admin`'s address, or by `public`'s when `admin` is left out too; surfaces given the same address share one listener.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `admin` | string |  | Everything, including config changes, approvals and `/metrics`. |
+| `ingest` | string |  | Reading data and all ingest: where Kayak and other producers connect. |
+| `public` | string |  | The UI, reading data, live dashboards, and ingest for credentials marked `public`. |
+
+
+## `Limits` {#server-limits}
+
+How much a credential may send. Over `rate` or `new_values` a request is refused with 429, over `batch_rows` or `body` with 413.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `batch_rows` | integer |  | Rows in one request at most. |
+| `body` | [`ByteSize`](#server-bytesize) |  | A request body's size at most, e.g. `1MiB`. |
+| `new_values` | [`Rate`](#server-rate) |  | Values new to a dictionary-encoded column at most, e.g. `1000/min`: dictionaries only grow, so this is what keeps unique junk from filling memory. |
+| `rate` | [`Rate`](#server-rate) |  | Requests (batches) at most, e.g. `200/s`. |
+
+
+## `IngestOperation` {#server-ingestoperation}
+
+A way of writing rows.
+
+| value | description |
+| --- | --- |
+| `append` | `POST` to an append table. |
+| `upsert` | `POST` to an upsert table: rows replace the stored ones by key. |
+| `delete` | `DELETE`: rows removed by key. |
+| `replace` | `PUT`: the table's whole contents (an empty body empties it). |
+
+
+## `NoToken` {#server-notoken}
+
+`token: none`.
+
+Type: `none`.
+
+
+## `TokenEnv` {#server-tokenenv}
+
+One environment variable, or several.
+
+One of:
+
+- string
+- list of string
+
+
+## `ByteSize` {#server-bytesize}
+
+A size: a number and B, KiB, MiB, GiB or TiB (e.g. 1MiB).
+
+Type: string.
+
+
+## `Rate` {#server-rate}
+
+A count per unit of time: s, min or h (e.g. 200/s).
+
+Type: string.

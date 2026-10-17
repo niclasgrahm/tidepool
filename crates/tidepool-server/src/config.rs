@@ -89,7 +89,7 @@ pub enum Refused {
     BadPath(String),
     /// Doesn't compile.
     Invalid(Box<PlanInfo>, u64),
-    /// Destroys data and isn't approved.
+    /// Destroys data, or changes who can reach what, and isn't approved.
     NeedsApproval(Box<PlanInfo>, u64),
     /// A rebuild is still running.
     Busy(String, u64),
@@ -128,7 +128,12 @@ impl IntoResponse for Refused {
             ),
             Self::NeedsApproval(plan, current) => (
                 StatusCode::CONFLICT,
-                "this change destroys data: apply it with `approve`, or propose it".to_string(),
+                if plan.class.as_deref() == Some("security") {
+                    "this change changes who can reach the server: apply it with `approve`, or propose it"
+                } else {
+                    "this change destroys data: apply it with `approve`, or propose it"
+                }
+                .to_string(),
                 current,
                 Some(*plan),
             ),
@@ -233,11 +238,7 @@ pub fn strip_renamed_from(text: &str) -> String {
 }
 
 fn class_label(class: ChangeClass) -> &'static str {
-    match class {
-        ChangeClass::Safe => "safe",
-        ChangeClass::Rebuild => "rebuild",
-        ChangeClass::Destructive => "destructive",
-    }
+    class.label()
 }
 
 /// A compiled change: the plan as the API shows it, and what applying needs.
@@ -673,7 +674,7 @@ pub async fn submit(
         });
     }
     let class = assessed.plan.as_ref().and_then(Plan::class);
-    if class == Some(ChangeClass::Destructive) && !change.approve {
+    if class.is_some_and(ChangeClass::needs_approval) && !change.approve {
         return Err(Refused::NeedsApproval(Box::new(assessed.info), current));
     }
     if let Some((version, _, _)) = state.writer.rebuild() {

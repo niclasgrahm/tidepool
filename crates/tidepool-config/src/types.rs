@@ -323,6 +323,94 @@ string_type!(
     "A share of system memory (75%) or a size (8GiB)."
 );
 
+/// A size in bytes: `512KiB`, `1MiB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteSize(pub u64);
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        MemorySize::Bytes(self.0).fmt(f)
+    }
+}
+
+impl FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.parse::<MemorySize>() {
+            Ok(MemorySize::Bytes(b)) => Ok(Self(b)),
+            Ok(MemorySize::Percent(_)) | Err(_) => Err(format!(
+                "`{text}` is not a size; write a number and a unit, e.g. 1MiB or 512KiB"
+            )),
+        }
+    }
+}
+
+string_type!(
+    ByteSize,
+    "ByteSize",
+    "^\\s*\\d+\\s*(B|KiB|MiB|GiB|TiB)?\\s*$",
+    "A size: a number and B, KiB, MiB, GiB or TiB (e.g. 1MiB)."
+);
+
+/// How many per unit of time: `200/s`, `1000/min`, `50000/h`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Rate {
+    pub count: u64,
+    pub per: Duration,
+}
+
+impl Rate {
+    /// The rate per second.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn per_second(self) -> f64 {
+        self.count as f64 / self.per.as_secs_f64()
+    }
+}
+
+impl fmt::Display for Rate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let unit = match self.per.as_secs() {
+            3600 => "h",
+            60 => "min",
+            _ => "s",
+        };
+        write!(f, "{}/{unit}", self.count)
+    }
+}
+
+impl FromStr for Rate {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = || {
+            format!(
+                "`{text}` is not a rate; write a count and a unit, e.g. 200/s, 1000/min or 50000/h"
+            )
+        };
+        let (count, unit) = text.trim().split_once('/').ok_or_else(bad)?;
+        let count = count.trim().parse::<u64>().map_err(|_| bad())?;
+        let per = match unit.trim() {
+            "s" => Duration::from_secs(1),
+            "min" => Duration::from_secs(60),
+            "h" => Duration::from_secs(3600),
+            other => return Err(format!("`{text}`: unknown unit `{other}`; use s, min or h")),
+        };
+        if count == 0 {
+            return Err(format!("`{text}`: a rate must be at least 1"));
+        }
+        Ok(Self { count, per })
+    }
+}
+
+string_type!(
+    Rate,
+    "Rate",
+    "^\\s*\\d+\\s*/\\s*(s|min|h)\\s*$",
+    "A count per unit of time: s, min or h (e.g. 200/s)."
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +510,18 @@ mod tests {
         assert_eq!(MemorySize::Bytes(8 << 30).to_string(), "8GiB");
         assert!("150%".parse::<MemorySize>().is_err());
         assert!("8GB".parse::<MemorySize>().is_err());
+    }
+
+    #[test]
+    fn sizes_and_rates_parse_and_print() {
+        assert_eq!("1MiB".parse(), Ok(ByteSize(1 << 20)));
+        assert_eq!(ByteSize(512 << 10).to_string(), "512KiB");
+        assert!("50%".parse::<ByteSize>().is_err());
+        let rate: Rate = "1000/min".parse().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rate.to_string(), "1000/min");
+        assert!((rate.per_second() - 1000.0 / 60.0).abs() < 1e-9);
+        assert!("200/day".parse::<Rate>().is_err());
+        assert!("0/s".parse::<Rate>().is_err());
+        assert!("fast".parse::<Rate>().is_err());
     }
 }

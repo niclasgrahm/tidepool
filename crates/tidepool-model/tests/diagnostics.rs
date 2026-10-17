@@ -796,3 +796,125 @@ case!(
         ),
     ]
 );
+
+// --- tidepool.yaml: listeners and ingest credentials (plan §9.2) -------------
+
+/// `tidepool.yaml` with these lines appended under `auth:`.
+fn auth(lines: &'static str) -> Edit {
+    Replace("tidepool.yaml", "durability: fsync\n", lines)
+}
+
+case!(
+    listen_without_an_address,
+    [Replace(
+        "tidepool.yaml",
+        "listen: 127.0.0.1:7070",
+        "listen: {}"
+    )]
+);
+case!(
+    ingest_token_env_and_credentials,
+    [auth(
+        "durability: fsync\nauth:\n  ingest_token_env: FEED_TOKEN\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n"
+    )]
+);
+case!(
+    credential_defined_twice,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n    - name: kayak\n      token_env: OTHER_TOKEN\n"
+    )]
+);
+case!(
+    credential_name_with_a_space,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: field sensors\n      token_env: SENSOR_TOKEN\n"
+    )]
+);
+case!(
+    credential_without_a_token,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n"
+    )]
+);
+case!(
+    credential_with_a_token_and_none,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: beacon\n      token_env: BEACON_TOKEN\n      token: none\n      public: true\n"
+    )]
+);
+case!(
+    credential_token_env_names_nothing,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n      token_env: []\n"
+    )]
+);
+case!(
+    credential_without_a_token_not_public,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: beacon\n      token: none\n      tables: [orders]\n"
+    )]
+);
+case!(
+    credential_without_a_token_deletes,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: beacon\n      token: none\n      public: true\n      tables: [customers]\n      operations: [append, delete]\n"
+    )]
+);
+case!(
+    public_credential_upserts,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: crm\n      token_env: CRM_TOKEN\n      public: true\n      tables: [customers]\n      operations: [upsert]\n"
+    )]
+);
+case!(
+    credential_may_do_nothing,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n      operations: []\n"
+    )]
+);
+case!(
+    credential_grants_no_tables,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n      tables: []\n"
+    )]
+);
+case!(
+    credential_grants_an_unknown_table,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: shop\n      token_env: SHOP_TOKEN\n      tables: [order]\n"
+    )]
+);
+case!(
+    two_credentials_without_a_token_on_one_table,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: web\n      token: none\n      public: true\n      tables: [orders]\n    - name: app\n      token: none\n      public: true\n      tables: [orders, customers]\n"
+    )]
+);
+case!(
+    credential_origin_with_a_path,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: web\n      token_env: WEB_TOKEN\n      public: true\n      tables: [orders]\n      origins: [\"https://shop.example.com/checkout\"]\n"
+    )]
+);
+case!(
+    credential_batch_rows_zero,
+    [auth(
+        "durability: fsync\nauth:\n  ingest:\n    - name: web\n      token_env: WEB_TOKEN\n      tables: [orders]\n      limits: { batch_rows: 0 }\n"
+    )]
+);
+case!(
+    filled_column_of_the_wrong_type,
+    [Replace(
+        "tables/orders.yaml",
+        "  note:        { type: string, nullable: true, encoding: plain }\n",
+        "  note:        { type: string, nullable: true, encoding: plain }\n  received_at: { type: string, filled: received }\n"
+    )]
+);
+case!(
+    filled_column_in_the_primary_key,
+    [Replace(
+        "tables/customers.yaml",
+        "  customer_id: { type: string }",
+        "  customer_id: { type: string, filled: credential }"
+    )]
+);

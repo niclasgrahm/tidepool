@@ -1,23 +1,33 @@
 //! The tables endpoints: writing rows, deleting by key, and looking at what
 //! a table holds. Documented in the endpoint table, like every handler.
+//!
+//! A write goes: who writes it ([`Caller::writer`]: the credential, the
+//! table and operation it may write, the listener), the browser origin, the
+//! credential's limits (rate, body, rows, its share of the queue, values
+//! new to the dictionaries), the columns the server fills, then the writer
+//! with an idempotency key scoped to the credential (plan §9.2).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use serde::Deserialize;
 use tidepool_config::diag::suggest;
+use tidepool_config::server::IngestOperation;
+use tidepool_config::table::TableMode;
 use tidepool_model::ir::Table;
 use tidepool_protocol::api_docs::ApiError;
 use tidepool_protocol::{ColumnInfo, IngestError, IngestResponse, Preview, RowError, TableInfo};
 use tidepool_store::batch::{self, Shape};
+use tidepool_store::keys::Scoped;
 use tidepool_store::{Op, Rejected, Snapshot};
 
 use crate::AppState;
+use crate::auth::{Caller, Denied, Listener, Writer};
 use crate::idempotency::Begin;
 
 /// Largest ingest body accepted.
@@ -99,93 +109,303 @@ fn rejected(rejected: &Rejected) -> Response {
     (StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
+/// A write request as it arrived.
+struct Request<'a> {
+    name: &'a str,
+    op: Op,
+    caller: &'a Caller,
+    listener: Listener,
+    query: &'a WriteQuery,
+    headers: &'a HeaderMap,
+}
+
 /// `POST /v1/tables/{table}/rows`
 pub async fn ingest_rows(
     State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Extension(listener): Extension<Listener>,
     Path(table): Path<String>,
     Query(query): Query<WriteQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    counted(&state, &table, Op::Write, &query, &headers, body).await
+    let request = Request {
+        name: &table,
+        op: Op::Write,
+        caller: &caller,
+        listener,
+        query: &query,
+        headers: &headers,
+    };
+    counted(&state, &request, body).await
 }
 
 /// `PUT /v1/tables/{table}/rows`
 pub async fn replace_rows(
     State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Extension(listener): Extension<Listener>,
     Path(table): Path<String>,
     Query(query): Query<WriteQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    counted(&state, &table, Op::Replace, &query, &headers, body).await
+    let request = Request {
+        name: &table,
+        op: Op::Replace,
+        caller: &caller,
+        listener,
+        query: &query,
+        headers: &headers,
+    };
+    counted(&state, &request, body).await
 }
 
 /// `DELETE /v1/tables/{table}/rows`
 pub async fn delete_rows(
     State(state): State<Arc<AppState>>,
+    Extension(caller): Extension<Caller>,
+    Extension(listener): Extension<Listener>,
     Path(table): Path<String>,
     Query(query): Query<WriteQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    counted(&state, &table, Op::Delete, &query, &headers, body).await
+    let request = Request {
+        name: &table,
+        op: Op::Delete,
+        caller: &caller,
+        listener,
+        query: &query,
+        headers: &headers,
+    };
+    counted(&state, &request, body).await
 }
 
-async fn write(
+/// The operation a request is, for a credential's grants.
+fn operation(op: Op, mode: TableMode) -> IngestOperation {
+    match (op, mode) {
+        (Op::Write, TableMode::Append) => IngestOperation::Append,
+        (Op::Write, TableMode::Upsert) => IngestOperation::Upsert,
+        (Op::Delete, _) => IngestOperation::Delete,
+        (Op::Replace, _) => IngestOperation::Replace,
+    }
+}
+
+/// Who writes this request's batch, or the response refusing it. Comes
+/// before anything about the table is said, so the public listener tells
+/// nobody about tables they can't write there.
+fn writer_of(state: &AppState, request: &Request) -> Result<(Table, Writer), Box<Response>> {
+    let snapshot = state.writer.snapshot();
+    let Some(table) = snapshot.model.table_named(request.name) else {
+        if request.listener.public_only() {
+            return Err(Box::new(error(
+                StatusCode::NOT_FOUND,
+                format!("no table `{}`", request.name),
+            )));
+        }
+        return Err(find(&snapshot, request.name)
+            .err()
+            .unwrap_or_else(|| Box::new(error(StatusCode::NOT_FOUND, "no such table"))));
+    };
+    let operation = operation(request.op, table.mode);
+    match request
+        .caller
+        .writer(&state.tokens, request.listener, &table.name, operation)
+    {
+        Ok(writer) => Ok((table.clone(), writer)),
+        Err(Denied::Hidden) => Err(Box::new(error(
+            StatusCode::NOT_FOUND,
+            format!("no table `{}`", request.name),
+        ))),
+        Err(Denied::NeedsToken) => Err(Box::new(crate::auth::unauthorized(false))),
+        Err(Denied::Forbidden(message)) => Err(Box::new(error(StatusCode::FORBIDDEN, message))),
+    }
+}
+
+/// The browser origin a request comes from, if it may write from there:
+/// `Ok(None)` for a request that isn't from a browser elsewhere.
+fn origin(writer: &Writer, headers: &HeaderMap) -> Result<Option<HeaderValue>, Box<Response>> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(None);
+    };
+    let allowed = writer.credential().is_some_and(|c| {
+        origin
+            .to_str()
+            .is_ok_and(|o| c.origins.iter().any(|allowed| allowed == o))
+    });
+    match writer.credential() {
+        Some(_) if allowed => Ok(Some(origin.clone())),
+        // a credential without origins doesn't say; the browser decides
+        // (and without CORS headers it won't hand the response over)
+        Some(c) if c.origins.is_empty() => Ok(None),
+        None => Ok(None),
+        Some(c) => Err(Box::new(error(
+            StatusCode::FORBIDDEN,
+            format!(
+                "credential `{}` may not write from origin `{}`",
+                c.name,
+                origin.to_str().unwrap_or("?")
+            ),
+        ))),
+    }
+}
+
+/// 429 or 413, with when to retry for a 429.
+fn refused(
     state: &AppState,
-    name: &str,
-    op: Op,
-    query: &WriteQuery,
-    headers: &HeaderMap,
-    body: Bytes,
+    writer: &Writer,
+    reason: &'static str,
+    status: StatusCode,
+    message: String,
+    retry: Option<Duration>,
 ) -> Response {
-    let (table, format, wait) = match prepare(state, name, op, query, headers) {
-        Ok(prepared) => prepared,
+    state.counters.refused(writer.name(), reason);
+    let mut response = error(status, message);
+    if let Some(retry) = retry {
+        let seconds = retry.as_secs() + u64::from(retry.subsec_nanos() > 0);
+        if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+/// The credential's limits that can be checked before decoding: its rate
+/// and the body's size.
+fn before_decoding(state: &AppState, writer: &Writer, body: &Bytes) -> Result<(), Box<Response>> {
+    let Some(credential) = writer.credential() else {
+        return Ok(());
+    };
+    let limits = credential.limits;
+    if let Some(rate) = limits.rate
+        && let Err(retry) = state
+            .limiter
+            .request(&credential.name, rate, Instant::now())
+    {
+        return Err(Box::new(refused(
+            state,
+            writer,
+            "rate",
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "credential `{}` is over its rate of {rate}",
+                credential.name
+            ),
+            Some(retry),
+        )));
+    }
+    if let Some(max) = limits.body
+        && body.len() as u64 > max.0
+    {
+        return Err(Box::new(refused(
+            state,
+            writer,
+            "body",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "the body is {} bytes; credential `{}` may send {max} at most",
+                body.len(),
+                credential.name
+            ),
+            None,
+        )));
+    }
+    Ok(())
+}
+
+async fn write(state: &AppState, request: &Request<'_>, body: Bytes) -> Response {
+    let (table, writer) = match writer_of(state, request) {
+        Ok(found) => found,
         Err(response) => return *response,
     };
-    let batch = match decode(&table, op, format, body).await {
-        Ok(batch) => batch,
+    let allow_origin = match origin(&writer, request.headers) {
+        Ok(origin) => origin,
         Err(response) => return *response,
     };
-    let key = headers
+    let mut response = match checked(state, request, &table, &writer, body).await {
+        Ok(response) => response,
+        Err(response) => *response,
+    };
+    if let Some(origin) = allow_origin {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("Origin"));
+    }
+    response
+}
+
+/// The write, from limits to the writer.
+async fn checked(
+    state: &AppState,
+    request: &Request<'_>,
+    table: &Table,
+    writer: &Writer,
+    body: Bytes,
+) -> Result<Response, Box<Response>> {
+    let (format, wait) = prepare(table, request)?;
+    before_decoding(state, writer, &body)?;
+    let mut batch = decode(table, request.op, format, body).await?;
+    let limits = writer.credential().map(|c| c.limits).unwrap_or_default();
+    if let Some(max) = limits.batch_rows
+        && batch.rows as u64 > max
+    {
+        return Err(Box::new(refused(
+            state,
+            writer,
+            "batch_rows",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "the batch has {} rows; credential `{}` may send {max} at most",
+                batch.rows,
+                writer.name()
+            ),
+            None,
+        )));
+    }
+    if request.op != Op::Delete {
+        let received = chrono::Utc::now().timestamp_micros();
+        batch::fill(table, &mut batch, writer.name(), received);
+    }
+    let key = request
+        .headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    commit(state, &table, op, batch, wait, key).await
+        .map(|key| Scoped {
+            credential: writer.name().to_string(),
+            key: key.to_string(),
+        });
+    Ok(commit(state, table, writer, request.op, batch, wait, key).await)
 }
 
 /// [`write`], counted for `/metrics`.
-async fn counted(
-    state: &AppState,
-    name: &str,
-    op: Op,
-    query: &WriteQuery,
-    headers: &HeaderMap,
-    body: Bytes,
-) -> Response {
-    let response = write(state, name, op, query, headers, body).await;
-    let label = match op {
+async fn counted(state: &AppState, request: &Request<'_>, body: Bytes) -> Response {
+    let response = write(state, request, body).await;
+    let label = match request.op {
         Op::Write => "write",
         Op::Delete => "delete",
         Op::Replace => "replace",
     };
-    state.counters.request(name, label, response.status());
+    // by name only for tables that exist: anyone reaching the public
+    // listener could otherwise add a label per made-up name
+    let snapshot = state.writer.snapshot();
+    let table = if snapshot.model.table_named(request.name).is_some() {
+        request.name
+    } else {
+        "(none)"
+    };
+    state.counters.request(table, label, response.status());
     response
 }
 
 /// Everything about the request that can be checked before reading the body:
-/// the table, the format, and whether to wait.
-fn prepare(
-    state: &AppState,
-    name: &str,
-    op: Op,
-    query: &WriteQuery,
-    headers: &HeaderMap,
-) -> Result<(Table, Format, bool), Box<Response>> {
-    let snapshot = state.writer.snapshot();
-    let table = find(&snapshot, name)?.clone();
-    if op != Op::Write && table.mode != tidepool_config::table::TableMode::Upsert {
+/// the operation against the table's mode, the format, and whether to wait.
+fn prepare(table: &Table, request: &Request) -> Result<(Format, bool), Box<Response>> {
+    let (name, op, query, headers) = (request.name, request.op, request.query, request.headers);
+    if op != Op::Write && table.mode != TableMode::Upsert {
         let message = if op == Op::Delete {
             format!("`{name}` is an append table; only upsert tables have keys to delete by")
         } else {
@@ -204,7 +424,7 @@ fn prepare(
             )));
         }
     };
-    Ok((table, format, wait))
+    Ok((format, wait))
 }
 
 /// Decode the body, off the async threads: it is CPU work proportional to
@@ -237,15 +457,21 @@ async fn decode(
     }
 }
 
-/// Hand the batch to the writer, honouring the idempotency key.
+/// Hand the batch to the writer, honouring the idempotency key and the
+/// credential's share of the queue and budget of new values.
+#[allow(clippy::too_many_lines)]
 async fn commit(
     state: &AppState,
     table: &Table,
+    writer: &Writer,
     op: Op,
     batch: tidepool_store::Batch,
     wait: bool,
-    key: Option<String>,
+    key: Option<Scoped>,
 ) -> Response {
+    let credential = writer.credential();
+    let public = credential.is_some_and(|c| c.public);
+    let new_values = credential.and_then(|c| c.limits.new_values);
     if let Some(key) = &key {
         match state.keys.begin(table.id, key, Instant::now()) {
             Begin::Fresh => {}
@@ -264,7 +490,33 @@ async fn commit(
         }
     };
 
-    let Ok(receipt) = state.writer.apply(table.id, op, batch, key.clone()) else {
+    // a public batch waits in the queue only within the public share
+    let slot = if public {
+        let Some(slot) = state.limiter.public_slot() else {
+            abandon();
+            return refused(
+                state,
+                writer,
+                "queue",
+                StatusCode::TOO_MANY_REQUESTS,
+                "public producers have filled their share of the write queue; retry shortly"
+                    .to_string(),
+                Some(Duration::from_secs(1)),
+            );
+        };
+        Some(slot)
+    } else {
+        None
+    };
+    let max_new_values = new_values.map(|rate| {
+        state
+            .limiter
+            .new_values_left(writer.name(), rate, Instant::now())
+    });
+    let Ok(receipt) = state
+        .writer
+        .apply(table.id, op, batch, key.clone(), max_new_values)
+    else {
         abandon();
         let mut response = error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -282,6 +534,29 @@ async fn commit(
             "the server is shutting down",
         );
     };
+    drop(slot);
+    if let Some(rate) = new_values {
+        if let Some((column, count)) = &receipt.refused {
+            abandon();
+            let wait = state
+                .limiter
+                .new_values_wait(writer.name(), rate, *count, Instant::now());
+            return refused(
+                state,
+                writer,
+                "new_values",
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "`{column}` would get {count} new values; credential `{}` may add {rate}",
+                    writer.name()
+                ),
+                Some(wait),
+            );
+        }
+        state
+            .limiter
+            .spend_new_values(writer.name(), rate, receipt.new_values, Instant::now());
+    }
     if receipt.applied.table_gone {
         abandon();
         return error(
@@ -302,6 +577,7 @@ async fn commit(
 
     state.counters.rows(
         &table.name,
+        writer.name(),
         (receipt.applied.written + receipt.applied.replaced) as u64,
     );
     let response = IngestResponse {
@@ -338,6 +614,7 @@ fn info(snapshot: &Snapshot, table: &Table) -> TableInfo {
                 column_type: c.column_type.to_string(),
                 nullable: c.nullable,
                 encoding: format!("{:?}", c.encoding).to_lowercase(),
+                filled: c.filled.map(|f| format!("{f:?}").to_lowercase()),
             })
             .collect(),
         event_time: table.event_time.map(name_of),

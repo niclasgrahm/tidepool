@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::source::YamlPath;
-use tidepool_config::table::{TableFile, TableMode};
+use tidepool_config::table::{ColumnSpec, Filled, TableFile, TableMode};
+use tidepool_config::types::ColumnType;
 
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{Column, ColumnId, Table, TableId};
@@ -154,6 +155,7 @@ fn compile_table(cx: &mut Cx, id: TableId, spec: &TableFile, file: &PathBuf) -> 
                 .at(file, path.key("renamed_from")),
             );
         }
+        let filled = filled(cx, file, spec, name, column);
         columns.push(Column {
             id: cx.ids.column(id, name, column.renamed_from.as_deref()),
             name: name.clone(),
@@ -161,6 +163,7 @@ fn compile_table(cx: &mut Cx, id: TableId, spec: &TableFile, file: &PathBuf) -> 
             nullable: column.nullable,
             encoding: column.effective_encoding(),
             key_domain: None,
+            filled,
         });
     }
 
@@ -219,6 +222,59 @@ fn compile_table(cx: &mut Cx, id: TableId, spec: &TableFile, file: &PathBuf) -> 
         retention: spec.retention,
         columns,
     }
+}
+
+/// What the server fills the column with, if that fits its type and it
+/// isn't part of the key (reported otherwise).
+fn filled(
+    cx: &mut Cx,
+    file: &PathBuf,
+    spec: &TableFile,
+    name: &str,
+    column: &ColumnSpec,
+) -> Option<Filled> {
+    let filled = column.filled?;
+    let path = YamlPath::root().key("columns").key(name).key("filled");
+    let (fits, what, wants) = match filled {
+        Filled::Credential => (
+            column.column_type == ColumnType::String,
+            "a credential's name",
+            "string",
+        ),
+        Filled::Received => (
+            matches!(
+                column.column_type,
+                ColumnType::Timestamp | ColumnType::TimestampTz
+            ),
+            "the time a row is received",
+            "timestamp or timestamptz",
+        ),
+    };
+    if !fits {
+        cx.push(
+            Diagnostic::error(format!(
+                "`{name}` is {} and can't hold {what}",
+                column.column_type
+            ))
+            .at(file, path)
+            .help(format!("make the column {wants}, or remove `filled`")),
+        );
+        return None;
+    }
+    if spec
+        .primary_key
+        .as_ref()
+        .is_some_and(|k| k.iter().any(|c| c == name))
+    {
+        cx.push(
+            Diagnostic::error(format!(
+                "`{name}` is part of the primary key, so producers must send it; the server can't fill it"
+            ))
+            .at(file, path),
+        );
+        return None;
+    }
+    Some(filled)
 }
 
 /// The primary key's columns, checked against the table's mode and columns.

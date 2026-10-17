@@ -13,6 +13,11 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
+use tidepool_config::server::{
+    AuthSettings, IngestCredential, IngestOperation, Limits, ServerConfig, TokenEnv,
+};
+use tidepool_config::table::Filled;
+
 use crate::ir::{Column, ColumnId, Model, Table, TableId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -21,15 +26,26 @@ pub enum ChangeClass {
     Safe,
     Rebuild,
     Destructive,
+    /// Changes who can reach what (plan §9.2): `auth`, `listen`, `agents`.
+    /// Needs a person's approval and is never applied by an agent alone.
+    Security,
 }
 
 impl ChangeClass {
-    fn label(self) -> &'static str {
+    #[must_use]
+    pub fn label(self) -> &'static str {
         match self {
             Self::Safe => "safe",
             Self::Rebuild => "rebuild",
             Self::Destructive => "destructive",
+            Self::Security => "security",
         }
+    }
+
+    /// Whether applying it needs explicit approval.
+    #[must_use]
+    pub fn needs_approval(self) -> bool {
+        matches!(self, Self::Destructive | Self::Security)
     }
 }
 
@@ -57,7 +73,7 @@ impl Op {
 pub struct Change {
     pub op: Op,
     /// `table`, `column`, `relationship`, `dataset`, `field`, `hierarchy`,
-    /// `metric`, `dashboard` or `setting`.
+    /// `metric`, `dashboard`, `setting` or `credential`.
     pub kind: &'static str,
     /// What changed, e.g. `orders.quantity`.
     pub subject: String,
@@ -95,9 +111,14 @@ impl Plan {
         } else {
             let count = |class| self.changes.iter().filter(|c| c.class == class).count();
             let n = self.changes.len();
+            // security is counted only when there is some: most plans have none
+            let security = match count(ChangeClass::Security) {
+                0 => String::new(),
+                k => format!(", {k} security"),
+            };
             let _ = writeln!(
                 out,
-                "{n} change{} ({} safe, {} rebuild, {} destructive)\n",
+                "{n} change{} ({} safe, {} rebuild, {} destructive{security})\n",
                 if n == 1 { "" } else { "s" },
                 count(ChangeClass::Safe),
                 count(ChangeClass::Rebuild),
@@ -358,6 +379,7 @@ fn columns(plan: &mut Plan, before: &Table, after: &Table) {
                 .note("existing NULLs would be invalid");
             }
         }
+        filled(plan, old, column, label(column));
         if old.encoding != column.encoding {
             plan.push(Op::Change, "column", label(column), ChangeClass::Rebuild)
                 .detail(
@@ -637,12 +659,6 @@ fn settings(plan: &mut Plan, old: &Model, new: &Model) {
     };
     let show = |v: Option<String>| v.unwrap_or_else(|| "default".to_string());
     setting(
-        "listen",
-        show(a.listen.map(|l| l.to_string())),
-        show(b.listen.map(|l| l.to_string())),
-        true,
-    );
-    setting(
         "data_dir",
         show(a.data_dir.clone()),
         show(b.data_dir.clone()),
@@ -680,4 +696,231 @@ fn settings(plan: &mut Plan, old: &Model, new: &Model) {
         writeback(b.config_writeback),
         false,
     );
+    security(plan, a, b);
+}
+
+/// A column that the server starts or stops filling: only new writes see it.
+fn filled(plan: &mut Plan, old: &Column, column: &Column, label: String) {
+    if old.filled == column.filled {
+        return;
+    }
+    let detail = match column.filled {
+        Some(Filled::Credential) => "filled with the credential",
+        Some(Filled::Received) => "filled with the time received",
+        None => "no longer filled",
+    };
+    plan.push(Op::Change, "column", label, ChangeClass::Safe)
+        .detail(detail)
+        .note("from the next write; stored rows keep their values");
+}
+
+/// Changes to who can reach what: `listen`, `auth` and `agents` (plan
+/// §9.2). Each is its own item, so an approver sees exactly what widens.
+fn security(plan: &mut Plan, a: &ServerConfig, b: &ServerConfig) {
+    let mut setting = |name: &str, before: String, after: String| {
+        if before != after {
+            plan.push(Op::Change, "setting", name, ChangeClass::Security)
+                .detail(format!("{before} → {after}"))
+                .note("takes effect on restart");
+        }
+    };
+    setting(
+        "listen",
+        a.listen_or_default().to_string(),
+        b.listen_or_default().to_string(),
+    );
+    let (x, y) = (&a.auth, &b.auth);
+    setting(
+        "auth.read_token_env",
+        x.read_token_env.clone(),
+        y.read_token_env.clone(),
+    );
+    setting(
+        "auth.admin_token_env",
+        x.admin_token_env.clone(),
+        y.admin_token_env.clone(),
+    );
+    if x.ingest.is_empty() && y.ingest.is_empty() {
+        setting(
+            "auth.ingest_token_env",
+            x.ingest_token_env().to_string(),
+            y.ingest_token_env().to_string(),
+        );
+    }
+    let classes = |agents: &tidepool_config::server::Agents| {
+        let names: Vec<String> = agents
+            .auto_apply
+            .iter()
+            .map(|c| format!("{c:?}").to_lowercase())
+            .collect();
+        format!("[{}]", names.join(", "))
+    };
+    setting("agents.auto_apply", classes(&a.agents), classes(&b.agents));
+
+    credentials(plan, x, y);
+}
+
+/// Ingest credentials added, changed and removed. The single token is a
+/// credential named `ingest`, so moving from it to a list (or back) reads
+/// as the credentials that came and went.
+fn credentials(plan: &mut Plan, x: &AuthSettings, y: &AuthSettings) {
+    let listed = |auth: &AuthSettings| -> Vec<IngestCredential> {
+        if auth.ingest.is_empty() {
+            vec![IngestCredential {
+                name: tidepool_config::server::LEGACY_CREDENTIAL.to_string(),
+                token_env: Some(TokenEnv::One(auth.ingest_token_env().to_string())),
+                token: None,
+                tables: vec!["*".into()],
+                operations: None,
+                public: false,
+                limits: Limits::default(),
+                origins: Vec::new(),
+            }]
+        } else {
+            auth.ingest.clone()
+        }
+    };
+    let (before, after) = (listed(x), listed(y));
+    for credential in &after {
+        let grant = describe(credential);
+        let risky = risky(credential);
+        match before.iter().find(|c| c.name == credential.name) {
+            None => {
+                let change = plan
+                    .push(
+                        Op::Add,
+                        "credential",
+                        &credential.name,
+                        ChangeClass::Security,
+                    )
+                    .detail(grant);
+                if let Some(risk) = risky {
+                    change.note(risk);
+                }
+            }
+            Some(old) if old != credential => {
+                let change = plan
+                    .push(
+                        Op::Change,
+                        "credential",
+                        &credential.name,
+                        ChangeClass::Security,
+                    )
+                    .detail(format!("{} → {grant}", describe(old)));
+                if let Some(risk) = risky {
+                    change.note(risk);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for credential in &before {
+        if !after.iter().any(|c| c.name == credential.name) {
+            plan.push(
+                Op::Remove,
+                "credential",
+                &credential.name,
+                ChangeClass::Security,
+            )
+            .detail(describe(credential))
+            .note("producers using it are refused after a restart");
+        }
+    }
+}
+
+/// What a credential may do, in a line.
+fn describe(credential: &IngestCredential) -> String {
+    let operations: Vec<&str> = credential.operations().iter().map(|o| o.label()).collect();
+    let mut text = format!(
+        "{} on {}",
+        operations.join(", "),
+        credential.tables.join(", ")
+    );
+    if credential.public {
+        text.push_str(", public");
+    }
+    if credential.token.is_some() {
+        text.push_str(", no token");
+    } else {
+        let _ = write!(
+            text,
+            ", token from {}",
+            credential.token_envs().join(" or ")
+        );
+    }
+    let limits = credential.effective_limits();
+    let mut parts = Vec::new();
+    if let Some(rate) = limits.rate {
+        parts.push(format!("rate {rate}"));
+    }
+    if let Some(rows) = limits.batch_rows {
+        parts.push(format!("batch_rows {rows}"));
+    }
+    if let Some(body) = limits.body {
+        parts.push(format!("body {body}"));
+    }
+    if let Some(values) = limits.new_values {
+        parts.push(format!("new_values {values}"));
+    }
+    if !parts.is_empty() {
+        let _ = write!(text, " ({})", parts.join(", "));
+    }
+    if !credential.origins.is_empty() {
+        let _ = write!(text, ", origins {}", credential.origins.join(" "));
+    }
+    text
+}
+
+/// Why a credential deserves a second look, if it does.
+fn risky(credential: &IngestCredential) -> Option<&'static str> {
+    if !credential.public {
+        return None;
+    }
+    if credential
+        .operations()
+        .iter()
+        .any(|o| *o != IngestOperation::Append)
+    {
+        return Some("public: anyone with its token can overwrite or delete rows");
+    }
+    if credential.token.is_some() {
+        return Some("public and without a token: anyone can append rows");
+    }
+    Some("public: writable from the internet with its token")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credential(public: bool, operations: Option<Vec<IngestOperation>>) -> IngestCredential {
+        IngestCredential {
+            name: "crm".into(),
+            token_env: Some(TokenEnv::One("CRM_TOKEN".into())),
+            token: None,
+            tables: vec!["customers".into()],
+            operations,
+            public,
+            limits: Limits::default(),
+            origins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn public_credentials_that_can_change_rows_are_called_out() {
+        let deletes = Some(vec![IngestOperation::Append, IngestOperation::Delete]);
+        assert_eq!(
+            risky(&credential(true, deletes.clone())),
+            Some("public: anyone with its token can overwrite or delete rows")
+        );
+        assert_eq!(
+            risky(&credential(true, None)),
+            Some("public: writable from the internet with its token")
+        );
+        assert_eq!(risky(&credential(false, deletes)), None);
+        assert_eq!(
+            describe(&credential(true, None)),
+            "append on customers, public, token from CRM_TOKEN (rate 100/s, batch_rows 10000, body 4MiB, new_values 10000/h)"
+        );
+    }
 }

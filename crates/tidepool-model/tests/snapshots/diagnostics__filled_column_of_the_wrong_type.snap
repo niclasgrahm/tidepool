@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `received_at` is string and can't hold the time a row is received
+  --> tables/orders.yaml:14:40
+   |
+14 |   received_at: { type: string, filled: received }
+   |                                        ^^^^^^^^
+   = help: make the column timestamp or timestamptz, or remove `filled`
+
+1 error, 0 warnings

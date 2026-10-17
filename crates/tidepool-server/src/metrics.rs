@@ -22,8 +22,11 @@ use crate::AppState;
 pub struct Counters {
     /// Ingest requests by (table, op, status).
     requests: Mutex<BTreeMap<(String, &'static str, u16), u64>>,
-    /// Rows written (or deleted) by table.
-    rows: Mutex<BTreeMap<String, u64>>,
+    /// Rows written (or deleted) by (table, credential).
+    rows: Mutex<BTreeMap<(String, String), u64>>,
+    /// Ingest requests refused by a credential's limits, by (credential,
+    /// limit).
+    refused: Mutex<BTreeMap<(String, &'static str), u64>>,
     /// `POST /v1/query`.
     pub queries: Timing,
     pub query_errors: AtomicU64,
@@ -43,13 +46,22 @@ impl Counters {
             .or_default() += 1;
     }
 
-    pub fn rows(&self, table: &str, rows: u64) {
+    pub fn rows(&self, table: &str, credential: &str, rows: u64) {
         *self
             .rows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(table.to_string())
+            .entry((table.to_string(), credential.to_string()))
             .or_default() += rows;
+    }
+
+    pub fn refused(&self, credential: &str, limit: &'static str) {
+        *self
+            .refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry((credential.to_string(), limit))
+            .or_default() += 1;
     }
 
     pub fn tool(&self, tool: &str) {
@@ -172,9 +184,9 @@ pub fn render(state: &AppState) -> String {
     out.family(
         "tidepool_rows_written_total",
         "counter",
-        "Rows written (or deleted) through the ingest API, per table.",
+        "Rows written (or deleted) through the ingest API, per table and credential.",
     );
-    for (table, rows) in state
+    for ((table, credential), rows) in state
         .counters
         .rows
         .lock()
@@ -183,8 +195,26 @@ pub fn render(state: &AppState) -> String {
     {
         out.sample(
             "tidepool_rows_written_total",
-            &[("table", table)],
+            &[("table", table), ("credential", credential)],
             *rows as f64,
+        );
+    }
+    out.family(
+        "tidepool_ingest_refused_total",
+        "counter",
+        "Ingest requests refused by a credential's limits, per credential and limit.",
+    );
+    for ((credential, limit), n) in state
+        .counters
+        .refused
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+    {
+        out.sample(
+            "tidepool_ingest_refused_total",
+            &[("credential", credential), ("limit", limit)],
+            *n as f64,
         );
     }
     out.family(

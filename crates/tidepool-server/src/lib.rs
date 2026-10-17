@@ -10,6 +10,7 @@ mod endpoints;
 mod filters;
 mod handlers;
 mod idempotency;
+mod limits;
 mod live;
 mod mcp;
 pub mod metrics;
@@ -26,12 +27,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context;
 use axum::Router;
 
-pub use auth::Tokens;
-pub use endpoints::api_router;
+pub use auth::{Credential, Listener, Tokens};
+pub use endpoints::{api_router, api_router_on};
 pub use mcp::tools as mcp_tools;
 pub use ui::{Assets, DirAssets};
 
+use tidepool_config::server::Surface;
 use tidepool_model::Model;
+use tidepool_protocol::api_docs::Access;
 use tidepool_store::{Change, ModelVersion, WriterConfig, WriterHandle};
 
 /// Everything a handler can reach.
@@ -52,6 +55,8 @@ pub struct AppState {
     pub(crate) counters: metrics::Counters,
     /// Browser sessions.
     pub(crate) sessions: auth::Sessions,
+    /// What each ingest credential has used of its limits.
+    pub(crate) limiter: limits::Limiter,
     /// What time it is, for selections relative to now.
     pub(crate) clock: Clock,
 }
@@ -187,6 +192,7 @@ impl AppState {
             started: std::time::Instant::now(),
             counters: metrics::Counters::default(),
             sessions: auth::Sessions::default(),
+            limiter: limits::Limiter::default(),
             clock: Clock::default(),
             config: config::ConfigStore::detached(&ModelVersion {
                 version: snapshot.version,
@@ -233,33 +239,126 @@ impl AppState {
 
 /// The whole HTTP surface: the documented API, plus the UI behind the fallback.
 pub fn router(state: Arc<AppState>) -> Router {
-    api_router(Arc::clone(&state)).fallback(move |method, uri| {
+    router_on(state, Listener::ALL)
+}
+
+/// The HTTP surface as `listener` serves it, the UI included.
+pub fn router_on(state: Arc<AppState>, listener: Listener) -> Router {
+    api_router_on(Arc::clone(&state), listener).fallback(move |method, uri| {
         let response = ui::serve(&state, &method, &uri);
         async move { response }
     })
 }
 
-/// Bind, serve until SIGINT or SIGTERM, then drain in-flight requests.
-pub async fn serve(listen: SocketAddr, state: Arc<AppState>) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding {listen}"))?;
-    let local = listener.local_addr().context("reading the bound address")?;
-    let open = state.tokens.open_levels();
-    if !local.ip().is_loopback() && !open.is_empty() {
-        tracing::warn!(
-            "listening on {local} with no token for: {} (set TIDEPOOL_<LEVEL>_TOKEN); anyone who can reach this port can use those endpoints",
-            open.join(", ")
-        );
+/// Levels `serve` may leave open away from loopback because the operator
+/// said so (`--insecure-open`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InsecureOpen {
+    pub ingest: bool,
+    pub admin: bool,
+}
+
+/// Whether these listeners may start with these tokens (plan §9.2, fail
+/// closed): an error for ingest or admin open on an address away from
+/// loopback unless `insecure` allows it, and for tokens shared between
+/// credentials. Otherwise the warnings to log.
+///
+/// # Errors
+/// Why it may not start.
+pub fn exposure(
+    listeners: &[(SocketAddr, Vec<Surface>)],
+    tokens: &Tokens,
+    insecure: InsecureOpen,
+) -> anyhow::Result<Vec<String>> {
+    let (errors, mut warnings) = tokens.problems();
+    if let Some(error) = errors.first() {
+        anyhow::bail!("{error}");
+    }
+    for (address, surfaces) in listeners {
+        if address.ip().is_loopback() {
+            continue;
+        }
+        let listener = Listener::of(surfaces);
+        let ingest = !listener.public_only() && tokens.open(Access::Ingest);
+        if ingest && !insecure.ingest {
+            anyhow::bail!(
+                "refusing to listen on {address} with ingest open: anyone who can reach it could                  write, replace and delete rows. Set TIDEPOOL_INGEST_TOKEN (or name credentials                  under `auth.ingest`), listen on loopback, or start with --insecure-open ingest"
+            );
+        }
+        if listener.admin && tokens.open(Access::Admin) && !insecure.admin {
+            anyhow::bail!(
+                "refusing to listen on {address} with admin open: anyone who can reach it could                  change the config. Set TIDEPOOL_ADMIN_TOKEN, give `listen.admin` a loopback                  address, or start with --insecure-open admin"
+            );
+        }
+        let open: Vec<&str> = [
+            (Access::Read, true),
+            (Access::Ingest, ingest),
+            (Access::Admin, listener.admin),
+        ]
+        .into_iter()
+        .filter(|(access, served)| *served && tokens.open(*access))
+        .map(|(access, _)| access.label())
+        .collect();
+        if !open.is_empty() {
+            warnings.push(format!(
+                "listening on {address} with no token for: {}; anyone who can reach it can use those endpoints",
+                open.join(", ")
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+/// Bind every listener, serve until SIGINT or SIGTERM, then drain
+/// in-flight requests. Refuses to start what [`exposure`] refuses.
+///
+/// # Errors
+/// An address can't be bound, or the exposure isn't allowed.
+pub async fn serve(
+    listeners: Vec<(SocketAddr, Vec<Surface>)>,
+    insecure: InsecureOpen,
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    for warning in exposure(&listeners, &state.tokens, insecure)? {
+        tracing::warn!("{warning}");
+    }
+    let mut bound = Vec::new();
+    for (address, surfaces) in listeners {
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .with_context(|| format!("binding {address}"))?;
+        let local = listener.local_addr().context("reading the bound address")?;
+        bound.push((listener, local, surfaces));
     }
     config::watch(&state);
     state.set_ready();
-    tracing::info!("tidepool listening on http://{local}");
-
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serving HTTP")
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut servers = tokio::task::JoinSet::new();
+    for (listener, local, surfaces) in bound {
+        let names: Vec<&str> = surfaces.iter().map(|s| s.label()).collect();
+        tracing::info!(
+            "tidepool listening on http://{local} ({})",
+            names.join(", ")
+        );
+        let app = router_on(Arc::clone(&state), Listener::of(&surfaces));
+        let mut stopped = stopped.clone();
+        servers.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.wait_for(|stop| *stop).await;
+                })
+                .await
+        });
+    }
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop.send(true);
+    });
+    while let Some(done) = servers.join_next().await {
+        done.context("a listener stopped")?
+            .context("serving HTTP")?;
+    }
+    Ok(())
 }
 
 /// Resolves on the first SIGINT (Ctrl-C) or SIGTERM (what an orchestrator

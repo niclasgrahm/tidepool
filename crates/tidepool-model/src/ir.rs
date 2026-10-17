@@ -151,6 +151,9 @@ pub struct Column {
     pub encoding: Encoding,
     /// Set when relationships make this column share a dictionary.
     pub key_domain: Option<DomainId>,
+    /// Filled in by the server on every write (plan §9.2), never sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled: Option<tidepool_config::table::Filled>,
 }
 
 /// The semantic view of one table: its fields. At most one per table.

@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tidepool.yaml\", \"durability: fsync\\n\",\n\"durability: fsync\\nauth:\\n  admin_token_env: OPS_TOKEN\\n\")])"
+---
+1 change (0 safe, 0 rebuild, 0 destructive, 1 security)
+
+  ~ setting      auth.admin_token_env  TIDEPOOL_ADMIN_TOKEN → OPS_TOKEN  security  (takes effect on restart)

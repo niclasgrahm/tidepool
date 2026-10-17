@@ -9,6 +9,7 @@
 mod dashboards;
 mod metrics;
 mod semantic;
+mod server;
 mod tables;
 
 use tidepool_config::diag::{Diagnostic, Diagnostics};
@@ -42,6 +43,7 @@ pub fn compile(set: &ConfigSet, previous: &Catalog) -> (Option<Compiled>, Diagno
         .map(|s| s.value.clone())
         .unwrap_or_default();
     let tables = tables::compile(&mut cx);
+    server::check(&mut cx, &tables);
     let semantic = semantic::compile(&mut cx, &tables);
     let metrics = metrics::compile(&mut cx, &tables, &semantic);
     let dashboards = dashboards::compile(&mut cx, &tables, &semantic, &metrics);

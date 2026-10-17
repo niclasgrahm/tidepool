@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `listen` gives no address to listen on
+ --> tidepool.yaml:1:9
+  |
+1 | listen: {}
+  |         ^
+  = help: give `public` or `admin` an address; a surface left out is served by `admin`'s, or by `public`'s
+
+1 error, 0 warnings

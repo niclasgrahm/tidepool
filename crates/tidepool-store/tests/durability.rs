@@ -10,9 +10,9 @@
 //! nothing acknowledged lost, nothing unacknowledged invented.
 //!
 //! Some writes carry an idempotency key: after every recovery the store must
-//! hold exactly the keys of the acknowledged ones, each with the response it
-//! was acknowledged with, whether it came back from the log or from a
-//! checkpoint.
+//! hold exactly the keys of the acknowledged ones, each with the credential
+//! it was sent with and the response it was acknowledged with, whether it
+//! came back from the log or from a checkpoint.
 //!
 //! Model changes are part of the stream (M7): every so often the model
 //! moves to a version that drops or adds back a relationship over populated
@@ -35,7 +35,7 @@ use tidepool_config::server::Durability;
 use tidepool_model::compile;
 use tidepool_model::ir::Model;
 use tidepool_store::batch::{Shape, json_array};
-use tidepool_store::keys::Keyed;
+use tidepool_store::keys::{Keyed, Scoped};
 use tidepool_store::migrate::build;
 use tidepool_store::persist::Durable;
 use tidepool_store::{Applied, Batch, ModelVersion, Op, Rebuilt, Snapshot, Store};
@@ -97,12 +97,18 @@ enum Event {
     Model(ModelVersion),
 }
 
-/// A keyed write as the store should remember it: table, key, what it did,
-/// the epoch it was acknowledged with.
-type Receipt = (u32, String, Applied, u64);
+/// A keyed write as the store should remember it: credential, table, key,
+/// what it did, the epoch it was acknowledged with.
+type Receipt = (String, u32, String, Applied, u64);
 
 fn receipt(keyed: &Keyed) -> Receipt {
-    (keyed.table.0, keyed.key.clone(), keyed.applied, keyed.epoch)
+    (
+        keyed.credential.clone(),
+        keyed.table.0,
+        keyed.key.clone(),
+        keyed.applied,
+        keyed.epoch,
+    )
 }
 
 /// The receipts of the acknowledged keyed writes, oldest first.
@@ -320,10 +326,14 @@ fn nothing_acknowledged_is_lost_across_random_crashes() {
                 let write = random_write(&mut rng, &mut serial);
                 let model = Arc::clone(durable.store().model());
                 let (table, batch) = decode(&model, &write);
-                let key = rng.chance(30).then(|| format!("key-{seed}-{serial}"));
-                let applied = durable.apply(table, write.1, &batch, key.as_deref());
+                // two producers, sometimes with the same key
+                let key = rng.chance(30).then(|| Scoped {
+                    credential: if rng.chance(50) { "kayak" } else { "sensors" }.to_string(),
+                    key: format!("key-{seed}-{}", serial / 2),
+                });
+                let applied = durable.apply(table, write.1, &batch, key.as_ref());
                 let epoch = durable.store().visible_epoch();
-                let key = key.map(|key| (table.0, key, applied, epoch));
+                let key = key.map(|key| (key.credential, table.0, key.key, applied, epoch));
                 pending.push(Event::Write(write, key));
                 if rng.chance(30) {
                     if let Err(err) = durable.commit() {

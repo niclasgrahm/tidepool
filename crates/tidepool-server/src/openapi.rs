@@ -22,9 +22,31 @@ const COMPONENTS: &str = "#/components/schemas/";
 const DEFS: &str = "#/$defs/";
 const ROWS_PATH: &str = "/v1/tables/{table}/rows";
 
-/// The whole document, as served at `GET /v1/openapi.json`.
+/// What one listener's document shows (plan §9.2): which endpoints it
+/// serves, and which tables each rows endpoint writes there.
+pub struct Shown<'a> {
+    pub endpoint: &'a dyn Fn(&ApiDoc) -> bool,
+    pub rows: &'a dyn Fn(&Table, Operation) -> bool,
+}
+
+/// The whole document, as served at `GET /v1/openapi.json` on a listener
+/// that serves everything.
 #[must_use]
 pub fn document(model: &Model) -> Value {
+    document_shown(
+        model,
+        &Shown {
+            endpoint: &|_| true,
+            rows: &|_, _| true,
+        },
+    )
+}
+
+/// The document as one listener serves it: its endpoints, and only the
+/// tables writable there. On the public listener that is the page to hand
+/// whoever runs a public producer.
+#[must_use]
+pub fn document_shown(model: &Model, shown: &Shown) -> Value {
     let mut components = components();
     for table in &model.tables {
         components.insert(row_schema_name(table), row_schema(table, false));
@@ -43,7 +65,7 @@ pub fn document(model: &Model) -> Value {
                  update continuously.",
         },
         "tags": tags(),
-        "paths": paths(model),
+        "paths": paths(model, shown),
         "components": {
             "schemas": components,
             "securitySchemes": {
@@ -68,7 +90,7 @@ fn tags() -> Value {
     )
 }
 
-fn paths(model: &Model) -> Value {
+fn paths(model: &Model, shown: &Shown) -> Value {
     let mut paths = Map::new();
     let mut insert = |path: String, method: &str, operation: Value| {
         let item = paths
@@ -79,6 +101,9 @@ fn paths(model: &Model) -> Value {
         }
     };
     for endpoint in endpoints() {
+        if !(shown.endpoint)(&endpoint) {
+            continue;
+        }
         let per_table = endpoint.path == ROWS_PATH && !model.tables.is_empty();
         if !per_table {
             insert(
@@ -93,7 +118,8 @@ fn paths(model: &Model) -> Value {
                 endpoint.operation,
                 Operation::DeleteRows | Operation::ReplaceRows
             );
-            if keyed && table.mode != TableMode::Upsert {
+            if keyed && table.mode != TableMode::Upsert || !(shown.rows)(table, endpoint.operation)
+            {
                 continue;
             }
             insert(
@@ -256,12 +282,13 @@ fn key_schema_name(table: &Table) -> String {
 }
 
 /// The JSON shape of one row of `table` (or of its key, for deletes), as the
-/// ingest decoders accept it.
+/// ingest decoders accept it: without the columns the server fills.
 fn row_schema(table: &Table, key_only: bool) -> Value {
     let columns: Vec<&tidepool_model::ir::Column> = table
         .columns
         .iter()
         .filter(|c| !key_only || table.primary_key.contains(&c.id))
+        .filter(|c| c.filled.is_none())
         .collect();
     let properties: Map<String, Value> = columns
         .iter()

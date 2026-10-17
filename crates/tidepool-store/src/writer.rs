@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tidepool_config::server::Durability;
 
 use crate::batch::Batch;
-use crate::keys::Keyed;
+use crate::keys::{Keyed, Scoped};
 use crate::migrate::{Migration, ModelVersion, Rebuilt, build};
 use crate::persist::{Checkpoints, Durable};
 use crate::store::{Applied, Op, Snapshot, Store};
@@ -45,7 +45,9 @@ enum Command {
         op: Op,
         batch: Batch,
         /// Its idempotency key, logged with what it did.
-        key: Option<String>,
+        key: Option<Scoped>,
+        /// Values new to the dictionaries it may add, at most.
+        max_new_values: Option<u64>,
         reply: oneshot::Sender<Receipt>,
     },
     Publish {
@@ -78,10 +80,15 @@ pub struct Rebuild {
 }
 
 /// What applying a batch did, and the epoch from which it is visible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receipt {
     pub applied: Applied,
     pub epoch: u64,
+    /// Values it added to dictionaries, when it was given a limit.
+    pub new_values: u64,
+    /// Over its limit of new values: nothing was applied. The column with
+    /// the most, and how many.
+    pub refused: Option<(String, u64)>,
 }
 
 /// The queue is full; try again shortly.
@@ -200,14 +207,40 @@ impl Backend {
     }
 
     /// Apply a batch: what it did, and the epoch it's visible from.
-    fn apply(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<&str>) -> Receipt {
+    fn apply(
+        &mut self,
+        table: TableId,
+        op: Op,
+        batch: &Batch,
+        key: Option<&Scoped>,
+        max_new_values: Option<u64>,
+    ) -> Receipt {
+        let mut new_values = 0;
+        if let Some(max) = max_new_values {
+            let counts = self.store().new_values(table, op, batch);
+            new_values = counts.iter().map(|(_, n)| n).sum();
+            if new_values > max {
+                let refused = counts.into_iter().max_by_key(|(_, n)| *n);
+                return Receipt {
+                    applied: Applied::default(),
+                    epoch: self.store().visible_epoch(),
+                    new_values: 0,
+                    refused,
+                };
+            }
+        }
         let applied = match self {
             Self::Memory(store) => store.apply(table, op, batch),
             Self::Disk(durable) => durable.apply(table, op, batch, key),
         };
         // the next epoch published holds it, unless it changed nothing
         let epoch = self.store().visible_epoch();
-        Receipt { applied, epoch }
+        Receipt {
+            applied,
+            epoch,
+            new_values,
+            refused: None,
+        }
     }
 
     /// Idempotency keys to keep in a checkpoint (none in memory).
@@ -463,9 +496,11 @@ fn run(
                             op,
                             batch,
                             key,
+                            max_new_values,
                             reply,
                         } => {
-                            let receipt = backend.apply(table, op, &batch, key.as_deref());
+                            let receipt =
+                                backend.apply(table, op, &batch, key.as_ref(), max_new_values);
                             acks.push((reply, receipt));
                         }
                         Command::ChangeModel { target, reply } => {
@@ -580,7 +615,9 @@ impl WriterHandle {
     /// Queue a batch. Resolves once it is applied (not yet visible: see
     /// [`Receipt::epoch`] and [`WriterHandle::visible`]). With a data
     /// directory, an idempotency `key` is logged with the receipt, so it
-    /// survives a restart ([`WriterHandle::take_recovered_keys`]).
+    /// survives a restart ([`WriterHandle::take_recovered_keys`]). With
+    /// `max_new_values`, a batch that would add more values than that to
+    /// the dictionaries is refused whole ([`Receipt::refused`]).
     ///
     /// # Errors
     /// [`Busy`] when the queue is full.
@@ -589,7 +626,8 @@ impl WriterHandle {
         table: TableId,
         op: Op,
         batch: Batch,
-        key: Option<String>,
+        key: Option<Scoped>,
+        max_new_values: Option<u64>,
     ) -> Result<oneshot::Receiver<Receipt>, Busy> {
         let (reply, receipt) = oneshot::channel();
         match self.queue.try_send(Command::Apply {
@@ -597,6 +635,7 @@ impl WriterHandle {
             op,
             batch,
             key,
+            max_new_values,
             reply,
         }) {
             Ok(()) => Ok(receipt),

@@ -20,7 +20,8 @@ use tidepool_config::types::ColumnType;
 use tidepool_model::ir::Table;
 
 use crate::batch::{
-    Batch, Rejected, RowError, Shape, new_batch, push_error, rejected_body, wanted_columns,
+    Batch, Rejected, RowError, Shape, filled_message, new_batch, push_error, rejected_body,
+    wanted_columns,
 };
 use crate::value::{Parsed, parse_decimal};
 
@@ -78,6 +79,20 @@ fn decode_record(
     }
     for (slot, (_, column)) in columns.iter().enumerate() {
         let rows = record.num_rows();
+        if column.filled.is_some() {
+            if record.column_by_name(&column.name).is_some() {
+                push_error(
+                    rejected,
+                    RowError {
+                        row: None,
+                        column: Some(column.name.clone()),
+                        message: filled_message(column),
+                    },
+                );
+            }
+            batch.columns[slot].extend(std::iter::repeat_n(None, rows));
+            continue;
+        }
         let Some(array) = record.column_by_name(&column.name) else {
             if !(column.nullable && shape == Shape::Rows) {
                 push_error(
@@ -350,6 +365,7 @@ mod tests {
             nullable,
             encoding: Encoding::Dict,
             key_domain: None,
+            filled: None,
         };
         Table {
             id: TableId(1),
@@ -438,6 +454,58 @@ mod tests {
         assert_eq!(
             batch.columns[3],
             [Some(Parsed::I64(5)), Some(Parsed::I64(6))]
+        );
+    }
+
+    #[test]
+    fn a_filled_column_in_the_stream_is_refused() {
+        let mut table = table();
+        if let Some(at) = table.columns.iter_mut().find(|c| c.name == "at") {
+            at.filled = Some(tidepool_config::table::Filled::Received);
+        }
+        let ids = || {
+            (
+                Field::new("id", DataType::Utf8, false),
+                Arc::new(StringArray::from(vec!["a"])) as Arc<dyn Array>,
+            )
+        };
+        let amount = || {
+            let amount = match Decimal128Array::from(vec![100_i128]).with_precision_and_scale(10, 2)
+            {
+                Ok(a) => a,
+                Err(e) => panic!("{e}"),
+            };
+            (
+                Field::new("amount", DataType::Decimal128(10, 2), false),
+                Arc::new(amount) as Arc<dyn Array>,
+            )
+        };
+        // without it: decoded, the column left for the server
+        let batch = match decode(&table, Shape::Rows, &stream(&record(vec![ids(), amount()]))) {
+            Ok(batch) => batch,
+            Err(rejected) => panic!("{rejected:?}"),
+        };
+        assert_eq!(batch.columns[3], [None]);
+        // with it: refused
+        let at = (
+            Field::new(
+                "at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+            Arc::new(TimestampMicrosecondArray::from(vec![5]).with_timezone("UTC"))
+                as Arc<dyn Array>,
+        );
+        let Err(rejected) = decode(
+            &table,
+            Shape::Rows,
+            &stream(&record(vec![ids(), amount(), at])),
+        ) else {
+            panic!("a filled column must not be accepted from the producer");
+        };
+        assert_eq!(
+            rejected.summary(),
+            "`at` is filled by the server; leave it out"
         );
     }
 

@@ -59,6 +59,21 @@ pub struct ColumnSpec {
     /// again once the rename is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renamed_from: Option<String>,
+    /// Filled in by the server on every write, never sent: `credential`
+    /// (a string column: the name of the credential that wrote the row) or
+    /// `received` (a timestamp column: when the server received it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled: Option<Filled>,
+}
+
+/// What the server fills a column with (plan §9.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Filled {
+    /// The name of the ingest credential the row was written with.
+    Credential,
+    /// When the server received the row.
+    Received,
 }
 
 impl ColumnSpec {

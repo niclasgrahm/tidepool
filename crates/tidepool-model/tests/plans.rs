@@ -320,3 +320,66 @@ scenario!(
         "  - field: products.category\n    measure: order_count\n"
     )]
 );
+
+// --- who can reach what (plan §9.2): class security --------------------------
+
+const KAYAK: &str = "auth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n";
+
+scenario!(
+    move_from_one_ingest_token_to_credentials,
+    [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "durability: fsync\nauth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n    - name: sensors\n      token_env: SENSOR_TOKEN\n      tables: [orders]\n      operations: [append]\n"
+    )]
+);
+scenario!(
+    make_a_table_writable_from_the_internet,
+    base: [Replace("tidepool.yaml", "durability: fsync\n", KAYAK)],
+    [Replace(
+        "tidepool.yaml",
+        "      token_env: KAYAK_TOKEN\n",
+        "      token_env: KAYAK_TOKEN\n    - name: web\n      token: none\n      public: true\n      tables: [orders]\n      limits: { rate: 20/s }\n      origins: [\"https://shop.example.com\"]\n"
+    )]
+);
+scenario!(
+    remove_a_credential,
+    base: [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "auth:\n  ingest:\n    - name: kayak\n      token_env: KAYAK_TOKEN\n    - name: old\n      token_env: OLD_TOKEN\n"
+    )],
+    [Replace("tidepool.yaml", "    - name: old\n      token_env: OLD_TOKEN\n", "")]
+);
+scenario!(
+    let_agents_apply_destructive_changes,
+    [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "durability: fsync\nagents:\n  auto_apply: [safe, rebuild, destructive]\n"
+    )]
+);
+scenario!(
+    change_the_admin_token_variable,
+    [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "durability: fsync\nauth:\n  admin_token_env: OPS_TOKEN\n"
+    )]
+);
+scenario!(
+    fill_a_column_with_the_credential,
+    [Replace(
+        "tables/orders.yaml",
+        "  note:        { type: string, nullable: true, encoding: plain }\n",
+        "  note:        { type: string, nullable: true, encoding: plain }\n  written_by:  { type: string, nullable: true, filled: credential }\n"
+    )]
+);
+scenario!(
+    start_filling_a_column,
+    [Replace(
+        "tables/orders.yaml",
+        "  note:        { type: string, nullable: true, encoding: plain }\n",
+        "  note:        { type: string, nullable: true, encoding: plain, filled: credential }\n"
+    )]
+);

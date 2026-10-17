@@ -228,6 +228,40 @@ fn a_new_nullable_column_reads_null_and_shares_the_old_columns() {
 }
 
 #[test]
+fn a_column_the_server_starts_filling_keeps_its_rows() {
+    let v1 = version(None, files(&[]));
+    let mut store = filled(&v1);
+    let before = publish(&mut store);
+    let v2 = version(
+        Some(&v1),
+        files(&[(
+            "tables/orders.yaml",
+            "  note:        { type: string, nullable: true, encoding: plain }",
+            "  note:        { type: string, nullable: true, encoding: plain, filled: credential }",
+        )]),
+    );
+    let migration = store.plan_migration(v2.clone());
+    assert_eq!(migration.rows(), 0, "filling a column rewrites nothing");
+    store.migrate(migration, Rebuilt::default());
+    let after = publish(&mut store);
+    assert_eq!(after.version, 2);
+    assert_eq!(rows(&after, "orders"), rows(&before, "orders"));
+    let id = table(&v1.model, "orders");
+    let (Some(old), Some(new)) = (before.table(id), after.table(id)) else {
+        panic!("orders in both snapshots");
+    };
+    // every column is the same memory: only the model changed
+    for (a, b) in old.segments[0]
+        .data
+        .columns
+        .iter()
+        .zip(&new.segments[0].data.columns)
+    {
+        assert!(Arc::ptr_eq(a, b));
+    }
+}
+
+#[test]
 fn a_removed_column_and_table_are_gone() {
     let v1 = version(None, files(&[]));
     let mut store = filled(&v1);
@@ -571,7 +605,7 @@ fn the_writer_rebuilds_in_the_background_and_takes_the_new_epoch_interval() {
         let model = writer.snapshot().model.clone();
         let batch = decode(&model, name, Op::Write, json);
         let receipt = writer
-            .apply(table(&model, name), Op::Write, batch, None)
+            .apply(table(&model, name), Op::Write, batch, None, None)
             .unwrap_or_else(|_| panic!("busy"));
         runtime
             .block_on(receipt)

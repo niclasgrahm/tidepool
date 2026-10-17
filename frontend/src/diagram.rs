@@ -527,6 +527,7 @@ mod tests {
                     column_type: "string".into(),
                     nullable: false,
                     encoding: "dict".into(),
+                    filled: None,
                 })
                 .collect(),
             event_time: None,

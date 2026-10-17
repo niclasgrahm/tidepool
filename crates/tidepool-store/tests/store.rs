@@ -584,7 +584,7 @@ fn the_writer_recovers_its_data_directory() {
         let batch =
             json_array(spec, Shape::Rows, body.as_bytes()).unwrap_or_else(|r| panic!("{r:?}"));
         let receipt = writer
-            .apply(orders, Op::Write, batch, None)
+            .apply(orders, Op::Write, batch, None, None)
             .unwrap_or_else(|_| panic!("busy"));
         // acknowledged means logged
         let receipt = runtime
@@ -605,4 +605,57 @@ fn the_writer_recovers_its_data_directory() {
         writer.snapshot().table(orders).map(|t| t.live_rows),
         Some(2)
     );
+}
+
+#[test]
+fn the_writer_refuses_a_batch_with_too_many_new_values() {
+    use tidepool_store::{WriterConfig, spawn};
+    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+        Ok(runtime) => runtime,
+        Err(err) => panic!("{err}"),
+    };
+    let model = model();
+    let orders = table(&model, "orders");
+    let spec = model
+        .table_named("orders")
+        .unwrap_or_else(|| panic!("no orders"));
+    let (writer, _thread) = match spawn(
+        tidepool_store::ModelVersion::initial(Arc::clone(&model)),
+        WriterConfig::default(),
+    ) {
+        Ok(started) => started,
+        Err(err) => panic!("{err}"),
+    };
+    let write = |rows: &str, max: Option<u64>| {
+        let batch =
+            json_array(spec, Shape::Rows, rows.as_bytes()).unwrap_or_else(|r| panic!("{r:?}"));
+        let receipt = writer
+            .apply(orders, Op::Write, batch, None, max)
+            .unwrap_or_else(|_| panic!("busy"));
+        runtime
+            .block_on(receipt)
+            .unwrap_or_else(|_| panic!("stopped"))
+    };
+    let at = "2026-09-01T00:00:00Z";
+    // the first order adds its customer, product and status (the id, time
+    // and numbers are plain, with no dictionary)
+    let first = write(&format!("[{}]", order_at(1, at)), Some(10));
+    assert_eq!((first.applied.written, first.new_values), (1, 3));
+    // the same values again add nothing, so a limit of 0 lets them through
+    let again = write(&format!("[{}]", order_at(2, at)), Some(0));
+    assert_eq!(
+        (again.applied.written, again.new_values, again.refused),
+        (1, 0, None)
+    );
+    // two new customers over a limit of 1: refused whole
+    let rows = format!(
+        "[{},{}]",
+        order_at(3, at).replace("\"c1\"", "\"c2\""),
+        order_at(4, at).replace("\"c1\"", "\"c3\"")
+    );
+    let refused = write(&rows, Some(1));
+    assert_eq!(refused.refused, Some(("customer_id".to_string(), 2)));
+    assert_eq!(refused.applied.written, 0);
+    // and without a limit they go in
+    assert_eq!(write(&rows, None).applied.written, 2);
 }

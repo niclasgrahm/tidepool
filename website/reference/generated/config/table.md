@@ -20,6 +20,7 @@ One column.
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `encoding` | [`Encoding`](#table-encoding) |  | Overrides the default encoding for the column's type. |
+| `filled` | [`Filled`](#table-filled) |  | Filled in by the server on every write, never sent: `credential` (a string column: the name of the credential that wrote the row) or `received` (a timestamp column: when the server received it). |
 | `nullable` | boolean |  | Whether the column may hold NULL. Columns are required by default. |
 | `renamed_from` | string |  | The column's previous name, to make a rename keep its data. Removed again once the rename is applied. |
 | `type` | [`ColumnType`](#table-columntype) | **required** |  |
@@ -50,6 +51,16 @@ How a column is stored.
 | --- | --- |
 | `dict` | Dictionary-encoded: every distinct value gets a small integer code. Cheap to filter and group by. The default for string, bool and date. |
 | `plain` | Stored as values. The default for numbers and timestamps, and the right choice for high-cardinality ids nobody filters by. |
+
+
+## `Filled` {#table-filled}
+
+What the server fills a column with (plan §9.2).
+
+| value | description |
+| --- | --- |
+| `credential` | The name of the ingest credential the row was written with. |
+| `received` | When the server received the row. |
 
 
 ## `ColumnType` {#table-columntype}

@@ -24,7 +24,7 @@ pub const NULL: u32 = 0;
 
 /// A dictionary key: strings as themselves, everything else as an integer
 /// (bools as 0/1, the i64 kinds widened, floats by their bit pattern).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key<'a> {
     Int(i128),
     Str(&'a str),

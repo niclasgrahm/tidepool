@@ -72,11 +72,11 @@ async fn every_documented_endpoint_is_routed_at_its_documented_method() {
 
 #[tokio::test]
 async fn every_protected_endpoint_wants_its_token() {
-    let tokens = Tokens {
-        ingest: Some("ingest-secret".into()),
-        read: Some("read-secret".into()),
-        admin: Some("admin-secret".into()),
-    };
+    let tokens = Tokens::levels(
+        Some("ingest-secret"),
+        Some("read-secret"),
+        Some("admin-secret"),
+    );
     let server = state(common::retail(), tokens.clone(), None);
     for endpoint in endpoints() {
         let Some(token) = tokens.required(endpoint.access) else {
@@ -452,7 +452,7 @@ async fn metrics_count_what_happened_in_the_prometheus_format() {
     let text = reply.text();
     for wanted in [
         "tidepool_table_rows{table=\"customers\"} 1",
-        "tidepool_rows_written_total{table=\"customers\"} 1",
+        "tidepool_rows_written_total{table=\"customers\",credential=\"ingest\"} 1",
         "tidepool_ingest_requests_total{table=\"customers\",op=\"write\",status=\"200\"} 1",
         "# TYPE tidepool_epoch_publish_seconds summary",
     ] {
@@ -472,11 +472,11 @@ async fn metrics_count_what_happened_in_the_prometheus_format() {
 }
 
 fn three_tokens() -> Tokens {
-    Tokens {
-        ingest: Some("ingest-secret".into()),
-        read: Some("read-secret".into()),
-        admin: Some("admin-secret".into()),
-    }
+    Tokens::levels(
+        Some("ingest-secret"),
+        Some("read-secret"),
+        Some("admin-secret"),
+    )
 }
 
 #[tokio::test]

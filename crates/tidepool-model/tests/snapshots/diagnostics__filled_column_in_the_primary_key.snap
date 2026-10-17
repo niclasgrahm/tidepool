@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: `customer_id` is part of the primary key, so producers must send it; the server can't fill it
+ --> tables/customers.yaml:5:40
+  |
+5 |   customer_id: { type: string, filled: credential }
+  |                                        ^^^^^^^^^^
+
+1 error, 0 warnings

@@ -5,6 +5,9 @@
 //! are checked, never coerced. A row with an unknown column, a missing
 //! required column or a value of the wrong type rejects the whole batch, with
 //! every problem (up to [`MAX_ERRORS`]) listed by row and column.
+//!
+//! Columns the server fills (`filled`, plan §9.2) must not be sent: a
+//! decoder leaves them NULL and [`fill`] gives them their values.
 
 use std::collections::HashMap;
 
@@ -162,6 +165,13 @@ fn decode_rows<'a>(
             }
         }
         for (slot, (_, column)) in columns.iter().enumerate() {
+            if column.filled.is_some() {
+                if fields.contains_key(column.name.as_str()) {
+                    rejected.push(error(Some(&column.name), filled_message(column)));
+                }
+                batch.columns[slot].push(None);
+                continue;
+            }
             let value = match fields.get(column.name.as_str()).map(|raw| raw.get().trim()) {
                 None | Some("null") if column.nullable && shape == Shape::Rows => None,
                 None | Some("null") => {
@@ -185,6 +195,34 @@ fn decode_rows<'a>(
         Ok(batch)
     } else {
         Err(rejected)
+    }
+}
+
+/// Why a filled column can't be sent.
+pub(crate) fn filled_message(column: &tidepool_model::ir::Column) -> String {
+    format!("`{}` is filled by the server; leave it out", column.name)
+}
+
+/// Give the columns the server fills their values: the credential's name,
+/// or the time the batch was received (microseconds since the Unix epoch).
+/// Decoders leave them NULL.
+pub fn fill(table: &Table, batch: &mut Batch, credential: &str, received_micros: i64) {
+    for (slot, values) in batch.columns.iter_mut().enumerate() {
+        let id = match batch.shape.get(slot) {
+            Some((id, _)) => *id,
+            None => match table.columns.get(slot) {
+                Some(column) => column.id,
+                None => continue,
+            },
+        };
+        let value = match table.column(id).and_then(|c| c.filled) {
+            Some(tidepool_config::table::Filled::Credential) => Parsed::Str(credential.to_string()),
+            Some(tidepool_config::table::Filled::Received) => Parsed::I64(received_micros),
+            None => continue,
+        };
+        for slot in values.iter_mut() {
+            *slot = Some(value.clone());
+        }
     }
 }
 
@@ -233,6 +271,7 @@ mod tests {
             nullable,
             encoding: Encoding::Dict,
             key_domain: None,
+            filled: None,
         };
         Table {
             id: TableId(1),
@@ -255,6 +294,70 @@ mod tests {
                 column(4, "note", ColumnType::String, true),
             ],
         }
+    }
+
+    /// `orders` with a column filled with the credential, and one with the
+    /// time received.
+    fn stamped() -> Table {
+        let mut table = orders();
+        for (id, name, column_type, filled) in [
+            (
+                5,
+                "written_by",
+                ColumnType::String,
+                tidepool_config::table::Filled::Credential,
+            ),
+            (
+                6,
+                "received_at",
+                ColumnType::TimestampTz,
+                tidepool_config::table::Filled::Received,
+            ),
+        ] {
+            table.columns.push(Column {
+                id: ColumnId(id),
+                name: name.to_string(),
+                column_type,
+                nullable: false,
+                encoding: Encoding::Plain,
+                key_domain: None,
+                filled: Some(filled),
+            });
+        }
+        table
+    }
+
+    #[test]
+    fn filled_columns_are_left_out_and_filled_by_the_server() {
+        let table = stamped();
+        let body = br#"[{"id": "a", "amount": "1.50"}, {"id": "b", "amount": "2"}]"#;
+        let mut batch = json_array(&table, Shape::Rows, body).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(batch.columns[3], vec![None, None]);
+        fill(&table, &mut batch, "sensors", 1_700_000_000_000_000);
+        assert_eq!(
+            batch.columns[3],
+            vec![Some(Parsed::Str("sensors".into())); 2]
+        );
+        assert_eq!(
+            batch.columns[4],
+            vec![Some(Parsed::I64(1_700_000_000_000_000)); 2]
+        );
+        // deleting by key never touches them
+        let keys = json_array(&table, Shape::Keys, br#"[{"id": "a"}]"#)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(keys.columns.len(), 1);
+    }
+
+    #[test]
+    fn a_filled_column_sent_is_refused() {
+        let body = br#"[{"id": "a", "amount": "1", "written_by": "admin"}]"#;
+        let Err(rejected) = json_array(&stamped(), Shape::Rows, body) else {
+            panic!("a filled column must not be accepted from the producer");
+        };
+        assert_eq!(
+            rejected.summary(),
+            "`written_by` is filled by the server; leave it out"
+        );
     }
 
     #[test]

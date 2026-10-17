@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tidepool_server::{AppState, Assets, DirAssets, Project, Tokens, serve, ui};
+use tidepool_server::{AppState, Assets, DirAssets, InsecureOpen, Project, Tokens, serve, ui};
 use tidepool_store::WriterConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -27,6 +27,13 @@ struct Cli {
     command: Command,
 }
 
+/// A level `--insecure-open` may leave open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum OpenLevel {
+    Ingest,
+    Admin,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run the server.
@@ -35,10 +42,16 @@ enum Command {
         /// server runs with no tables.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Address to listen on; overrides `listen` in tidepool.yaml. Loopback
-        /// by default, so exposing the port is a decision made explicitly.
+        /// Address to listen on, for everything; overrides `listen` in
+        /// tidepool.yaml. Loopback by default, so exposing the port is a
+        /// decision made explicitly.
         #[arg(long)]
         listen: Option<SocketAddr>,
+        /// Start although these levels have no token on an address away from
+        /// loopback: `ingest`, `admin` or both (comma-separated). Without it
+        /// such a server refuses to start. For demos in containers.
+        #[arg(long, value_delimiter = ',', env = "TIDEPOOL_INSECURE_OPEN")]
+        insecure_open: Vec<OpenLevel>,
         /// Serve the UI from this directory instead of the one compiled into
         /// the binary. For development, against a frontend being rebuilt.
         #[arg(long)]
@@ -115,7 +128,18 @@ fn main() -> ExitCode {
             ui_dir,
             data,
             allow_destructive,
-        } => match run_server(config.as_deref(), listen, ui_dir, data, allow_destructive) {
+            insecure_open,
+        } => match run_server(
+            config.as_deref(),
+            listen,
+            ui_dir,
+            data,
+            allow_destructive,
+            InsecureOpen {
+                ingest: insecure_open.contains(&OpenLevel::Ingest),
+                admin: insecure_open.contains(&OpenLevel::Admin),
+            },
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err:#}");
@@ -132,6 +156,7 @@ async fn run_server(
     ui_dir: Option<PathBuf>,
     data: Option<PathBuf>,
     allow_destructive: bool,
+    insecure: InsecureOpen,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -162,9 +187,12 @@ async fn run_server(
         },
     };
     let model = Arc::new(compiled.model);
-    let listen = listen
-        .or(model.server.listen)
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7070)));
+    let listeners = match listen {
+        Some(address) => tidepool_config::server::Listen::One(address),
+        None => model.server.listen_or_default(),
+    }
+    .listeners()
+    .ok_or_else(|| anyhow::anyhow!("`listen` gives no address to listen on"))?;
     // a relative data_dir is relative to the config directory
     let data = data.or_else(|| {
         let dir = PathBuf::from(model.server.data_dir.as_ref()?);
@@ -199,5 +227,5 @@ async fn run_server(
     };
     let tokens = Tokens::from_settings(&model.server.auth);
     let state = AppState::open(project, writer, ui, tokens, allow_destructive).await?;
-    serve(listen, Arc::new(state)).await
+    serve(listeners, insecure, Arc::new(state)).await
 }

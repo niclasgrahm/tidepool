@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_between(& [Replace(\"tidepool.yaml\", \"durability: fsync\\n\", KAYAK)], &\n[Replace(\"tidepool.yaml\", \"      token_env: KAYAK_TOKEN\\n\",\n\"      token_env: KAYAK_TOKEN\\n    - name: web\\n      token: none\\n      public: true\\n      tables: [orders]\\n      limits: { rate: 20/s }\\n      origins: [\\\"https://shop.example.com\\\"]\\n\")])"
+---
+1 change (0 safe, 0 rebuild, 0 destructive, 1 security)
+
+  + credential   web  append on orders, public, no token (rate 20/s, batch_rows 10000, body 4MiB, new_values 10000/h), origins https://shop.example.com  security  (public and without a token: anyone can append rows)

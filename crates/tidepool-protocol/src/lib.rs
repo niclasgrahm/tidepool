@@ -119,6 +119,10 @@ pub struct ColumnInfo {
     pub nullable: bool,
     /// `dict` or `plain`.
     pub encoding: String,
+    /// `credential` or `received` when the server fills the column on every
+    /// write: producers leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled: Option<String>,
 }
 
 /// The newest rows of a table (`GET /v1/tables/{table}/preview`).

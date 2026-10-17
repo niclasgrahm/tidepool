@@ -43,15 +43,18 @@ use crate::batch::Batch;
 use crate::codec::{In, Out, corrupt, frame, sync_dir, unframe, write_atomic};
 use crate::column::{Bits, ColumnData, Packed};
 use crate::dict::{DictSnapshot, DictValue, Dictionary, Key};
-use crate::keys::{self, Keyed, Recent};
+use crate::keys::{self, Keyed, Recent, Scoped};
 use crate::migrate::{Migration, ModelVersion, Rebuilt, decode_version, encode_version};
 use crate::store::{Applied, DictId, Op, SegmentData, SegmentView, Snapshot, Store};
 use crate::value::Storage;
 use crate::wal::{Entry, Wal};
 
 const SEGMENT_MAGIC: u32 = 0x5450_5347; // "TPSG"
-/// "TPC3": checkpoints that hold their model (M7) and idempotency keys.
-const CHECKPOINT_MAGIC: u32 = 0x5450_4333;
+/// "TPC4": checkpoints that hold their model (M7) and idempotency keys,
+/// each with its credential (plan §9.2).
+const CHECKPOINT_MAGIC: u32 = 0x5450_4334;
+/// "TPC3": keys without a credential, still read (as the legacy one's).
+const CHECKPOINT_MAGIC_3: u32 = 0x5450_4333;
 /// "TPC2": the same without keys, still read. The first format, "TPCK",
 /// isn't: data written before M7 starts over.
 const CHECKPOINT_MAGIC_2: u32 = 0x5450_4332;
@@ -400,9 +403,11 @@ fn encode_manifest(manifest: &Manifest) -> io::Result<Vec<u8>> {
 fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
     let (payload, _) = unframe(bytes, 0).ok_or_else(|| corrupt("checkpoint"))?;
     let mut input = In::new(payload);
-    let with_keys = match input.u32()? {
-        CHECKPOINT_MAGIC => true,
-        CHECKPOINT_MAGIC_2 => false,
+    // (has keys, they have credentials)
+    let (with_keys, scoped) = match input.u32()? {
+        CHECKPOINT_MAGIC => (true, true),
+        CHECKPOINT_MAGIC_3 => (true, false),
+        CHECKPOINT_MAGIC_2 => (false, false),
         _ => return Err(corrupt("checkpoint")),
     };
     let lsn = input.u64()?;
@@ -458,7 +463,7 @@ fn decode_manifest(bytes: &[u8]) -> io::Result<Manifest> {
     if with_keys {
         for _ in 0..input.len()? {
             let table = TableId(input.u32()?);
-            keys.push(keys::get(&mut input, table)?);
+            keys.push(keys::get(&mut input, table, scoped)?);
         }
     }
     Ok(Manifest {
@@ -890,7 +895,13 @@ impl Durable {
     /// idempotency key and what it did. Durable after the next
     /// [`Durable::commit`]; the batch is visible from
     /// [`Store::visible_epoch`].
-    pub fn apply(&mut self, table: TableId, op: Op, batch: &Batch, key: Option<&str>) -> Applied {
+    pub fn apply(
+        &mut self,
+        table: TableId,
+        op: Op,
+        batch: &Batch,
+        key: Option<&Scoped>,
+    ) -> Applied {
         let Some(fitted) = self.store.fit(table, op, batch) else {
             return Applied {
                 table_gone: true,
@@ -902,8 +913,9 @@ impl Durable {
         // seen by anyone before the commit
         let applied = self.store.apply(table, op, batch);
         let keyed = key.map(|key| Keyed {
+            credential: key.credential.clone(),
             table,
-            key: key.to_string(),
+            key: key.key.clone(),
             at: keys::now_ms(),
             applied,
             epoch: self.store.visible_epoch(),

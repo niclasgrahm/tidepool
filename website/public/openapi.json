@@ -55,6 +55,13 @@
             "description": "`dict` or `plain`.",
             "type": "string"
           },
+          "filled": {
+            "description": "`credential` or `received` when the server fills the column on every\nwrite: producers leave it out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },

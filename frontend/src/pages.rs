@@ -130,7 +130,7 @@ pub fn TablePage(name: String) -> impl IntoView {
                 {move || info.get().map(|r| match r {
                     Err(err) => view! { <p class="problem">{err}</p> }.into_any(),
                     Ok(t) => {
-                        let sample = sample_row(&t.columns.iter().map(|c| (c.name.clone(), c.column_type.clone())).collect::<Vec<_>>());
+                        let sample = sample_row(&t.columns.iter().filter(|c| c.filled.is_none()).map(|c| (c.name.clone(), c.column_type.clone())).collect::<Vec<_>>());
                         let curl = format!(
                             "curl -X POST {origin}/v1/tables/{}/rows \\\n  -H 'content-type: application/json' \\\n  -d '[{}]'",
                             t.name, sample

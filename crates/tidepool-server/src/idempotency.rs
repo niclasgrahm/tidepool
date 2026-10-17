@@ -1,7 +1,9 @@
 //! `Idempotency-Key`: a retried write with the same key gets the first
 //! response again and writes nothing.
 //!
-//! Keys are per table and remembered for a day. Retries are answered from
+//! Keys are per credential and table (plan §9.2), so one producer can
+//! neither claim nor evict another's, and remembered for a day, at most
+//! [`CAPACITY`] per credential. Retries are answered from
 //! this map; with a data directory the writer also logs each key with the
 //! batch it came with and the response it got, and keeps live keys in
 //! checkpoints (`tidepool_store::keys`), so the map is rebuilt on startup
@@ -17,7 +19,7 @@ use std::time::Instant;
 
 use tidepool_model::ir::TableId;
 use tidepool_protocol::IngestResponse;
-use tidepool_store::keys::{CAPACITY, Keyed, TTL};
+use tidepool_store::keys::{CAPACITY, Keyed, Scoped, TTL};
 
 #[derive(Clone, Debug)]
 enum Slot {
@@ -36,11 +38,14 @@ pub enum Begin {
     InFlight,
 }
 
+/// One credential's keys, by table and key.
+type Own = HashMap<(TableId, String), Slot>;
+
 #[derive(Debug, Default)]
-pub struct Keys(Mutex<HashMap<(TableId, String), Slot>>);
+pub struct Keys(Mutex<HashMap<String, Own>>);
 
 impl Keys {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(TableId, String), Slot>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Own>> {
         // a panic while holding this lock leaves the map consistent (every
         // operation is a single insert or remove), so poisoning is ignorable
         self.0
@@ -48,9 +53,11 @@ impl Keys {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn begin(&self, table: TableId, key: &str, now: Instant) -> Begin {
-        let mut keys = self.lock();
-        match keys.get(&(table, key.to_string())) {
+    pub fn begin(&self, table: TableId, key: &Scoped, now: Instant) -> Begin {
+        let mut all = self.lock();
+        let keys = all.entry(key.credential.clone()).or_default();
+        let key = &key.key;
+        match keys.get(&(table, key.clone())) {
             Some(Slot::InFlight) => return Begin::InFlight,
             Some(Slot::Done(at, response)) if now.duration_since(*at) < TTL => {
                 return Begin::Done(response.clone());
@@ -79,18 +86,22 @@ impl Keys {
                 }
             }
         }
-        keys.insert((table, key.to_string()), Slot::InFlight);
+        keys.insert((table, key.clone()), Slot::InFlight);
         Begin::Fresh
     }
 
-    pub fn finish(&self, table: TableId, key: &str, response: IngestResponse, now: Instant) {
+    pub fn finish(&self, table: TableId, key: &Scoped, response: IngestResponse, now: Instant) {
         self.lock()
-            .insert((table, key.to_string()), Slot::Done(now, response));
+            .entry(key.credential.clone())
+            .or_default()
+            .insert((table, key.key.clone()), Slot::Done(now, response));
     }
 
     /// The request failed before writing: forget the key so a retry runs.
-    pub fn abandon(&self, table: TableId, key: &str) {
-        self.lock().remove(&(table, key.to_string()));
+    pub fn abandon(&self, table: TableId, key: &Scoped) {
+        if let Some(keys) = self.lock().get_mut(&key.credential) {
+            keys.remove(&(table, key.key.clone()));
+        }
     }
 
     /// Remember keys the data directory held (oldest first), each as old
@@ -104,7 +115,9 @@ impl Keys {
                 continue;
             };
             let response = response_of(&k);
-            keys.insert((k.table, k.key), Slot::Done(at, response));
+            keys.entry(k.credential)
+                .or_default()
+                .insert((k.table, k.key), Slot::Done(at, response));
         }
     }
 }
@@ -132,35 +145,72 @@ mod tests {
         }
     }
 
+    fn key(credential: &str, key: &str) -> Scoped {
+        Scoped {
+            credential: credential.into(),
+            key: key.into(),
+        }
+    }
+
     #[test]
     fn a_finished_key_returns_the_first_response() {
         let keys = Keys::default();
         let now = Instant::now();
-        assert_eq!(keys.begin(TableId(1), "k", now), Begin::Fresh);
-        assert_eq!(keys.begin(TableId(1), "k", now), Begin::InFlight);
-        keys.finish(TableId(1), "k", response(7), now);
-        assert_eq!(keys.begin(TableId(1), "k", now), Begin::Done(response(7)));
+        let k = key("kayak", "k");
+        assert_eq!(keys.begin(TableId(1), &k, now), Begin::Fresh);
+        assert_eq!(keys.begin(TableId(1), &k, now), Begin::InFlight);
+        keys.finish(TableId(1), &k, response(7), now);
+        assert_eq!(keys.begin(TableId(1), &k, now), Begin::Done(response(7)));
         // keys are per table
-        assert_eq!(keys.begin(TableId(2), "k", now), Begin::Fresh);
+        assert_eq!(keys.begin(TableId(2), &k, now), Begin::Fresh);
+    }
+
+    #[test]
+    fn keys_are_per_credential() {
+        let keys = Keys::default();
+        let now = Instant::now();
+        let kayak = key("kayak", "batch-1");
+        keys.finish(TableId(1), &kayak, response(7), now);
+        // another credential's same key is its own: it neither gets kayak's
+        // response nor stops kayak's
+        let other = key("sensors", "batch-1");
+        assert_eq!(keys.begin(TableId(1), &other, now), Begin::Fresh);
+        keys.finish(TableId(1), &other, response(9), now);
+        assert_eq!(
+            keys.begin(TableId(1), &kayak, now),
+            Begin::Done(response(7))
+        );
+        // and a flood of fresh keys from one evicts only its own
+        for i in 0..=CAPACITY {
+            let flood = key("sensors", &format!("f{i}"));
+            assert_eq!(keys.begin(TableId(1), &flood, now), Begin::Fresh);
+            keys.finish(TableId(1), &flood, response(1), now);
+        }
+        assert_eq!(
+            keys.begin(TableId(1), &kayak, now),
+            Begin::Done(response(7))
+        );
     }
 
     #[test]
     fn an_abandoned_key_can_run_again_and_old_keys_expire() {
         let keys = Keys::default();
         let now = Instant::now();
-        assert_eq!(keys.begin(TableId(1), "k", now), Begin::Fresh);
-        keys.abandon(TableId(1), "k");
-        assert_eq!(keys.begin(TableId(1), "k", now), Begin::Fresh);
-        keys.finish(TableId(1), "k", response(1), now);
-        assert_eq!(keys.begin(TableId(1), "k", now + TTL), Begin::Fresh);
+        let k = key("kayak", "k");
+        assert_eq!(keys.begin(TableId(1), &k, now), Begin::Fresh);
+        keys.abandon(TableId(1), &k);
+        assert_eq!(keys.begin(TableId(1), &k, now), Begin::Fresh);
+        keys.finish(TableId(1), &k, response(1), now);
+        assert_eq!(keys.begin(TableId(1), &k, now + TTL), Begin::Fresh);
     }
 
     #[test]
-    fn restored_keys_keep_their_age() {
+    fn restored_keys_keep_their_age_and_credential() {
         let keys = Keys::default();
         let now = Instant::now() + TTL; // room to go back a day
         let now_ms = 10 * 86_400_000;
         let logged = |key: &str, hours_ago: u64| Keyed {
+            credential: "kayak".into(),
             table: TableId(1),
             key: key.into(),
             at: now_ms - hours_ago * 3_600_000,
@@ -171,10 +221,23 @@ mod tests {
             epoch: 7,
         };
         keys.restore(vec![logged("old", 25), logged("new", 23)], now, now_ms);
-        assert_eq!(keys.begin(TableId(1), "old", now), Begin::Fresh);
-        assert_eq!(keys.begin(TableId(1), "new", now), Begin::Done(response(7)));
+        assert_eq!(
+            keys.begin(TableId(1), &key("kayak", "old"), now),
+            Begin::Fresh
+        );
+        assert_eq!(
+            keys.begin(TableId(1), &key("kayak", "new"), now),
+            Begin::Done(response(7))
+        );
+        assert_eq!(
+            keys.begin(TableId(1), &key("other", "new"), now),
+            Begin::Fresh
+        );
         // and it expires a day after it was written, not after the restart
         let later = now + std::time::Duration::from_hours(1);
-        assert_eq!(keys.begin(TableId(1), "new", later), Begin::Fresh);
+        assert_eq!(
+            keys.begin(TableId(1), &key("kayak", "new"), later),
+            Begin::Fresh
+        );
     }
 }

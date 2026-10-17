@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tidepool.yaml\", \"durability: fsync\\n\",\n\"durability: fsync\\nagents:\\n  auto_apply: [safe, rebuild, destructive]\\n\")])"
+---
+1 change (0 safe, 0 rebuild, 0 destructive, 1 security)
+
+  ~ setting      agents.auto_apply  [safe] → [safe, rebuild, destructive]  security  (takes effect on restart)

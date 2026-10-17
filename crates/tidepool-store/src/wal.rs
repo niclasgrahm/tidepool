@@ -6,9 +6,9 @@
 //! whose dictionaries are restored to the checkpoint's lengths, gives the
 //! same codes and row ids again.
 //!
-//! A write sent with an `Idempotency-Key` carries the key, the time and
-//! the response it was acknowledged with ([`Keyed`]), so recovery can
-//! answer a retry of it (see [`crate::keys`]).
+//! A write sent with an `Idempotency-Key` carries the key, the credential
+//! it came with, the time and the response it was acknowledged with
+//! ([`Keyed`]), so recovery can answer a retry of it (see [`crate::keys`]).
 //!
 //! A model change is a record too ([`Entry::Model`]), logged when the new
 //! model takes over: batches after it are in its tables' columns, and replay
@@ -76,16 +76,16 @@ fn encode(lsn: u64, entry: &Entry) -> Vec<u8> {
         } => (table, op, batch, key),
     };
     out.u32(table.0);
-    // 0/1: a write/delete; 3/4: the same with a key (records written
-    // before keys were logged are 0/1, and still read); 5/6: a replace,
-    // without and with a key
+    // 0/1: a write/delete; 5: a replace; 7/8/9: a write/delete/replace
+    // with a key and its credential. 3/4/6 (the same with a key but no
+    // credential, before plan §9.2) are no longer written, and still read.
     out.u8(match (op, key) {
         (Op::Write, None) => 0,
         (Op::Delete, None) => 1,
-        (Op::Write, Some(_)) => 3,
-        (Op::Delete, Some(_)) => 4,
         (Op::Replace, None) => 5,
-        (Op::Replace, Some(_)) => 6,
+        (Op::Write, Some(_)) => 7,
+        (Op::Delete, Some(_)) => 8,
+        (Op::Replace, Some(_)) => 9,
     });
     if let Some(key) = key {
         keys::put(&mut out, key);
@@ -126,13 +126,17 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
     let mut input = In::new(bytes);
     let lsn = input.u64()?;
     let table = TableId(input.u32()?);
-    let (op, keyed) = match input.u8()? {
-        0 => (Op::Write, false),
-        1 => (Op::Delete, false),
-        3 => (Op::Write, true),
-        4 => (Op::Delete, true),
-        5 => (Op::Replace, false),
-        6 => (Op::Replace, true),
+    // (op, keyed, the key has a credential)
+    let (op, keyed, scoped) = match input.u8()? {
+        0 => (Op::Write, false, false),
+        1 => (Op::Delete, false, false),
+        3 => (Op::Write, true, false),
+        4 => (Op::Delete, true, false),
+        5 => (Op::Replace, false, false),
+        6 => (Op::Replace, true, false),
+        7 => (Op::Write, true, true),
+        8 => (Op::Delete, true, true),
+        9 => (Op::Replace, true, true),
         2 => {
             return Ok(Record {
                 lsn,
@@ -142,7 +146,7 @@ fn decode(bytes: &[u8]) -> io::Result<Record> {
         _ => return Err(corrupt("record")),
     };
     let key = if keyed {
-        Some(keys::get(&mut input, table)?)
+        Some(keys::get(&mut input, table, scoped)?)
     } else {
         None
     };
@@ -411,6 +415,7 @@ mod tests {
             Wal::open(dir.path(), 0, Durability::Fsync).unwrap_or_else(|e| panic!("{e}"));
         assert!(old.is_empty());
         let keyed = Keyed {
+            credential: "kayak".into(),
             table: TableId(7),
             key: "retry-me".into(),
             at: 1_700_000_000_000,
@@ -456,5 +461,31 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).map_or(0, |m| m.len()), synced);
         // appends continue the sequence
         assert_eq!(wal.append(TableId(7), Op::Delete, &batch(9), None), 4);
+    }
+
+    #[test]
+    fn a_keyed_record_from_before_credentials_is_still_read() {
+        // lsn, table, op 3 (a keyed write), the key without a credential
+        // (key, time, three counts, epoch), then an empty batch
+        let mut out = Out::default();
+        out.u64(12);
+        out.u32(7);
+        out.u8(3);
+        out.bytes(b"retry-me");
+        for n in [1_700_000_000_000, 2, 0, 0, 5] {
+            out.u64(n);
+        }
+        out.len(0);
+        out.len(0);
+        let record = decode(&out.0).unwrap_or_else(|e| panic!("{e}"));
+        match record.entry {
+            Entry::Write { op, key, .. } => {
+                assert_eq!(op, Op::Write);
+                let key = key.unwrap_or_else(|| panic!("expected the key"));
+                assert_eq!(key.credential, keys::LEGACY);
+                assert_eq!(key.key, "retry-me");
+            }
+            Entry::Model(_) => panic!("expected a write"),
+        }
     }
 }

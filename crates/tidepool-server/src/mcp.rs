@@ -17,16 +17,17 @@
 
 use std::sync::Arc;
 
-use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::AppState;
+use crate::auth::Listener;
 
 /// Protocol versions this endpoint speaks, newest first.
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -201,17 +202,24 @@ fn answer(value: Value, is_error: bool) -> Value {
     out
 }
 
+/// Who asked: the request's credentials and the listener it came in on,
+/// which every call it makes goes through too.
+struct Asker<'a> {
+    headers: &'a HeaderMap,
+    listener: Listener,
+}
+
 /// One call of the API, in process, with the caller's credentials.
 async fn api(
     state: &Arc<AppState>,
-    caller: &HeaderMap,
+    caller: &Asker<'_>,
     method: Method,
     path: &str,
     body: Option<&Value>,
 ) -> (StatusCode, Value) {
     let mut request = Request::builder().method(method).uri(path);
     for name in [header::AUTHORIZATION, header::COOKIE] {
-        if let Some(value) = caller.get(&name) {
+        if let Some(value) = caller.headers.get(&name) {
             request = request.header(name, value);
         }
     }
@@ -225,7 +233,7 @@ async fn api(
             json!({"error": "bad request"}),
         );
     };
-    let router = crate::api_router(Arc::clone(state));
+    let router = crate::endpoints::api_router_on(Arc::clone(state), caller.listener);
     let Ok(response) = router.oneshot(request).await;
     let status = response.status();
     let bytes = response
@@ -242,7 +250,7 @@ async fn api(
 /// Run a tool: its answer, or an error message for the agent.
 async fn call(
     state: &Arc<AppState>,
-    caller: &HeaderMap,
+    caller: &Asker<'_>,
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
@@ -307,7 +315,7 @@ async fn call(
 /// `apply_change`: the agents' policy, then the config API.
 async fn apply_change(
     state: &Arc<AppState>,
-    caller: &HeaderMap,
+    caller: &Asker<'_>,
     args: &Value,
 ) -> Result<Value, String> {
     let Some(base) = args["base_version"].as_u64() else {
@@ -367,7 +375,7 @@ async fn apply_change(
 }
 
 /// One JSON-RPC message: the reply, or `None` for a notification.
-async fn handle(state: &Arc<AppState>, caller: &HeaderMap, message: &Value) -> Option<Value> {
+async fn handle(state: &Arc<AppState>, caller: &Asker<'_>, message: &Value) -> Option<Value> {
     let id = message.get("id")?.clone();
     let method = message["method"].as_str().unwrap_or_default();
     let params = &message["params"];
@@ -417,9 +425,14 @@ async fn handle(state: &Arc<AppState>, caller: &HeaderMap, message: &Value) -> O
 /// `POST /mcp`. See `Operation::Mcp` in the endpoint table.
 pub async fn mcp(
     State(state): State<Arc<AppState>>,
+    Extension(listener): Extension<Listener>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let asker = Asker {
+        headers: &headers,
+        listener,
+    };
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return Json(error(&Value::Null, -32700, "not JSON")).into_response();
     };
@@ -427,7 +440,7 @@ pub async fn mcp(
     if let Some(batch) = message.as_array() {
         let mut replies = Vec::new();
         for one in batch {
-            replies.extend(handle(&state, &headers, one).await);
+            replies.extend(handle(&state, &asker, one).await);
         }
         return if replies.is_empty() {
             StatusCode::ACCEPTED.into_response()
@@ -435,7 +448,7 @@ pub async fn mcp(
             Json(Value::Array(replies)).into_response()
         };
     }
-    match handle(&state, &headers, &message).await {
+    match handle(&state, &asker, &message).await {
         Some(reply) => Json(reply).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }

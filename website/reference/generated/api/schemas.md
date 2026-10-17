@@ -443,6 +443,7 @@ A result column to sort by, by its name in [`QueryResult::columns`].
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `encoding` | string | **required** | `dict` or `plain`. |
+| `filled` | string |  | `credential` or `received` when the server fills the column on every write: producers leave it out. |
 | `name` | string | **required** |  |
 | `nullable` | boolean | **required** |  |
 | `type` | string | **required** | The column type as written in the table file, e.g. `decimal(14,2)`. |

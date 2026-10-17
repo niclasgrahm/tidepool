@@ -51,8 +51,41 @@ pub async fn info() -> Json<ServerInfo> {
 }
 
 /// `GET /v1/openapi.json`
-pub async fn openapi(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(crate::openapi::document(&state.writer.snapshot().model))
+pub async fn openapi(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(listener): axum::Extension<crate::auth::Listener>,
+) -> Json<Value> {
+    let model = &state.writer.snapshot().model;
+    if listener == crate::auth::Listener::ALL {
+        return Json(crate::openapi::document(model));
+    }
+    // this listener's endpoints, and on the public one only the tables a
+    // public credential writes
+    let endpoint =
+        |doc: &tidepool_protocol::api_docs::ApiDoc| crate::endpoints::placed(doc, listener, &state);
+    let rows = |table: &tidepool_model::ir::Table, operation| {
+        use tidepool_config::server::IngestOperation;
+        use tidepool_protocol::api_docs::Operation;
+        let operation = match operation {
+            Operation::DeleteRows => IngestOperation::Delete,
+            Operation::ReplaceRows => IngestOperation::Replace,
+            _ if table.mode == tidepool_config::table::TableMode::Upsert => IngestOperation::Upsert,
+            _ => IngestOperation::Append,
+        };
+        !listener.public_only()
+            || state
+                .tokens
+                .ingest
+                .iter()
+                .any(|c| c.public && c.may(&table.name, operation))
+    };
+    Json(crate::openapi::document_shown(
+        model,
+        &crate::openapi::Shown {
+            endpoint: &endpoint,
+            rows: &rows,
+        },
+    ))
 }
 
 /// `GET /v1/schemas/{kind}`

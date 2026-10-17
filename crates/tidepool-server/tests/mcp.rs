@@ -247,11 +247,11 @@ async fn safe_changes_apply_and_the_rest_wait_for_a_person() {
 
 #[tokio::test]
 async fn tools_need_the_level_their_endpoint_needs() {
-    let tokens = Tokens {
-        read: Some("read-secret".into()),
-        ingest: Some("ingest-secret".into()),
-        admin: Some("admin-secret".into()),
-    };
+    let tokens = Tokens::levels(
+        Some("ingest-secret"),
+        Some("read-secret"),
+        Some("admin-secret"),
+    );
     let state = server(tokens).await;
     let (status, _) = rpc(
         &state,

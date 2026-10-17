@@ -39,7 +39,7 @@ tidepool-server = { path = "crates/tidepool-server" }
 # external
 anyhow = "1.0.102"
 axum = { version = "0.8.9", features = ["ws"] }
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 rust-embed = { version = "8.12.0", features = ["debug-embed", "include-exclude"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
