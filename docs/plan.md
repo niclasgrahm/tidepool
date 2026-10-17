@@ -25,6 +25,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D12 | Kayak is the connector layer | Tidepool only ingests over HTTP, permanently. Kafka, MQTT, NATS, OPC UA, databases and so on are reached through Kayak pipelines with a `tidepool` output (§15). Tidepool never grows transforms, and Kayak never grows dashboards. |
 | D13 | Licence split, same as Kayak | `tidepool-protocol` and `tidepool-config` (the types any client needs) are **Apache-2.0**. Everything else (server, engine, frontend) is **AGPL-3.0-or-later**, with a commercial licence available. Every crate declares `license`, and a test enforces it. |
 | D14 | Reuse Kayak's conventions and solved problems | `just` for tasks, `serde_norway` for YAML, the `embed-assets` feature with rust-embed, one endpoint table that generates routes + auth roles + OpenAPI + docs, Kayak's auth stack (basic / session cookie / JWT with the iframe embedding handshake), `${NAME}` secrets, a bench crate, clippy pedantic with `unwrap_used`/`expect_used`, and a "definition of done" in CLAUDE.md. Copy first; extract a shared crate only if a third project needs it. |
+| D15 | Ingest is private by default; public ingest is a grant | The UI being public says nothing about where producers are. Listeners are split by surface (public / ingest / admin), placed from the endpoint table's `Access`. Ingest credentials are named and scoped to tables and operations, and a table becomes writable from the internet only through a credential marked `public`, with mandatory limits. Off loopback, an ingest or admin level without a token refuses to start. Changes to `auth`, `listen` and `agents` are their own change class, never auto-applied. (Decided 2026-10-17; §9.2.) |
 
 ---
 
@@ -100,6 +101,8 @@ config_writeback:
 agents:
   auto_apply: [safe]             # change classes an agent may apply without human approval
 ```
+
+Planned (§9.2, D15): `listen` as a map of listeners per surface (`public`, `ingest`, `admin`), and `auth.ingest` as a list of named credentials scoped to tables and operations, some of them `public`. The single address and `ingest_token_env` stay accepted.
 
 ### 3.3 Table file
 
@@ -451,7 +454,7 @@ query:   ?wait=visible                (respond only after the rows' epoch is pub
   - Output in every case: a normalized Arrow `RecordBatch`.
 - **Batches are atomic:** either the whole batch is accepted or none of it.
 - **Durability:** the normalized batch is appended to the WAL. The response is sent after group-commit fsync (`durability: fsync`) or immediately (`async`). Then the batch is queued for the writer thread.
-- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data.
+- **Idempotency:** a recent-keys map (table, key) → response, with a 24 h TTL (and at most 100k keys, oldest dropped first). With a data directory it's durable with the write it acknowledges: the key, the response and the wall-clock time are in that batch's WAL record, checkpoints carry the keys still live, and recovery rebuilds the map from the checkpoint plus the replayed records (§4.7). A retry of a batch acknowledged just before a restart, whose reply was lost, gets the first response and writes nothing. The TTL runs from the recorded time, across restarts. Without a data directory the keys are in memory, like the data. Planned (§9.2): keys scoped by credential as well, `(credential, table, key)`, with the capacity split per credential, so one producer can neither claim nor evict another's keys.
 - **Replace** (`PUT`, `Op::Replace`, done 2026-10-10): for a dimension kept in step with a system of record that can only be read whole (indud's namespace, a catalogue). The batch's rows are written as upserts, then every live row whose key it didn't list is deleted, in one writer batch, so one epoch and one WAL record (op codes 5/6). Replay applies it to the same state, so it needs no expanded deletes in the log; the crash suite mixes replaces into its workload and catches one logged as a plain write. `replaced` counts rows replaced and rows deleted (the receipt keeps its three counts). An empty body empties the table.
 - **Backpressure:** a bounded writer queue. When it's full, respond `503` with `Retry-After`.
 - **Discovery:**
@@ -770,6 +773,7 @@ source: startup │ file watcher │ PUT /v1/config │ UI editor │ MCP propos
 | **safe** | add table · add nullable column (old segments read it as virtual all-NULL) · add/edit/remove metric · add/edit field expression · add/edit/remove dashboard · change retention · change epoch interval | instant, at next epoch |
 | **rebuild** | add relationship between existing populated tables (dictionaries must be merged into one key domain, and one side's key codes remapped) · change encoding · widen type (int32→int64, decimal precision up) · add non-nullable column with default · change PK of upsert table | background job builds new segment versions, swapped at an epoch; progress shown in the UI; old version keeps serving until the swap |
 | **destructive** | drop table/column · narrow type · change table mode · remove a relationship used by dashboards | needs explicit approval (human) |
+| **security** (planned, §9.2) | any change to `auth`, `listen` or `agents` in `tidepool.yaml`: a credential added, a table granted publicly, an operation widened, `auto_apply` changed | needs explicit approval (human); never in `auto_apply` |
 
 ### 8.3 Plans are first-class
 
@@ -819,7 +823,8 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 - **Roles:** `viewer` and `admin` (config apply, MCP write tools), declared per endpoint in the endpoint table.
 - **Humans:** HTTP Basic + session cookie, or **JWT** validated against an identity provider's JWKS.
 - **Embedding:** Kayak's iframe handshake (`?auth_token=` exchanged at `POST /v1/auth/token` for a session cookie), so Tidepool dashboards can be embedded in other apps.
-- **Off by default on loopback.** The server warns at startup when it's bound to anything else without auth.
+- **Off by default on loopback.** The server warns at startup when it's bound to anything else without auth. Planned (§9.2): it refuses to start instead, when ingest or admin is open off loopback.
+- **Exposure** (§9.2, D15): listeners per surface, named and scoped ingest credentials, public grants with limits.
 
 ### 9.1 MCP tools
 
@@ -832,6 +837,96 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 | `plan_change` | takes full or patched files, returns a plan |
 | `apply_change` | applies if policy allows; otherwise queues for approval and returns the change id |
 | `ingest_rows` | for agents that generate or forward data (ingest token scope) |
+
+### 9.2 Exposure: listeners and ingest credentials
+
+**Status: designed 2026-10-17, not built.** D15 is the decision; this is how it works.
+
+**The problem.** Today one address (`listen`) serves everything, so putting the UI on the internet also puts ingest, config, `/metrics` and `/mcp` there. An access level without a token is open, and away from loopback that only gets a warning. A deployment that sets only `TIDEPOOL_READ_TOKEN` has a protected dashboard and an ingest API anyone can write to, `PUT` (an empty body empties a table) and `DELETE` included. There is one ingest token, good for every table and every operation. Idempotency keys are scoped by `(table, key)` with one shared capacity, so any ingest caller can claim a key another producer will use (its batch is then answered "already done" and never written), or evict other producers' live keys by sending fresh ones. And `tidepool.yaml` goes through the config pipeline, but `auth` and `agents` changes don't appear in plans, and every setting change is `safe`, so `agents.auto_apply: [safe]` lets an agent rewrite either.
+
+**Who calls what.** Viewers (the UI, `/v1/query`, `/v1/ws`) are people, anywhere. Producers are machines at addresses we know: Kayak in the same network, an edge site, a CI job. Under D12 the usual reasons for public ingest (third-party webhooks, browser beacons) land in Kayak, not here. So by default ingest is private, and making a table writable from the internet is a narrow grant you can see, not a side effect of a public UI. That grant is still supported, because a sensor or a script that can `curl` a table directly is a real convenience.
+
+#### Listeners
+
+```yaml
+listen:
+  public: 0.0.0.0:7070      # the UI, read endpoints, /v1/ws, and public ingest grants
+  ingest: 10.0.0.5:7071     # read + all ingest
+  admin: 127.0.0.1:7072     # everything, including config, changes and /metrics
+```
+
+- A plain address (`listen: 0.0.0.0:7070`) is still accepted and means one listener serving everything, as today (subject to "fail closed" below). A surface left out of the map is served by `admin`, or by `public` when `admin` is also left out.
+- **The endpoint table decides placement.** Each `ApiDoc`'s `Access` maps to the listeners that serve it (Read → all; Ingest → `ingest`, `admin`, and `public` only for public grants; Admin → `admin`). `api_router` folds the table once per listener, as it folds it into `authorize` today, so a documented endpoint can't end up on the wrong listener. Probes are on every listener. `/metrics` is on `admin`.
+- **Listener and credential must both allow a request.** Cookies are per host, not per port, so an admin session cookie also reaches the public port. It still can't reach config there, because the route doesn't exist on that listener. On the public listener, a table nobody granted publicly is a 404 (as if it didn't exist), and its OpenAPI document lists only the granted tables, which makes it the page you give to whoever runs the producer.
+- **`/mcp` is on every listener**, and the listener is passed into its in-process `oneshot` calls, so a tool can't do anything over the public port that its endpoint wouldn't do there.
+
+#### Ingest credentials
+
+```yaml
+auth:
+  admin_token_env: TIDEPOOL_ADMIN_TOKEN
+  read_token_env: TIDEPOOL_READ_TOKEN
+  ingest:
+    - name: kayak
+      token_env: KAYAK_INGEST_TOKEN
+      tables: ["*"]
+      operations: [append, upsert, delete, replace]
+    - name: field-sensors
+      token_env: [SENSOR_TOKEN, SENSOR_TOKEN_NEXT]   # any of them; rotation without downtime
+      tables: [readings]
+      operations: [append]
+      public: true
+      limits: { rate: 200/s, batch_rows: 1000, body: 1MiB, new_values: 1000/min }
+      origins: ["https://app.example.com"]           # CORS, for browser producers
+```
+
+- `operations`: `append` is `POST` to an append table, `upsert` is `POST` to an upsert table, `delete` is `DELETE`, `replace` is `PUT`.
+- `ingest_token_env` stays accepted and means one private credential named `ingest` with every table and operation, so existing deployments and Kayak's `tidepool` output keep working unchanged.
+- Grants live in `tidepool.yaml` (the deployment), not in table files (the model): the same model runs in dev and in production with different exposure, and secrets don't belong in files that go into git. Tokens are named by environment variable, as now.
+- The credential's name is in each batch's WAL record and in metrics (`tidepool_ingest_rows_total{credential="…"}`), so which producer wrote which batch is on record. Records written before the change replay as the `ingest` credential.
+
+#### Guardrails for public grants
+
+What's acceptable from Kayak isn't acceptable from the internet:
+
+- **Append only by default.** A public grant with `upsert`, `delete` or `replace` is allowed but gets a warning at startup and in its plan: anyone with the key can overwrite rows by key or empty the table.
+- **Limits are mandatory**, with defaults where a public grant leaves them out. Over the rate it's `429 Too Many Requests` with `Retry-After` (`503` stays "the server is busy"). Too many rows or too large a body is `413`.
+- **Reserved writer capacity.** Public batches together may hold at most a quarter of the writer queue (16 of 64), so a flood gets that caller 429s while private producers still get through.
+- **Caps on new dictionary values.** Dictionaries never shrink (risk, §13), so a public caller sending unique strings is a memory leak that lasts until compaction. The decoder counts values missing from the latest snapshot's dictionaries, per credential per window, and rejects a batch over the cap with the column named. This is an approximate count against a snapshot, which is enough for a limit.
+- **Server-filled columns** (table file, model side): `ingested_by: { type: string, filled: credential }` and `received_at: { type: timestamp, filled: received }`. A producer that sends one is refused with a 400. When a public key is abused, you can find the bad rows with a filter and remove them, instead of guessing.
+- **Anonymous grants** (`token: none`) are possible only when written out in full, and only for `append`. A browser beacon's key is public by nature, so there the limits are the only protection.
+
+#### Idempotency keys per credential
+
+Keys are scoped by `(credential, table, key)`, and the capacity (§4.5) is split per credential, with public grants getting a smaller share. One producer can then neither claim nor evict another's keys. The key's credential is in the WAL record, so recovery rebuilds the same scoping. This fixes the eviction and claiming problems for a leaked ingest token too, so it comes first.
+
+#### Fail closed
+
+`serve` refuses to start when a listener away from loopback serves ingest or admin and the level has no token. `--insecure-open ingest,admin` allows it, by name. A public grant always has a token unless it says `token: none`. An open read level on a public listener stays a warning, because public read-only dashboards are a legitimate deployment.
+
+#### The `security` change class
+
+A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security** (§8.2): it's shown in the plan item by item (a credential added, a table granted publicly, an operation widened), it is never auto-applied, and `agents.auto_apply` can't include it (a compile error). Today these changes are invisible in plans; this closes that.
+
+#### Order of work
+
+1. Credential-scoped idempotency keys, with the one legacy credential (a fix that's useful before anything else exists).
+2. The `security` change class for `auth`, `listen` and `agents`.
+3. Named ingest credentials with `tables` and `operations`.
+4. Listeners per surface, and fail closed.
+5. Public grants: limits, reserved queue share, caps on new values, `origins`.
+6. Server-filled columns.
+
+#### Tests
+
+- `tests/api.rs` walks the endpoint table: every endpoint is on exactly the listeners its `Access` maps to, and the public listener 404s ungranted tables and every admin path, also with an admin session cookie.
+- A credential matrix over HTTP: table × operation × listener, each allowed or refused as granted.
+- Idempotency: a second credential can't claim or evict the first one's keys. The crash suite with credentials in the stream: recovered keys keep their credential (with a planted bug that drops it).
+- Limits: 429s at the rate, 413s past the size, private writes succeeding under a public flood (with a small queue), a new-values cap with the column named.
+- Fail closed: each refusing startup and each allowed one.
+- Plan scenarios in `tidepool-model/tests/plans.rs` for each `security` item, and a config test that `auto_apply` can't apply one.
+- Filled columns: stamped on every write path (`POST`, `PUT`), refused when sent, kept through replay.
+- The doc site gets a deployment page (public UI, private ingest, a public grant); the config reference is regenerated.
 
 ---
 
@@ -1036,20 +1131,21 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 ### After v0.1 (ordered by expected value)
 
 1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
-2. Late binding of dimension attributes (no fact rescans on dimension upserts)
-3. Percentiles/median, approximate distinct
-4. Segment compaction and dictionary compaction
-5. Row-level deltas in frames for large tables
-6. Bookmarks and shareable selection URLs
-7. ~~Drag-and-drop dashboard builder~~ (done 2026-10-13: the dashboard editor, §10.2), visual relationship editor (writing YAML through the pipeline), then editors for the other config objects the same way
-8. Row-level security (mandatory per-user selection applied before everything else)
-9. Kayak `tidepool` **input**: subscribe to a live metric query and turn updates into messages (alerting, webhooks), see §15.3
-10. Perspective-based pivot visual
-11. Engine self-metrics exposed as Tidepool tables (`_system.*`), i.e. a dashboard of Tidepool in Tidepool
-12. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
-13. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
-14. ~~Relative time windows ("Today", "Last 7 days") on time selections and dashboard defaults~~ (done: §5.5)
-15. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
+2. Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns. Needed before any internet-facing deployment
+3. Late binding of dimension attributes (no fact rescans on dimension upserts)
+4. Percentiles/median, approximate distinct
+5. Segment compaction and dictionary compaction
+6. Row-level deltas in frames for large tables
+7. Bookmarks and shareable selection URLs
+8. ~~Drag-and-drop dashboard builder~~ (done 2026-10-13: the dashboard editor, §10.2), visual relationship editor (writing YAML through the pipeline), then editors for the other config objects the same way
+9. Row-level security (mandatory per-user selection applied before everything else)
+10. Kayak `tidepool` **input**: subscribe to a live metric query and turn updates into messages (alerting, webhooks), see §15.3
+11. Perspective-based pivot visual
+12. Engine self-metrics exposed as Tidepool tables (`_system.*`), i.e. a dashboard of Tidepool in Tidepool
+13. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
+14. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
+15. ~~Relative time windows ("Today", "Last 7 days") on time selections and dashboard defaults~~ (done: §5.5)
+16. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
 
 ---
 
@@ -1060,6 +1156,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 | Incremental results silently wrong | medium | severe | oracle + incremental oracle in CI, nightly long runs, production shadow verification (§11) |
 | Tail concurrency bug (unsafe) | retired in M2 | — | the store has no `unsafe`: immutable chunks frozen per epoch instead of a shared tail |
 | Dictionary growth from high-cardinality columns | high | memory blow-up | `plain` encoding defaults for numerics, warnings and plan hints, dictionary compaction after v0.1 |
+| Ingest reachable from the internet by accident (one listener; an unset token is open) | high, for any public deployment | data integrity (rows written, `PUT` empties a table), memory (dictionary growth) | D15 / §9.2: private ingest by default, fail closed off loopback, public grants scoped and limited |
 | Dimension upserts cause frequent full rescans | medium | latency | column-change detection (v1); late binding (post v0.1) |
 | Ossie spec churn (0.1 → 0.2 → 1.0) | high | low–medium | pin a version; all Ossie handling in `tidepool-config`; an internal IR; migrate with a converter |
 | YAML crate ecosystem churn (serde_yaml deprecated) | medium | low | `serde_norway` (already proven in Kayak), isolated behind `tidepool-config` |
@@ -1076,7 +1173,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 3. **Time zones:** dashboard-level time zone for grains (`day` in which zone)? Proposal: a `timezone` setting in `tidepool.yaml`, overridable per dashboard.
 4. **Late-arriving data with `event_time` far in the past:** accept always (affects zone maps only), or reject outside a window?
 5. **Ossie upgrade:** we write the 0.2 shape already (D8). When 0.2 is released, check whether it adds any of our extension concepts (derived metrics, filters, time grains) natively, and read those too.
-6. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
+6. **Who approves a `security` change?** (§9.2) Approval is an admin endpoint, and agents use the admin token too, so an agent could approve its own proposal. Options: approval only from a browser session (a human at the UI), or a separate approver token.
+7. **Stronger producer identity for edge sites** (§9.2): mTLS or HMAC-signed requests (a timestamp against replays) for Kayaks pushing across the internet. Kayak's `tidepool` output would have to speak it too. After the bearer-token version is in.
+8. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
 
 ---
 
