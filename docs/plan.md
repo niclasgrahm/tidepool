@@ -1146,6 +1146,8 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 14. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)
 15. ~~Relative time windows ("Today", "Last 7 days") on time selections and dashboard defaults~~ (done: §5.5)
 16. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
+17. GitOps: the config from a branch of a remote repository, plan checks on pull requests, UI changes pushed as commits. Design in [gitops.md](gitops.md)
+18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
 
 ---
 
