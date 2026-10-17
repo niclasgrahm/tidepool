@@ -239,12 +239,77 @@ th.num button { text-align: right; }
 .facts div { background: var(--surface); padding: 10px 12px; }
 .facts dt { font-size: 13px; color: var(--ink-soft); }
 .facts dd { margin: 2px 0 0; font: 700 18px/1.2 var(--display); overflow-wrap: anywhere; }
-.diagram { max-width: 100%; height: auto; }
-.diagram .node rect { fill: var(--surface); stroke: var(--tide); stroke-width: 1.5; }
-.diagram .node text { fill: var(--ink); font: 500 15px var(--display); }
-.diagram .edge line { stroke: var(--ink-soft); stroke-width: 1.5; }
-.diagram .edge text { fill: var(--ink-soft); font-size: 12px; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
-.diagram marker path { fill: var(--ink-soft); }
+/* The relationship diagram (relationships.rs): cards on a 20px grid,
+   lines between their key rows. Coral is the chosen line, as it is a
+   selection everywhere else. */
+.er-bar { margin-bottom: 12px; }
+.er-legend { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 13px; color: var(--ink-soft); }
+.er-legend li { display: inline-flex; align-items: center; gap: 8px; }
+.er-legend svg { overflow: visible; }
+.er-note { font-size: 13px; margin: 0; max-width: 80ch; }
+.er-note code { font-size: 12.5px; }
+.er-wrap { position: relative; border: 1px solid var(--sand); }
+.er-canvas {
+  overflow: auto; max-height: 78vh;
+  background-image: radial-gradient(circle, var(--sand) 1px, transparent 1.3px);
+  background-size: 20px 20px; background-position: -10px -10px;
+}
+.er-surface { position: relative; }
+.er-lines { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.er-card {
+  position: absolute; width: 240px; display: block; background: var(--surface); color: var(--ink);
+  border-top: 3px solid var(--tide); text-decoration: none; transition: opacity 120ms, border-color 120ms;
+}
+.er-card:hover, .er-card:focus-visible { border-top-color: var(--anemone); outline: none; }
+.er-card:focus-visible { box-shadow: 0 0 0 2px var(--tide); }
+.er-surface.dim .er-card:not(.lit) { opacity: 0.45; }
+.er-head { height: 37px; display: flex; align-items: center; gap: 8px; padding: 0 14px; }
+.er-head h3 { font: 700 17px var(--display); letter-spacing: -0.01em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.er-mode { margin-left: auto; font-size: 12px; color: var(--ink-soft); border: 1px solid var(--sand); border-radius: 999px; padding: 0 8px; line-height: 18px; }
+.er-stats { height: 50px; display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 10px; padding: 0 14px 6px; }
+.er-count { font: 700 26px/1 var(--display); letter-spacing: -0.01em; white-space: nowrap; }
+.er-count small { font: 400 12px var(--text); color: var(--ink-soft); letter-spacing: 0; margin-left: 4px; }
+.er-rate { text-align: right; font-size: 12px; color: var(--ink-soft); line-height: 1.2; }
+.er-rate svg { display: block; margin-left: auto; overflow: visible; }
+.er-rate path { fill: none; stroke: var(--tide); stroke-width: 1.5; stroke-linejoin: round; }
+.er-live { color: var(--tide); font-weight: 700; }
+.er-rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--kelp); }
+.er-rows li { height: 20px; display: flex; align-items: center; gap: 8px; padding: 0 14px; font: 12.5px var(--mono); }
+.er-glyph { width: 12px; flex: none; display: inline-flex; justify-content: center; color: var(--ink-soft); }
+.er-row-note { margin-left: auto; font: 12px var(--text); color: var(--ink-soft); white-space: nowrap; }
+.er-rows li.er-more { font: 12px var(--text); color: var(--ink-soft); }
+.er-rows li.port-lit { background: color-mix(in srgb, var(--tide) 12%, transparent); }
+.er-rows li.port-chosen { background: color-mix(in srgb, var(--anemone) 14%, transparent); }
+.er-foot { display: flex; flex-wrap: wrap; gap: 2px 12px; padding: 6px 14px 8px; font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--kelp); }
+.er-path { fill: none; stroke: var(--ink-soft); stroke-width: 1.5; }
+.er-end { fill: none; stroke: var(--ink-soft); stroke-width: 1.5; stroke-linecap: round; }
+.er-end.off { stroke: var(--sand); stroke-dasharray: 3 3; }
+.er-chev { fill: var(--tide); stroke: var(--surface); stroke-width: 2; paint-order: stroke; }
+.er-line text { font-size: 12px; fill: var(--ink-soft); paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
+.er-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.er-flow { fill: none; stroke: var(--tide); stroke-width: 2.5; stroke-dasharray: 2 14; stroke-linecap: round; opacity: 0; }
+.er-line.lit .er-path, .er-line.lit .er-end { stroke: var(--tide); }
+.er-line.lit text { fill: var(--ink); }
+.er-line.lit .er-flow { opacity: 1; animation: er-flow 900ms linear infinite; }
+.er-line.lit .er-flow.back { animation-direction: reverse; }
+.er-line.chosen .er-path, .er-line.chosen .er-end { stroke: var(--anemone); stroke-width: 2; }
+.er-line.chosen .er-chev { fill: var(--anemone); }
+.er-line.chosen text { fill: var(--ink); font-weight: 700; }
+.er-surface.dim .er-line:not(.lit):not(.chosen) { opacity: 0.25; }
+@keyframes er-flow { to { stroke-dashoffset: -16; } }
+@media (prefers-reduced-motion: reduce) { .er-line.lit .er-flow { animation: none; opacity: 0.6; } }
+.er-detail {
+  position: absolute; right: 16px; bottom: 16px; z-index: 2; width: min(340px, calc(100% - 32px));
+  background: var(--surface); border-top: 3px solid var(--anemone); padding: 12px 16px 14px; box-shadow: 0 0 0 1px var(--sand);
+}
+.er-detail h3 { font: 700 18px var(--display); letter-spacing: -0.01em; margin: 0 0 6px; display: flex; align-items: center; }
+.er-detail h3 button { margin-left: auto; font: inherit; font-size: 20px; line-height: 1; color: var(--ink-soft); background: none; border: 0; cursor: pointer; padding: 0 2px; }
+.er-detail dl { margin: 8px 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.er-detail dt { color: var(--ink-soft); }
+.er-detail dd { margin: 0; }
+.er-detail p { margin: 6px 0 0; font-size: 13.5px; }
+.er-flowline { display: flex; gap: 8px; align-items: flex-start; }
+.er-flowline svg { flex: none; margin-top: 4px; overflow: visible; }
 
 footer { padding: 8px 24px; font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--sand); }
 

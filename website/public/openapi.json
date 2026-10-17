@@ -625,6 +625,11 @@
             },
             "type": "array"
           },
+          "filter_direction": {
+            "default": "one_to_many",
+            "description": "Which way selections flow along relationships: `one_to_many` (from\nthe one side to the many side) or `both`.",
+            "type": "string"
+          },
           "metrics": {
             "items": {
               "$ref": "#/components/schemas/MetricInfo"
@@ -1087,6 +1092,13 @@
           "name": {
             "type": "string"
           },
+          "role": {
+            "description": "Tells apart relationships between the same two tables (order date\nvs ship date).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "to": {
             "description": "The one side.",
             "type": "string"
@@ -1478,6 +1490,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "event_time": {
+            "description": "The column that says when a row happened, if the table has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "mode": {
             "description": "`append` or `upsert`.",
             "type": "string"
@@ -1491,6 +1510,13 @@
             },
             "type": "array"
           },
+          "retention": {
+            "description": "How long rows are kept, by their event time (`730d`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "rows": {
             "description": "Rows currently stored (not counting deleted ones).",
             "format": "uint64",
@@ -1501,6 +1527,13 @@
             "description": "Write rate over the last ten seconds.",
             "format": "double",
             "type": "number"
+          },
+          "segments": {
+            "default": 0,
+            "description": "Segments the table's rows are held in.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
           },
           "written_total": {
             "description": "Rows written since the server started.",

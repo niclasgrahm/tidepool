@@ -10,9 +10,11 @@ mod board;
 mod charts;
 mod configui;
 mod dashboard;
+mod diagram;
 mod echarts;
 mod live;
 mod pages;
+mod relationships;
 mod route;
 mod textdiff;
 

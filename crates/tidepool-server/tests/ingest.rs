@@ -496,6 +496,14 @@ async fn tables_are_listed_with_their_columns() {
     assert_eq!(names, ["categories", "customers", "orders", "products"]);
     let orders = &tables[2];
     assert_eq!(orders["mode"], "append");
+    assert_eq!(orders["event_time"], "ordered_at");
+    assert_eq!(orders["retention"], "730d");
+    assert!(orders["segments"].is_u64(), "segments is a count: {orders}");
+    assert_eq!(
+        tables[1]["event_time"],
+        Value::Null,
+        "customers has no event time"
+    );
     assert_eq!(
         orders["columns"][6],
         json!({"name": "amount", "type": "decimal(14,2)", "nullable": false, "encoding": "plain"})

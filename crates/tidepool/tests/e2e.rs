@@ -652,3 +652,69 @@ fn a_table_added_in_the_config_editor_goes_live() {
         other => panic!("the new table should be served: {other:?}"),
     }
 }
+
+#[test]
+fn the_relationship_diagram_counts_live_and_opens_a_table() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str| {
+        json!({
+            "order_id": id, "customer_id": "c1", "product_id": "p1", "status": "paid",
+            "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": "5.00", "note": null,
+        })
+    };
+    post(address, "orders", &json!([order("o1"), order("o2")]));
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/model/relationships") }),
+    );
+    browser.wait_for(
+        "document.querySelectorAll('.er-card').length === 4 && document.querySelectorAll('.er-line').length === 3",
+        "a card per table and a line per relationship",
+    );
+    let orders =
+        "document.querySelector('.er-card[href=\"#/model/tables/orders\"] .er-count')?.textContent";
+    browser.wait_for(&format!("{orders}?.startsWith('2rows')"), "two orders");
+
+    // a line, chosen: it says what a selection on either side does
+    browser.click_element(
+        "[...document.querySelectorAll('.er-line')].find(l => l.textContent.includes('product_category'))?.querySelector('.er-hit')",
+    );
+    browser.wait_for(
+        "document.querySelector('.er-detail')?.textContent.includes('Selecting categories filters products.')",
+        "the chosen line's detail",
+    );
+
+    // the counts follow the data, without a reload
+    post(address, "orders", &json!([order("o3")]));
+    browser.wait_for(&format!("{orders}?.startsWith('3rows')"), "three orders");
+    browser.wait_for(
+        "document.querySelector('.er-line.chosen') !== null",
+        "the chosen line still chosen after a refresh",
+    );
+
+    // a card opens its table
+    browser
+        .click_element("document.querySelector('.er-card[href=\"#/model/tables/customers\"] h3')");
+    browser.wait_for(
+        "location.hash === '#/model/tables/customers'",
+        "the customers table",
+    );
+}

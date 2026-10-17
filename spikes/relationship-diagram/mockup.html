@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relationship diagram</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&display=swap" rel="stylesheet">
+<style>
+/* The product's tokens, verbatim from frontend/style.css. */
+:root {
+  --paper: #eef3f2; --surface: #f8fbfa; --ink: #14302f; --ink-soft: #4d6664;
+  --tide: #1f7a73; --kelp: #c9d8d4; --sand: #b9c7c3; --anemone: #d9466f; --problem: #a23b2c;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --text: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --dot: #c3d2ce;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0f2321; --surface: #142c2a; --ink: #e2eeeb; --ink-soft: #9db5b1;
+    --tide: #4fb3a9; --kelp: #2b4441; --sand: #35504c; --anemone: #f07a98; --problem: #f0937f;
+    --dot: #23403c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0f2321; --surface: #142c2a; --ink: #e2eeeb; --ink-soft: #9db5b1;
+  --tide: #4fb3a9; --kelp: #2b4441; --sand: #35504c; --anemone: #f07a98; --problem: #f0937f;
+  --dot: #23403c; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--paper); color: var(--ink);
+  font: 15px/1.45 var(--text); font-variant-numeric: tabular-nums;
+  overflow-x: hidden;
+}
+a { color: var(--tide); }
+:focus-visible { outline: 2px solid var(--tide); outline-offset: 2px; }
+
+/* The strip and the model tabs, as the app draws them. */
+.strip { display: flex; align-items: center; gap: 28px; padding: 12px 24px; border-bottom: 1px solid var(--sand); }
+.brand { font: 700 20px var(--display); letter-spacing: -0.01em; }
+.strip nav { display: flex; gap: 20px; }
+.strip nav a { color: var(--ink-soft); text-decoration: none; padding-bottom: 4px; border-bottom: 2px solid transparent; }
+.strip nav a[aria-current] { color: var(--ink); border-color: var(--tide); }
+.pulse { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 13px; }
+.pulse i { width: 8px; height: 8px; border-radius: 50%; background: var(--tide); }
+
+main { padding: 20px 24px 32px; }
+h1 { font: 700 26px var(--display); letter-spacing: -0.01em; margin: 0 0 12px; }
+.tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--sand); margin-bottom: 16px; }
+.tabs a { color: var(--ink-soft); text-decoration: none; padding: 6px 0; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a[aria-current] { color: var(--ink); border-color: var(--tide); }
+
+/* Above the canvas: what the lines mean, and the mockup's own switches. */
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; margin-bottom: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 20px; color: var(--ink-soft); font-size: 13px; }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend svg { overflow: visible; }
+.switches { margin-left: auto; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; font-size: 13px; color: var(--ink-soft); }
+.seg { display: inline-flex; border: 1px solid var(--sand); border-radius: 4px; overflow: hidden; }
+.seg button {
+  font: inherit; color: var(--ink-soft); background: transparent; border: 0; padding: 4px 10px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--sand); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 -2px 0 var(--tide); }
+
+.direction-note { font-size: 13px; color: var(--ink-soft); margin: 0 0 12px; max-width: 72ch; }
+.direction-note code { font: 12.5px var(--mono); color: var(--ink); }
+
+/* The canvas: Kayak's 20px grid, as dots. */
+.canvas-wrap { position: relative; border: 1px solid var(--sand); background: var(--paper); }
+.canvas {
+  position: relative; overflow: auto; max-height: 76vh;
+  background-image: radial-gradient(circle, var(--dot) 1px, transparent 1.3px);
+  background-size: 20px 20px; background-position: -10px -10px;
+}
+.surface { position: relative; }
+svg.edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+
+/* Cards. Flat, square, a 3px rule on top: the card of the visual language. */
+.card {
+  position: absolute; width: 240px; background: var(--surface); color: var(--ink);
+  border-top: 3px solid var(--tide); text-decoration: none; display: block;
+  transition: opacity 120ms, border-color 120ms;
+}
+.card:hover, .card:focus-visible { border-top-color: var(--anemone); outline: none; }
+.card:focus-visible { box-shadow: 0 0 0 2px var(--tide); }
+.dim .card:not(.lit) { opacity: 0.45; }
+.card header { height: 37px; display: flex; align-items: center; gap: 8px; padding: 0 14px; }
+.card h2 { font: 700 17px var(--display); letter-spacing: -0.01em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mode {
+  margin-left: auto; font-size: 12px; color: var(--ink-soft); border: 1px solid var(--sand);
+  border-radius: 999px; padding: 0 8px; line-height: 18px;
+}
+.stats { height: 50px; display: grid; grid-template-columns: 1fr auto; align-items: end; padding: 0 14px 6px; column-gap: 10px; }
+.count { font: 700 26px/1 var(--display); letter-spacing: -0.01em; }
+.count small { font: 400 12px var(--text); color: var(--ink-soft); letter-spacing: 0; margin-left: 4px; }
+.rate { text-align: right; font-size: 12px; color: var(--ink-soft); line-height: 1.2; }
+.rate svg { display: block; margin-left: auto; overflow: visible; }
+.rate .live { color: var(--tide); font-weight: 700; }
+.cols { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--kelp); }
+.cols li {
+  height: 20px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+  font: 12.5px var(--mono); color: var(--ink);
+}
+.cols li .glyph { width: 12px; flex: none; display: inline-flex; justify-content: center; color: var(--ink-soft); }
+.cols li .note { margin-left: auto; font: 12px var(--text); color: var(--ink-soft); white-space: nowrap; }
+.cols li.more { font: 12px var(--text); color: var(--ink-soft); }
+.cols li.port-lit { background: color-mix(in srgb, var(--tide) 12%, transparent); }
+.cols li.port-sel { background: color-mix(in srgb, var(--anemone) 14%, transparent); }
+.card footer { padding: 6px 14px 8px; font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--kelp); display: flex; flex-wrap: wrap; gap: 2px 12px; }
+
+/* Edges. */
+.edge path.line { fill: none; stroke: var(--ink-soft); stroke-width: 1.5; transition: stroke 120ms, opacity 120ms; }
+.edge .end { fill: none; stroke: var(--ink-soft); stroke-width: 1.5; stroke-linecap: round; }
+.edge .chev { fill: var(--tide); stroke: var(--surface); stroke-width: 2; paint-order: stroke; }
+.edge text { font: 12px var(--text); fill: var(--ink-soft); paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
+.edge path.hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.edge path.flow { fill: none; stroke: var(--tide); stroke-width: 2.5; stroke-dasharray: 2 14; stroke-linecap: round; opacity: 0; }
+.edge.lit path.line, .edge.lit .end { stroke: var(--tide); }
+.edge.lit text { fill: var(--ink); }
+.edge.lit path.flow { opacity: 1; animation: flow 900ms linear infinite; }
+.edge.lit path.flow.back { animation-direction: reverse; }
+.edge.sel path.line, .edge.sel .end { stroke: var(--anemone); stroke-width: 2; }
+.edge.sel .chev { fill: var(--anemone); }
+.edge.sel text { fill: var(--ink); font-weight: 700; }
+.dim .edge:not(.lit):not(.sel) { opacity: 0.25; }
+@keyframes flow { to { stroke-dashoffset: -16; } }
+@media (prefers-reduced-motion: reduce) { .edge.lit path.flow { animation: none; opacity: 0.6; } }
+
+/* Hover tooltip and the pinned detail. */
+.tip {
+  position: absolute; pointer-events: none; z-index: 5; background: var(--surface); color: var(--ink);
+  border-left: 3px solid var(--tide); padding: 8px 12px; font-size: 13px; max-width: 300px;
+  box-shadow: 0 0 0 1px var(--sand); display: none;
+}
+.tip b { font: 700 14px var(--display); display: block; }
+.tip code, .detail code { font: 12px var(--mono); }
+.detail {
+  position: absolute; right: 16px; bottom: 16px; z-index: 4; width: min(340px, calc(100% - 32px));
+  background: var(--surface); border-top: 3px solid var(--anemone); padding: 12px 16px 14px;
+  box-shadow: 0 0 0 1px var(--sand); display: none;
+}
+.detail h3 { font: 700 18px var(--display); margin: 0 0 6px; letter-spacing: -0.01em; display: flex; align-items: center; }
+.detail h3 button { margin-left: auto; font: inherit; font-size: 20px; line-height: 1; color: var(--ink-soft); background: none; border: 0; cursor: pointer; padding: 0 2px; }
+.detail dl { margin: 8px 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.detail dt { color: var(--ink-soft); }
+.detail dd { margin: 0; }
+.detail p { margin: 6px 0 0; font-size: 13.5px; }
+.detail .flowline { display: flex; gap: 8px; align-items: flex-start; }
+.detail .flowline svg { flex: none; margin-top: 3px; }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--paper);
+  padding: 8px 14px; border-radius: 4px; font-size: 13px; opacity: 0; transition: opacity 160ms; pointer-events: none;
+}
+.toast.on { opacity: 1; }
+
+@media (max-width: 640px) {
+  .strip { padding: 10px 16px; gap: 16px; } .strip nav { display: none; }
+  main { padding: 16px; }
+  .switches { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+<header class="strip">
+  <span class="brand">tidepool</span>
+  <nav><a href="#">Dashboards</a><a href="#" aria-current="page">Model</a><a href="#">Config</a><a href="#">Status</a></nav>
+  <span class="pulse"><i></i><span id="epoch">epoch 18,204</span></span>
+</header>
+<main>
+  <h1>Model</h1>
+  <nav class="tabs"><a href="#">Tables</a><a href="#" aria-current="page">Relationships</a><a href="#">Metrics</a></nav>
+
+  <div class="bar">
+    <div class="legend" aria-label="What the lines mean">
+      <span><svg width="26" height="14"><path d="M2 7 H24 M24 1 L12 7 L24 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>many rows</span>
+      <span><svg width="26" height="14"><path d="M2 7 H24 M8 1 V13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>one row</span>
+      <span><svg width="22" height="14" id="lg-one"></svg>selections flow this way</span>
+      <span><svg width="30" height="14" id="lg-both"></svg>both ways</span>
+    </div>
+    <div class="switches">
+      <span>Mockup:</span>
+      <span class="seg" id="ex"><button aria-pressed="true" data-v="retail">retail</button><button aria-pressed="false" data-v="northwind">northwind</button></span>
+      <span class="seg" id="dir"><button aria-pressed="true" data-v="one_to_many">one way</button><button aria-pressed="false" data-v="both">both ways</button></span>
+      <span class="seg" id="theme"><button aria-pressed="false" data-v="light">light</button><button aria-pressed="false" data-v="dark">dark</button></span>
+    </div>
+  </div>
+  <p class="direction-note" id="note"></p>
+
+  <div class="canvas-wrap">
+    <div class="canvas" id="canvas"><div class="surface" id="surface"><svg class="edges" id="edges"></svg></div></div>
+    <div class="tip" id="tip" role="tooltip"></div>
+    <aside class="detail" id="detail" aria-live="polite"></aside>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+// ---- Data: the two example projects, with status numbers made up. ----
+const EXAMPLES = {
+  retail: {
+    direction: "one_to_many",
+    tables: [
+      { name: "orders", mode: "append", columns: ["order_id","customer_id","product_id","status","ordered_at","quantity","amount","note"],
+        eventTime: "ordered_at", retention: "730 days", rows: 1248392, rate: 38, segments: 6, bytes: 96.1e6 },
+      { name: "customers", mode: "upsert", pk: ["customer_id"], columns: ["customer_id","name","region","segment"], rows: 4812, rate: 0, segments: 1, bytes: 0.41e6 },
+      { name: "products", mode: "upsert", pk: ["product_id"], columns: ["product_id","name","category","list_price"], rows: 1206, rate: 0.2, segments: 1, bytes: 0.12e6 },
+      { name: "categories", mode: "upsert", pk: ["category"], columns: ["category","parent","level"], rows: 84, rate: 0, segments: 1, bytes: 0.01e6,
+        hierarchy: { name: "tree", parent: "parent", key: "category" } },
+    ],
+    rels: [
+      { name: "order_customer", from: "orders", to: "customers", fromCols: ["customer_id"], toCols: ["customer_id"] },
+      { name: "order_product", from: "orders", to: "products", fromCols: ["product_id"], toCols: ["product_id"] },
+      { name: "product_category", from: "products", to: "categories", fromCols: ["category"], toCols: ["category"] },
+    ],
+  },
+  northwind: {
+    direction: "both",
+    tables: [
+      { name: "order_lines", mode: "append", columns: ["order_id","line","product_id","ordered_at","quantity","unit_price","discount","amount"],
+        eventTime: "ordered_at", rows: 32371, rate: 12, segments: 3, bytes: 2.9e6 },
+      { name: "orders", mode: "upsert", pk: ["order_id"], columns: ["order_id","customer_id","employee_id","shipper_id","ordered_at","required_at","shipped_at","status","days_to_ship","freight","ship_city","ship_country"],
+        eventTime: "ordered_at", rows: 12480, rate: 4.6, segments: 2, bytes: 1.7e6 },
+      { name: "products", mode: "upsert", pk: ["product_id"], columns: ["product_id","product","supplier_id","category_id","unit","list_price","discontinued"], rows: 77, rate: 0, segments: 1, bytes: 0.02e6 },
+      { name: "customers", mode: "upsert", pk: ["customer_id"], columns: ["customer_id","customer","contact","city","region","country"], rows: 91, rate: 0, segments: 1, bytes: 0.03e6 },
+      { name: "employees", mode: "upsert", pk: ["employee_id"], columns: ["employee_id","employee","title","city","country","reports_to"], rows: 9, rate: 0, segments: 1, bytes: 0.01e6,
+        hierarchy: { name: "org", parent: "reports_to", key: "employee_id" } },
+      { name: "shippers", mode: "upsert", pk: ["shipper_id"], columns: ["shipper_id","shipper"], rows: 3, rate: 0, segments: 1, bytes: 0.001e6 },
+      { name: "categories", mode: "upsert", pk: ["category_id"], columns: ["category_id","category","description"], rows: 8, rate: 0, segments: 1, bytes: 0.004e6 },
+      { name: "suppliers", mode: "upsert", pk: ["supplier_id"], columns: ["supplier_id","supplier","contact","city","country"], rows: 29, rate: 0, segments: 1, bytes: 0.01e6 },
+    ],
+    rels: [
+      { name: "line_order", from: "order_lines", to: "orders", fromCols: ["order_id"], toCols: ["order_id"] },
+      { name: "line_product", from: "order_lines", to: "products", fromCols: ["product_id"], toCols: ["product_id"] },
+      { name: "product_category", from: "products", to: "categories", fromCols: ["category_id"], toCols: ["category_id"] },
+      { name: "product_supplier", from: "products", to: "suppliers", fromCols: ["supplier_id"], toCols: ["supplier_id"] },
+      { name: "order_customer", from: "orders", to: "customers", fromCols: ["customer_id"], toCols: ["customer_id"] },
+      { name: "order_employee", from: "orders", to: "employees", fromCols: ["employee_id"], toCols: ["employee_id"] },
+      { name: "order_shipper", from: "orders", to: "shippers", fromCols: ["shipper_id"], toCols: ["shipper_id"] },
+    ],
+  },
+};
+
+// ---- Geometry: Kayak's graph.rs, ported. Everything sits on a 20px grid. ----
+const GRID = 20, W = 240, GAP = 240, STUB = GRID, CORNER = 8, MARGIN = 40;
+const HEAD = 40, STATS = 50, ROW = 20; // first column row's centre is HEAD + STATS + ROW/2 = 100: on a grid line
+const snap = v => Math.round(v / GRID) * GRID;
+const snapUp = v => Math.ceil(v / GRID) * GRID;
+const near = (a, b) => Math.abs(a - b) < 0.01;
+
+// Which columns a card lists: keys, foreign keys, the event time. The rest are counted.
+function cardRows(t, rels) {
+  const fks = new Map();
+  rels.filter(r => r.from === t.name).forEach(r => r.fromCols.forEach(c => fks.set(c, r.to)));
+  const pk = new Set(t.pk || []);
+  const rows = t.columns.filter(c => pk.has(c) || fks.has(c) || c === t.eventTime)
+    .map(c => ({ col: c, pk: pk.has(c), fk: fks.get(c), time: c === t.eventTime }));
+  if (t.hierarchy) rows.push({ col: t.hierarchy.name, tree: t.hierarchy });
+  return { rows, more: t.columns.length - rows.filter(r => !r.tree).length };
+}
+function cardHeight(n, more, t) { return snapUp(HEAD + STATS + n * ROW + (more ? ROW : 0) + (t.retention ? 48 : 30)); }
+const rowY = i => HEAD + STATS + ROW / 2 + i * ROW;
+
+// A tree layout, laid on its side. Fact tables (nobody's one side) are the roots, in
+// the rightmost column; the tables a card refers to are its children, one column to
+// the left, in the order of the card's own key rows, so their lines never cross.
+// Each subtree takes a band of the page, and a card is centred on its children's
+// band. Relationships are a tree when they filter both ways (the compiler checks);
+// one way, a table two tables refer to is placed under the first, and the other
+// line is routed to it like any other.
+function layout(ex) {
+  const geo = new Map();
+  ex.tables.forEach(t => { const { rows, more } = cardRows(t, ex.rels); geo.set(t.name, { t, rows, more, h: cardHeight(rows.length, more, t) }); });
+  const claimed = new Set();
+  const children = name => {
+    const g = geo.get(name);
+    return ex.rels.filter(r => r.from === name && !claimed.has(r.to))
+      .sort((a, b) => g.rows.findIndex(x => x.col === a.fromCols[0]) - g.rows.findIndex(x => x.col === b.fromCols[0]))
+      .map(r => (claimed.add(r.to), r.to));
+  };
+  const placed = [];
+  function place(name, depth, top) {
+    const g = geo.get(name); g.depth = depth; placed.push(g);
+    const kids = children(name);
+    if (!kids.length) { g.y = snap(top); return g.y + g.h; }
+    let bottom = top;
+    // one child is pushed down far enough for its key row to be level with ours
+    const lone = kids.length === 1 && ex.rels.find(r => r.from === name && r.to === kids[0]);
+    const lead = lone ? Math.max(0, rowY(g.rows.findIndex(x => x.col === lone.fromCols[0])) - rowY(cardRows(geo.get(kids[0]).t, ex.rels).rows.findIndex(x => x.col === lone.toCols[0]))) : 0;
+    kids.forEach((k, i) => { bottom = place(k, depth + 1, i ? bottom + 2 * GRID : top + lead); });
+    // one child: level with it, so the line is straight; several: centred on them
+    const only = kids.length === 1 && ex.rels.find(r => r.from === name && r.to === kids[0]);
+    const want = only
+      ? geo.get(kids[0]).y + rowY(geo.get(kids[0]).rows.findIndex(x => x.col === only.toCols[0])) - rowY(g.rows.findIndex(x => x.col === only.fromCols[0]))
+      : (top + bottom) / 2 - g.h / 2;
+    g.y = snap(Math.max(top, want));
+    return Math.max(bottom, g.y + g.h);
+  }
+  const roots = ex.tables.filter(t => !ex.rels.some(r => r.to === t.name)).map(t => t.name);
+  let top = MARGIN;
+  roots.forEach(r => { claimed.add(r); top = place(r, 0, top) + 3 * GRID; });
+  ex.tables.filter(t => !claimed.has(t.name)).forEach(t => { claimed.add(t.name); top = place(t.name, 0, top) + 3 * GRID; });
+  const maxD = Math.max(...placed.map(g => g.depth));
+  geo.forEach(g => { g.col = maxD - g.depth; g.x = MARGIN + g.col * (W + GAP); });
+  return geo;
+}
+
+// route(): out of one card, along a channel, into the other. Faces here are always
+// side faces, because the ports are the key rows themselves.
+function route(from, to, offset) {
+  const a = [from[0] - STUB, from[1]];        // the many side leaves by its left face
+  const b = [to[0] + STUB, to[1]];            // the one side is reached on its right face
+  const lo = Math.min(a[0], b[0]), hi = Math.max(a[0], b[0]);
+  const x = Math.min(hi, Math.max(lo, snap((a[0] + b[0]) / 2 + offset)));
+  const pts = simplify([from, a, [x, a[1]], [x, b[1]], b, to]);
+  const channel = near(a[1], b[1]) ? null : { x, lo: Math.min(a[1], b[1]), hi: Math.max(a[1], b[1]) };
+  return { pts, channel };
+}
+function simplify(points) {
+  const out = [];
+  for (const p of points) {
+    const l = out[out.length - 1];
+    if (l && near(l[0], p[0]) && near(l[1], p[1])) continue;
+    if (out.length >= 2) {
+      const [a, b] = [out[out.length - 2], out[out.length - 1]];
+      if ((near(a[0], b[0]) && near(b[0], p[0])) || (near(a[1], b[1]) && near(b[1], p[1]))) out.pop();
+    }
+    out.push(p);
+  }
+  return out;
+}
+function roundedPath(pts, radius) {
+  const r2 = v => Math.round(v * 100) / 100, dist = (p, q) => Math.hypot(q[0] - p[0], q[1] - p[1]);
+  const along = (f, t, d) => { const L = dist(f, t); return [f[0] + (t[0] - f[0]) / L * d, f[1] + (t[1] - f[1]) / L * d]; };
+  let d = `M ${r2(pts[0][0])} ${r2(pts[0][1])}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [p, c, n] = [pts[i - 1], pts[i], pts[i + 1]];
+    const r = Math.min(radius, dist(p, c) / 2, dist(c, n) / 2);
+    const e = along(c, p, r), l = along(c, n, r);
+    d += ` L ${r2(e[0])} ${r2(e[1])} Q ${r2(c[0])} ${r2(c[1])} ${r2(l[0])} ${r2(l[1])}`;
+  }
+  const last = pts[pts.length - 1];
+  return d + ` L ${r2(last[0])} ${r2(last[1])}`;
+}
+// channel_offsets(): every channel between the same two columns wants the half-way
+// line; each takes the nearest line to it (0, ±20, ±40 …) that nothing already covers.
+function routeAll(ex, geo) {
+  const ends = ex.rels.map(r => {
+    const f = geo.get(r.from), t = geo.get(r.to);
+    const fy = f.y + rowY(f.rows.findIndex(x => x.col === r.fromCols[0]));
+    const ty = t.y + rowY(t.rows.findIndex(x => x.col === r.toCols[0]));
+    return { r, from: [f.x, fy], to: [t.x + W, ty] };
+  });
+  const placed = [];
+  const order = ends.map((e, i) => [route(e.from, e.to, 0).channel, i]).sort((a, b) => (a[0]?.lo ?? 0) - (b[0]?.lo ?? 0));
+  const routes = [];
+  for (const [, i] of order) {
+    const e = ends[i];
+    let best = route(e.from, e.to, 0);
+    for (const off of [0, 20, -20, 40, -40, 60, -60]) {
+      const cand = route(e.from, e.to, off);
+      const hit = cand.channel && placed.some(s => near(s.x, cand.channel.x) && s.lo < cand.channel.hi - 0.01 && cand.channel.lo < s.hi - 0.01);
+      if (!hit) { best = cand; break; }
+    }
+    if (best.channel) placed.push(best.channel);
+    routes[i] = { ...e, ...best };
+  }
+  return routes;
+}
+
+// ---- Rendering ----
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); parent && parent.appendChild(n); return n; };
+const fmt = n => n.toLocaleString("en-US");
+const bytes = b => b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} kB`;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const state = { ex: "retail", dir: "one_to_many", sel: null, hover: null };
+const hist = {};
+
+function chevron(parent, x, y, angle, cls = "chev") {
+  // a 10px filled chevron centred on (x, y), pointing along `angle` (degrees)
+  return el("path", { class: cls, d: "M -4 -5 L 4 0 L -4 5 L -2 0 Z", transform: `translate(${x} ${y}) rotate(${angle})` }, parent);
+}
+function drawLegend() {
+  for (const [id, both] of [["lg-one", false], ["lg-both", true]]) {
+    const s = document.getElementById(id); s.innerHTML = "";
+    const w = +s.getAttribute("width");
+    el("path", { d: `M 1 7 H ${w - 1}`, stroke: "currentColor", "stroke-width": 1.5, fill: "none" }, s);
+    if (both) { chevron(s, w / 2 - 5, 7, 180).style.fill = "var(--tide)"; chevron(s, w / 2 + 5, 7, 0).style.fill = "var(--tide)"; }
+    else chevron(s, w / 2, 7, 0).style.fill = "var(--tide)";
+  }
+}
+
+function sparkline(points) {
+  const w = 72, h = 18, max = Math.max(1, ...points);
+  const d = points.map((v, i) => `${i ? "L" : "M"} ${(i / (points.length - 1) * w).toFixed(1)} ${(h - v / max * (h - 2) - 1).toFixed(1)}`).join(" ");
+  return `<svg width="${w}" height="${h}" aria-hidden="true"><path d="${d}" fill="none" stroke="var(--tide)" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+}
+function rateHtml(t) {
+  if (!t.rate) return `<span>no rows arriving</span>`;
+  return `${sparkline(hist[t.name])}<span class="live">${t.rate < 1 ? t.rate.toFixed(1) : Math.round(t.rate)} rows/s</span>`;
+}
+
+const KEY = `<svg width="12" height="12" viewBox="0 0 12 12" aria-label="primary key"><circle cx="4" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6.6 6 H11 M9.4 6 V8.2" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>`;
+const LINK = `<svg width="12" height="12" viewBox="0 0 12 12" aria-label="refers to"><circle cx="6" cy="6" r="2.5" fill="currentColor"/></svg>`;
+const CLOCK = `<svg width="12" height="12" viewBox="0 0 12 12" aria-label="event time"><circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 3.5 V6 L7.8 7.2" stroke="currentColor" stroke-width="1.3" fill="none"/></svg>`;
+const TREE = `<svg width="12" height="12" viewBox="0 0 12 12" aria-label="hierarchy"><path d="M3 2 V10 M3 6 H8 M3 10 H8" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="3" cy="2" r="1.4" fill="currentColor"/></svg>`;
+
+function render() {
+  const ex = EXAMPLES[state.ex];
+  const geo = layout(ex), routes = routeAll(ex, geo);
+  const surface = document.getElementById("surface"), svg = document.getElementById("edges");
+  surface.querySelectorAll(".card").forEach(n => n.remove());
+  svg.innerHTML = "";
+  const width = Math.max(...[...geo.values()].map(g => g.x + W)) + MARGIN;
+  const height = Math.max(...[...geo.values()].map(g => g.y + g.h)) + MARGIN;
+  surface.style.width = width + "px"; surface.style.height = height + "px";
+  svg.setAttribute("width", width); svg.setAttribute("height", height);
+
+  for (const g of geo.values()) {
+    const t = g.t, a = document.createElement("a");
+    a.className = "card"; a.href = `#/model/tables/${t.name}`; a.dataset.table = t.name;
+    a.style.left = g.x + "px"; a.style.top = g.y + "px"; a.style.height = g.h + "px";
+    a.setAttribute("aria-label", `${t.name}, ${fmt(t.rows)} rows. Open the table.`);
+    const lis = g.rows.map(r => {
+      if (r.tree) return `<li data-col="${r.col}"><span class="glyph">${TREE}</span>${esc(r.col)}<span class="note">${esc(r.tree.parent)} to ${esc(r.tree.key)}</span></li>`;
+      const glyph = r.pk ? KEY : r.fk ? LINK : CLOCK;
+      const note = r.fk ? r.fk : r.time ? "event time" : "";
+      return `<li data-col="${r.col}"><span class="glyph">${glyph}</span>${esc(r.col)}<span class="note">${esc(note)}</span></li>`;
+    }).join("");
+    const foot = [`${t.segments} segment${t.segments > 1 ? "s" : ""}`, bytes(t.bytes)];
+    if (t.retention) foot.push(`keeps ${t.retention}`);
+    a.innerHTML = `
+      <header><h2>${esc(t.name)}</h2><span class="mode">${t.mode}</span></header>
+      <div class="stats"><div class="count" data-count>${fmt(t.rows)}<small>rows</small></div><div class="rate" data-rate>${rateHtml(t)}</div></div>
+      <ul class="cols">${lis}${g.more ? `<li class="more"><span class="glyph"></span>${g.more} more column${g.more > 1 ? "s" : ""}</li>` : ""}</ul>
+      <footer>${foot.map(f => `<span>${f}</span>`).join("")}</footer>`;
+    a.addEventListener("mouseenter", () => { state.hover = { table: t.name }; paint(); });
+    a.addEventListener("mouseleave", () => { state.hover = null; paint(); });
+    a.addEventListener("focus", () => { state.hover = { table: t.name }; paint(); });
+    a.addEventListener("blur", () => { state.hover = null; paint(); });
+    a.addEventListener("click", e => { e.preventDefault(); toast(`Opens the ${t.name} table (#/model/tables/${t.name})`); });
+    surface.appendChild(a);
+  }
+
+  const both = state.dir === "both";
+  routes.forEach((rt, i) => {
+    const gEl = el("g", { class: "edge", "data-i": i }, svg);
+    const d = roundedPath(rt.pts, CORNER);
+    el("path", { class: "line", d }, gEl);
+    el("path", { class: "flow", d }, gEl);              // runs many → one along d; reversed = one → many
+    gEl.querySelector(".flow").classList.add("back");     // selections flow one → many
+    if (both) { const f2 = el("path", { class: "flow", d }, gEl); }
+    // crow's foot on the many side's face, a bar on the one side's
+    const [fx, fy] = rt.from, [tx, ty] = rt.to;
+    el("path", { class: "end", d: `M ${fx - 14} ${fy} L ${fx} ${fy - 6} M ${fx - 14} ${fy} L ${fx} ${fy + 6} M ${fx - 14} ${fy} L ${fx} ${fy}` }, gEl);
+    el("path", { class: "end", d: `M ${tx + 8} ${ty - 6} L ${tx + 8} ${ty + 6}` }, gEl);
+    // the direction marks: on the channel when there is one, else half way
+    const path = gEl.querySelector(".line"), L = path.getTotalLength();
+    let at = L / 2;
+    if (rt.channel) {
+      // the middle of the vertical run
+      const cumul = []; let acc = 0;
+      for (let k = 1; k < rt.pts.length; k++) { const [p, q] = [rt.pts[k - 1], rt.pts[k]]; const len = Math.hypot(q[0] - p[0], q[1] - p[1]); cumul.push([acc, len, near(p[0], q[0])]); acc += len; }
+      const v = cumul.find(c => c[2] && c[1] > 0); if (v) at = (v[0] + v[1] / 2) * (L / acc);
+    }
+    const p0 = path.getPointAtLength(Math.max(0, at - 1)), p1 = path.getPointAtLength(Math.min(L, at + 1));
+    const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180 / Math.PI;  // pointing many → one
+    const ux = Math.cos(ang * Math.PI / 180), uy = Math.sin(ang * Math.PI / 180);
+    const mid = path.getPointAtLength(at);
+    if (both) { chevron(gEl, mid.x - ux * 7, mid.y - uy * 7, ang + 180); chevron(gEl, mid.x + ux * 7, mid.y + uy * 7, ang); }
+    else chevron(gEl, mid.x, mid.y, ang + 180);
+    // the name, above the stub that leaves the one side
+    const label = el("text", { x: tx + 16, y: ty - 7 }, gEl); label.textContent = rt.r.name;
+    const hit = el("path", { class: "hit", d }, gEl);
+    hit.addEventListener("mouseenter", e => { state.hover = { edge: i }; paint(); showTip(e, rt); });
+    hit.addEventListener("mousemove", e => moveTip(e));
+    hit.addEventListener("mouseleave", () => { state.hover = null; paint(); hideTip(); });
+    hit.addEventListener("click", () => { state.sel = state.sel === i ? null : i; paint(); });
+  });
+  // a name that doesn't fit before the channel goes on the many side's stub instead
+  svg.querySelectorAll(".edge text").forEach((tEl, i) => {
+    const rt = routes[i]; const room = (rt.channel ? rt.channel.x : rt.from[0]) - (rt.to[0] + 16) - 8;
+    if (tEl.getComputedTextLength() > room) {
+      tEl.setAttribute("x", rt.from[0] - 20); tEl.setAttribute("y", rt.from[1] - 7); tEl.setAttribute("text-anchor", "end");
+    }
+  });
+  state.routes = routes; state.geo = geo;
+  document.getElementById("note").innerHTML = both
+    ? `This model filters <strong>both ways</strong> (<code>filter_direction: both</code>): a selection on any table narrows every table it is joined to, in both directions.`
+    : `Selections flow from the one side to the many side (<code>filter_direction: one_to_many</code>, the default): picking a customer filters orders, but picking an order status leaves customers alone.`;
+  paint();
+}
+
+function paint() {
+  const surface = document.getElementById("surface"), svg = document.getElementById("edges");
+  const routes = state.routes || [];
+  const litEdges = new Set(), litTables = new Set();
+  const h = state.hover;
+  if (h && h.table != null) routes.forEach((rt, i) => { if (rt.r.from === h.table || rt.r.to === h.table) { litEdges.add(i); litTables.add(rt.r.from); litTables.add(rt.r.to); } });
+  if (h && h.edge != null) { litEdges.add(h.edge); litTables.add(routes[h.edge].r.from); litTables.add(routes[h.edge].r.to); }
+  if (h && h.table) litTables.add(h.table);
+  surface.classList.toggle("dim", !!h);
+  svg.querySelectorAll(".edge").forEach(g => { const i = +g.dataset.i; g.classList.toggle("lit", litEdges.has(i)); g.classList.toggle("sel", state.sel === i); });
+  surface.querySelectorAll(".card").forEach(c => c.classList.toggle("lit", litTables.has(c.dataset.table)));
+  surface.querySelectorAll(".cols li").forEach(li => li.classList.remove("port-lit", "port-sel"));
+  const mark = (i, cls) => { const r = routes[i].r;
+    surface.querySelector(`.card[data-table="${r.from}"] li[data-col="${r.fromCols[0]}"]`)?.classList.add(cls);
+    surface.querySelector(`.card[data-table="${r.to}"] li[data-col="${r.toCols[0]}"]`)?.classList.add(cls); };
+  litEdges.forEach(i => mark(i, "port-lit"));
+  if (state.sel != null) mark(state.sel, "port-sel");
+  showDetail();
+}
+
+function flowSentences(r) {
+  const one = `Selecting ${r.to} filters ${r.from}.`;
+  const other = state.dir === "both"
+    ? `Selecting ${r.from} also narrows ${r.to} to the rows it refers to.`
+    : `Selecting ${r.from} leaves ${r.to} as it is.`;
+  return [one, other];
+}
+const keyText = r => r.fromCols.map((c, k) => c === r.toCols[k] ? c : `${c} = ${r.toCols[k]}`).join(", ");
+
+const tip = document.getElementById("tip"), wrap = document.querySelector(".canvas-wrap");
+function showTip(e, rt) {
+  const [a, b] = flowSentences(rt.r);
+  tip.innerHTML = `<b>${esc(rt.r.name)}</b>Many <code>${esc(rt.r.from)}</code> rows to one <code>${esc(rt.r.to)}</code> row, on <code>${esc(keyText(rt.r))}</code>.<br>${esc(a)} ${esc(b)}`;
+  tip.style.display = "block"; moveTip(e);
+}
+function moveTip(e) {
+  const box = wrap.getBoundingClientRect();
+  let x = e.clientX - box.left + 14, y = e.clientY - box.top + 14;
+  if (x + tip.offsetWidth > box.width - 8) x = e.clientX - box.left - tip.offsetWidth - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+function showDetail() {
+  const box = document.getElementById("detail");
+  if (state.sel == null) { box.style.display = "none"; return; }
+  const r = state.routes[state.sel].r, [a, b] = flowSentences(r);
+  const both = state.dir === "both";
+  const glyph = (dirs) => `<svg width="22" height="12" aria-hidden="true">${dirs}</svg>`;
+  box.innerHTML = `
+    <h3>${esc(r.name)}<button aria-label="Close" id="close">×</button></h3>
+    <dl>
+      <dt>many</dt><dd><code>${esc(r.from)}.${esc(r.fromCols.join(", "))}</code></dd>
+      <dt>one</dt><dd><code>${esc(r.to)}.${esc(r.toCols.join(", "))}</code></dd>
+    </dl>
+    <p class="flowline">${glyph(`<path d="M1 6 H21" stroke="var(--ink-soft)" stroke-width="1.5"/><path d="M -4 -5 L 4 0 L -4 5 L -2 0 Z" transform="translate(11 6)" fill="var(--anemone)"/>`)}<span>${esc(a)}</span></p>
+    <p class="flowline">${glyph(both ? `<path d="M1 6 H21" stroke="var(--ink-soft)" stroke-width="1.5"/><path d="M -4 -5 L 4 0 L -4 5 L -2 0 Z" transform="translate(11 6) rotate(180)" fill="var(--anemone)"/>` : `<path d="M1 6 H21" stroke="var(--sand)" stroke-width="1.5" stroke-dasharray="3 3"/>`)}<span>${esc(b)}</span></p>
+    <p><a href="#/config">Edit in model.ossie.yaml</a></p>`;
+  box.style.display = "block";
+  document.getElementById("close").onclick = () => { state.sel = null; paint(); };
+}
+
+let toastTimer;
+function toast(msg) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 1800); }
+
+// Live: the numbers tick once a second, as the status poll would make them.
+let epoch = 18204;
+function seed() { for (const ex of Object.values(EXAMPLES)) for (const t of ex.tables) hist[t.name] = Array.from({ length: 40 }, () => Math.max(0, t.rate * (0.6 + Math.random() * 0.8))); }
+function tick() {
+  epoch++; document.getElementById("epoch").textContent = `epoch ${fmt(epoch)}`;
+  for (const t of EXAMPLES[state.ex].tables) {
+    if (!t.rate) continue;
+    const now = Math.max(0, t.rate * (0.6 + Math.random() * 0.8));
+    t.rows += Math.round(now); hist[t.name].push(now); hist[t.name].shift();
+    const card = document.querySelector(`.card[data-table="${t.name}"]`); if (!card) continue;
+    card.querySelector("[data-count]").innerHTML = `${fmt(t.rows)}<small>rows</small>`;
+    card.querySelector("[data-rate]").innerHTML = rateHtml(t);
+  }
+}
+
+function bindSeg(id, fn) {
+  const seg = document.getElementById(id);
+  seg.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return;
+    seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b)); fn(b.dataset.v); });
+}
+bindSeg("ex", v => { state.ex = v; state.sel = null; state.dir = EXAMPLES[v].direction;
+  document.querySelectorAll("#dir button").forEach(x => x.setAttribute("aria-pressed", x.dataset.v === state.dir)); render(); });
+bindSeg("dir", v => { state.dir = v; render(); });
+bindSeg("theme", v => { document.documentElement.dataset.theme = v; });
+document.querySelectorAll("#theme button").forEach(x => x.setAttribute("aria-pressed", x.dataset.v === (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")));
+document.addEventListener("keydown", e => { if (e.key === "Escape") { state.sel = null; paint(); } });
+
+seed(); drawLegend();
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(render);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

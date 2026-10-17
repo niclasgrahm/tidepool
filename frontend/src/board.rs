@@ -341,35 +341,6 @@ pub fn sample_row(columns: &[(String, String)]) -> Value {
     Value::Object(row)
 }
 
-/// Positions of tables in a relationship diagram: tables nothing points at
-/// (facts) on the left, each one side a column right of the many sides
-/// that point at it. Returns (table, column, row).
-#[must_use]
-pub fn layers(tables: &[String], edges: &[(String, String)]) -> Vec<(String, usize, usize)> {
-    let mut column: HashMap<&str, usize> = tables.iter().map(|t| (t.as_str(), 0)).collect();
-    // longest path from a fact; relationships form a DAG, so this settles
-    for _ in 0..tables.len() {
-        for (from, to) in edges {
-            let next = column.get(from.as_str()).copied().unwrap_or(0) + 1;
-            if let Some(c) = column.get_mut(to.as_str())
-                && *c < next
-            {
-                *c = next;
-            }
-        }
-    }
-    let mut rows: HashMap<usize, usize> = HashMap::new();
-    tables
-        .iter()
-        .map(|t| {
-            let c = column.get(t.as_str()).copied().unwrap_or(0);
-            let r = rows.entry(c).or_insert(0);
-            *r += 1;
-            (t.clone(), c, *r - 1)
-        })
-        .collect()
-}
-
 /// A filter row's classes: its state, and for a tree node whether it is
 /// inside a selected branch or holds a selection below it.
 #[must_use]
@@ -600,23 +571,6 @@ mod tests {
             ("amount".into(), "decimal(14,2)".into()),
         ]);
         assert_eq!(row, json!({"id": "id 1", "amount": "12.34"}));
-    }
-
-    #[test]
-    fn facts_sit_left_of_what_they_point_at() {
-        let tables = vec!["orders".to_string(), "customers".into(), "regions".into()];
-        let edges = vec![
-            ("orders".to_string(), "customers".to_string()),
-            ("customers".into(), "regions".into()),
-        ];
-        assert_eq!(
-            layers(&tables, &edges),
-            vec![
-                ("orders".into(), 0, 0),
-                ("customers".into(), 1, 0),
-                ("regions".into(), 2, 0)
-            ]
-        );
     }
 
     #[test]

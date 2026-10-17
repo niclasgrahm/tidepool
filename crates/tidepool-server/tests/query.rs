@@ -427,3 +427,22 @@ async fn a_hierarchy_groups_by_a_level_and_filters_by_subtree() {
         reply.text()
     );
 }
+
+#[tokio::test]
+async fn the_model_says_which_way_selections_flow() {
+    let model = common::call(loaded().await, Method::GET, "/v1/model")
+        .await
+        .json();
+    assert_eq!(model["filter_direction"], "one_to_many");
+    let both = common::state(
+        common::retail_with(
+            "model.ossie.yaml",
+            r#"{"filter_direction": "one_to_many"}"#,
+            r#"{"filter_direction": "both"}"#,
+        ),
+        tidepool_server::Tokens::default(),
+        None,
+    );
+    let model = common::call(both, Method::GET, "/v1/model").await.json();
+    assert_eq!(model["filter_direction"], "both");
+}

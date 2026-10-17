@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use axum::Json;
 use axum::extract::State;
 use tidepool_config::server::Durability;
-use tidepool_model::ir::{FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId};
+use tidepool_model::ir::{
+    Direction, FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId,
+};
 use tidepool_protocol::{
     DatasetInfo, DurabilityStatus, FieldInfo, HierarchyInfo, MetricInfo, ModelInfo,
     RelationshipInfo, StatusInfo, TableStatus,
@@ -92,6 +94,7 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                 from_columns: columns(r.from, &r.from_columns),
                 to: table_name(model, r.to),
                 to_columns: columns(r.to, &r.to_columns),
+                role: r.role.clone(),
             })
             .collect(),
         metrics: model
@@ -140,6 +143,11 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                 }
             })
             .collect(),
+        filter_direction: match model.direction {
+            Direction::OneToMany => "one_to_many",
+            Direction::Both => "both",
+        }
+        .into(),
     }
 }
 

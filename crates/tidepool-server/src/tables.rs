@@ -340,10 +340,13 @@ fn info(snapshot: &Snapshot, table: &Table) -> TableInfo {
                 encoding: format!("{:?}", c.encoding).to_lowercase(),
             })
             .collect(),
+        event_time: table.event_time.map(name_of),
+        retention: table.retention.map(|r| r.to_string()),
         rows: stored.map_or(0, |t| t.live_rows),
         written_total: stored.map_or(0, |t| t.written_total),
         rows_per_second: stored.map_or(0.0, |t| (t.rows_per_second * 10.0).round() / 10.0),
         bytes: stored.map_or(0, |t| t.bytes() as u64),
+        segments: stored.map_or(0, |t| t.segments.len()),
         epoch: snapshot.epoch,
     }
 }

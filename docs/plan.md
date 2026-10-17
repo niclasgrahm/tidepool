@@ -874,7 +874,7 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 
 **Model browser**
 - Tables: columns, types, encodings, row counts, ingest rate, preview of the latest rows.
-- Relationship diagram: auto layout (a small layered layout; elkjs if models outgrow it), read-only.
+- Relationship diagram: a card per table (rows, write rate with a sparkline, segments, memory, retention, and its key, foreign key, event time and hierarchy rows), linked from each key row to the one it refers to. Lines are Kayak's orthogonal routes (grid-snapped channels, moved apart when they would overlap), with a crow's foot on the many side, a bar on the one side, and chevrons for which way selections flow (one, or two for `filter_direction: both`). Laid out as a tree on its side, facts on the right (`frontend/src/diagram.rs`); elkjs if models outgrow it. Read-only: a card opens its table, a line says what selecting either side does.
 - Metric catalog: description, SQL, anchor table, which dashboards use it.
 - Ingest docs per table: endpoint, example `curl` with sample JSON, link to the OpenAPI spec.
 

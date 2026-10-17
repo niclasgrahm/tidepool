@@ -89,6 +89,12 @@ pub struct TableInfo {
     pub mode: String,
     pub primary_key: Vec<String>,
     pub columns: Vec<ColumnInfo>,
+    /// The column that says when a row happened, if the table has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time: Option<String>,
+    /// How long rows are kept, by their event time (`730d`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<String>,
     /// Rows currently stored (not counting deleted ones).
     pub rows: u64,
     /// Rows written since the server started.
@@ -97,6 +103,9 @@ pub struct TableInfo {
     pub rows_per_second: f64,
     /// Approximate memory held by the table's segments.
     pub bytes: u64,
+    /// Segments the table's rows are held in.
+    #[serde(default)]
+    pub segments: usize,
     /// The epoch these numbers are from.
     pub epoch: u64,
 }
@@ -217,6 +226,14 @@ pub struct ModelInfo {
     pub datasets: Vec<DatasetInfo>,
     pub relationships: Vec<RelationshipInfo>,
     pub metrics: Vec<MetricInfo>,
+    /// Which way selections flow along relationships: `one_to_many` (from
+    /// the one side to the many side) or `both`.
+    #[serde(default = "one_to_many")]
+    pub filter_direction: String,
+}
+
+fn one_to_many() -> String {
+    "one_to_many".into()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -268,6 +285,10 @@ pub struct RelationshipInfo {
     /// The one side.
     pub to: String,
     pub to_columns: Vec<String>,
+    /// Tells apart relationships between the same two tables (order date
+    /// vs ship date).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

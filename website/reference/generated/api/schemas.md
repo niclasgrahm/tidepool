@@ -100,6 +100,7 @@ The semantic model as the UI shows it (`GET /v1/model`).
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `datasets` | list of [`DatasetInfo`](#schema-datasetinfo) | **required** |  |
+| `filter_direction` | string | `one_to_many` | Which way selections flow along relationships: `one_to_many` (from the one side to the many side) or `both`. |
 | `metrics` | list of [`MetricInfo`](#schema-metricinfo) | **required** |  |
 | `relationships` | list of [`RelationshipInfo`](#schema-relationshipinfo) | **required** |  |
 
@@ -232,11 +233,14 @@ A table, as listed by `GET /v1/tables`.
 | `bytes` | integer | **required** | Approximate memory held by the table's segments. |
 | `columns` | list of [`ColumnInfo`](#schema-columninfo) | **required** |  |
 | `epoch` | integer | **required** | The epoch these numbers are from. |
+| `event_time` | string |  | The column that says when a row happened, if the table has one. |
 | `mode` | string | **required** | `append` or `upsert`. |
 | `name` | string | **required** |  |
 | `primary_key` | list of string | **required** |  |
+| `retention` | string |  | How long rows are kept, by their event time (`730d`). |
 | `rows` | integer | **required** | Rows currently stored (not counting deleted ones). |
 | `rows_per_second` | number | **required** | Write rate over the last ten seconds. |
+| `segments` | integer | `0` | Segments the table's rows are held in. |
 | `written_total` | integer | **required** | Rows written since the server started. |
 
 
@@ -327,6 +331,7 @@ One problem with a write.
 | `from` | string | **required** | The many side. |
 | `from_columns` | list of string | **required** |  |
 | `name` | string | **required** |  |
+| `role` | string |  | Tells apart relationships between the same two tables (order date vs ship date). |
 | `to` | string | **required** | The one side. |
 | `to_columns` | list of string | **required** |  |
 

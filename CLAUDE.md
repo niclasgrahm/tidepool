@@ -461,8 +461,9 @@ are applied to a `Board`. Rules the dashboard follows:
   reaches them; `echarts.rs` (from the spike: read its README's interop
   pitfalls before changing it) only hands them over. ECharts is vendored in
   `frontend/vendor/` with its licence.
-- Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs` or
-  `textdiff.rs` and
+- Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs`,
+  `textdiff.rs` or `diagram.rs` (the relationship diagram's cards, tree
+  layout and Kayak's orthogonal routing) and
   gets a plain test. The browser path is covered by `just e2e`
   (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
   protocol against the built UI (on a copy of the example: config

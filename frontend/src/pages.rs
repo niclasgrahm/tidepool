@@ -6,8 +6,9 @@ use serde_json::json;
 use tidepool_protocol::{ModelInfo, Preview, StatusInfo, TableInfo};
 
 use crate::api::get_json;
-use crate::board::{bytes, display, layers, sample_row};
+use crate::board::{bytes, display, sample_row};
 use crate::live::Live;
+use crate::relationships::Relationships;
 use crate::route::{Route, Tab};
 
 #[component]
@@ -59,7 +60,7 @@ fn ModelTabs(at: Tab) -> impl IntoView {
 #[component]
 pub fn Model(tab: Tab) -> impl IntoView {
     view! {
-        <main class="page-single">
+        <main class="page-single" class:wide=tab == Tab::Relationships>
             <h1 class="page-title">"Model"</h1>
             <ModelTabs at=tab />
             {match tab {
@@ -174,77 +175,6 @@ pub fn TablePage(name: String) -> impl IntoView {
                 })}
             </Suspense>
         </main>
-    }
-}
-
-const BOX_W: f64 = 180.0;
-const BOX_H: f64 = 44.0;
-const GAP_X: f64 = 230.0;
-const GAP_Y: f64 = 36.0;
-
-#[component]
-fn Relationships() -> impl IntoView {
-    let model = LocalResource::new(|| get_json::<ModelInfo>("/v1/model"));
-    view! {
-        <Suspense fallback=|| view! { <p class="quiet">"Loading…"</p> }>
-            {move || model.get().map(|r| match r {
-                Err(err) => view! { <p class="problem">{err}</p> }.into_any(),
-                Ok(model) => {
-                    let mut tables: Vec<String> = model.datasets.iter().map(|d| d.table.clone()).collect();
-                    for r in &model.relationships {
-                        for t in [&r.from, &r.to] {
-                            if !tables.contains(t) {
-                                tables.push(t.clone());
-                            }
-                        }
-                    }
-                    let edges: Vec<(String, String)> = model.relationships.iter().map(|r| (r.from.clone(), r.to.clone())).collect();
-                    let placed = layers(&tables, &edges);
-                    let at = |name: &str| placed.iter().find(|(t, _, _)| t == name).map_or((0.0, 0.0), |(_, c, r)| {
-                        #[allow(clippy::cast_precision_loss)]
-                        let (c, r) = (*c as f64, *r as f64);
-                        (c * (BOX_W + GAP_X), r * (BOX_H + GAP_Y))
-                    });
-                    #[allow(clippy::cast_precision_loss)]
-                    let width = placed.iter().map(|(_, c, _)| *c).max().unwrap_or(0) as f64 * (BOX_W + GAP_X) + BOX_W + 2.0;
-                    #[allow(clippy::cast_precision_loss)]
-                    let height = placed.iter().map(|(_, _, r)| *r).max().unwrap_or(0) as f64 * (BOX_H + GAP_Y) + BOX_H + 2.0;
-                    view! {
-                        <p class="quiet">"Arrows point from the many side to the one side: selections flow along them, from the one side to the many."</p>
-                        <svg class="diagram" viewBox=format!("-1 -1 {width} {height}") width=width.to_string() role="img"
-                             aria-label="How the tables relate">
-                            <defs>
-                                <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-                                    <path d="M 0 0 L 10 5 L 0 10 z" />
-                                </marker>
-                            </defs>
-                            {model.relationships.iter().map(|r| {
-                                let (fx, fy) = at(&r.from);
-                                let (tx, ty) = at(&r.to);
-                                let label = format!("{} → {}", r.from_columns.join(", "), r.to_columns.join(", "));
-                                view! {
-                                    <g class="edge">
-                                        <line x1=(fx + BOX_W).to_string() y1=(fy + BOX_H / 2.0).to_string()
-                                              x2=tx.to_string() y2=(ty + BOX_H / 2.0).to_string() marker-end="url(#arrow)" />
-                                        <text x=(f64::midpoint(fx + BOX_W, tx)).to_string() y=(f64::midpoint(fy, ty) + BOX_H / 2.0 - 6.0).to_string()
-                                              text-anchor="middle">{label}</text>
-                                    </g>
-                                }
-                            }).collect_view()}
-                            {placed.iter().map(|(t, _, _)| {
-                                let (x, y) = at(t);
-                                view! {
-                                    <g class="node">
-                                        <rect x=x.to_string() y=y.to_string() width=BOX_W.to_string() height=BOX_H.to_string() rx="4" />
-                                        <text x=(x + BOX_W / 2.0).to_string() y=(y + BOX_H / 2.0 + 5.0).to_string() text-anchor="middle">{t.clone()}</text>
-                                    </g>
-                                }
-                            }).collect_view()}
-                        </svg>
-                    }.into_any()
-                }
-            })}
-        </Suspense>
     }
 }
 
