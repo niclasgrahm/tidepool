@@ -9,11 +9,6 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&display=swap" />
     <!-- Hashed outputs go under assets/, which the server caches as immutable
          (see tidepool_server::ui); index.html itself is always revalidated. -->
-    <!-- Apache ECharts 6.1.0 (Apache-2.0, vendor/echarts-LICENSE.txt). The
-         version is in the name: assets/ is cached as immutable. -->
-    <link data-trunk rel="copy-file" href="vendor/echarts-6.1.0.min.js" data-target-path="assets" />
-    <link data-trunk rel="copy-file" href="vendor/echarts-LICENSE.txt" data-target-path="assets" />
-    <script src="/assets/echarts-6.1.0.min.js"></script>
     <link data-trunk rel="css" href="style.css" data-target-path="assets" />
     <link data-trunk rel="rust" data-target-path="assets" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </head>

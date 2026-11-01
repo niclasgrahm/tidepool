@@ -207,7 +207,48 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   flex-direction: column;
 }
-.chart { flex: 1; min-height: 0; }
+.chart { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* charts (plot.rs): SVG coloured from the palette, so they follow the theme.
+   Axis lines in sand, labels in ink-soft, split lines in sand at 40%. */
+.plot-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.plot-area { position: relative; flex: 1; min-height: 0; touch-action: pan-y; }
+.plot-area.interactive { cursor: pointer; }
+.plot-area.brushable { cursor: crosshair; }
+.plot { position: absolute; inset: 0; display: block; overflow: visible; font: 12px var(--text); user-select: none; -webkit-user-select: none; }
+.plot text { fill: var(--ink-soft); }
+.plot .grid line { stroke: var(--sand); stroke-opacity: 0.4; }
+.plot .baseline { stroke: var(--sand); }
+.plot .band { fill: var(--ink); fill-opacity: 0.06; }
+.plot .bar { fill: var(--tide); }
+.plot .bar.m1 { fill: var(--ink-soft); }
+.plot .bar.selected { fill: var(--anemone); }
+.plot .area { fill: var(--tide); fill-opacity: 0.12; }
+.plot .line { fill: none; stroke: var(--tide); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.plot .line.m1 { stroke: var(--ink-soft); }
+.plot .dot { fill: var(--surface); stroke: var(--tide); stroke-width: 1.5; }
+.plot .dot.m1 { stroke: var(--ink-soft); }
+.plot .dot.on { fill: var(--tide); }
+.plot .dot.m1.on { fill: var(--ink-soft); }
+.plot .cursor { stroke: var(--ink-soft); stroke-dasharray: 3 3; }
+.plot .brush { fill: var(--anemone); fill-opacity: 0.15; stroke: var(--anemone); }
+.plot:focus { outline: none; }
+.plot:focus-visible { outline: 2px solid var(--tide); outline-offset: 2px; }
+.legend { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 14px; font-size: 13px; color: var(--ink-soft); }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; flex: 0 0 8px; width: 8px; height: 8px; background: var(--tide); }
+.swatch.m1 { background: var(--ink-soft); }
+.tip {
+  position: absolute; z-index: 2; pointer-events: none;
+  transform: translate(14px, -50%);
+  padding: 6px 9px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--sand); border-left: 3px solid var(--tide);
+  font-size: 13px; white-space: nowrap;
+}
+.tip.flip { transform: translate(calc(-100% - 14px), -50%); }
+.tip strong { display: block; margin-bottom: 2px; }
+.tip-row { display: flex; align-items: center; gap: 6px; }
+.tip-row b { margin-left: auto; padding-left: 12px; }
 /* sized by the card, not the window: a number never breaks across lines */
 .visual.kpi { container-type: inline-size; }
 .kpi-value { margin: auto 0 0; font: 700 clamp(16px, 11cqi, 44px)/1 var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

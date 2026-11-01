@@ -232,7 +232,7 @@ Say this on the page. It helps the reader to make a correct decision.
 - Ossie is **Apache Ossie**. The model file is `model.ossie.yaml`.
 - Field names are `dataset.field`, in backticks: `customers.region`.
 - Headings are lowercase. Body text uses sentence capitalization.
-- Built with Rust, Axum, Tokio, Leptos and Apache ECharts.
+- Built with Rust, Axum, Tokio and Leptos. The charts are our own, drawn as SVG.
 
 ## 10. Page structure
 

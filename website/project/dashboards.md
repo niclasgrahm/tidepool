@@ -57,8 +57,8 @@ that no two visuals overlap and that no visual goes past the last column.
 | type | shows | a click |
 | --- | --- | --- |
 | `kpi` | one metric, large. With `compare`, the change from a second metric in percent. | |
-| `bar` | metrics by one dimension | selects the value (`on_click: select`) |
-| `line` | metrics over a time dimension at a grain | a drag selects a range (`on_brush: select_range`) |
+| `bar` | metrics by one dimension. More than six bars lie down. | selects the value (`on_click: select`). A drag across bars selects all of them. |
+| `line` | metrics over a time dimension at a grain. A second metric gets its own axis. | selects the period. A drag selects a range (`on_brush: select_range`). |
 | `table` | metrics by one or more dimensions, sortable. Without metrics, each combination of its dimensions that the data has. | selects the row (`on_click: select`) |
 | `filter` | the values of one dimension, as a list (a tree for a hierarchy). It has no metrics. | selects the value |
 
@@ -84,6 +84,10 @@ to the visuals that it changes.
 ```
 
 Time grains are `day`, `week`, `month`, `quarter` and `year`.
+
+Ctrl or ⌘ with a click adds to the selection. Charts also work from the
+keyboard: Tab to a chart, move with the arrow keys, and push Enter to
+select. On a line, Shift with the arrow keys makes a range.
 
 Each visual has a CSV button. It downloads the data of the visual under the
 selection.

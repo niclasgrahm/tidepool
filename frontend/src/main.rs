@@ -2,7 +2,7 @@
 //!
 //! Dashboards kept live over the WebSocket (`/v1/ws`), the model browser,
 //! and a status page. Protocol types are `tidepool-protocol`'s own. The
-//! logic that needs no DOM lives in [`board`], [`charts`] and [`route`],
+//! logic that needs no DOM lives in [`board`], [`charts`], [`scale`] and [`route`],
 //! where `cargo test` reaches it.
 
 mod api;
@@ -13,13 +13,14 @@ mod dashboard;
 mod design;
 mod designer;
 mod diagram;
-mod echarts;
 mod highlight;
 mod layout;
 mod live;
 mod pages;
+mod plot;
 mod relationships;
 mod route;
+mod scale;
 mod textdiff;
 
 use leptos::prelude::*;

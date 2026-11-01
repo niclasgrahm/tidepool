@@ -13,17 +13,11 @@ use crate::board::{
     beside, display, export_request, next_period, next_sort, node_class, number, presets,
     range_label, value_class, wanted_window,
 };
-use crate::charts::{bar, line, palette};
-use crate::echarts::{Click, EChart};
+use crate::charts::Data;
 use crate::live::Live;
+use crate::plot::{BarChart, LineChart};
 
 /// Whether the page is in dark mode (charts can't read CSS).
-pub fn dark() -> bool {
-    web_sys::window()
-        .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
-        .is_some_and(|m| m.matches())
-}
-
 /// The part of `dataset.field` people read.
 fn short(field: &str) -> String {
     field.split_once('.').map_or(field, |(_, f)| f).to_string()
@@ -453,9 +447,9 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
             Some(_) => None,
         };
         let content = if info.visual_type == "bar" {
-            bar_chart(live, &info, rows)
+            bar_chart(live, &info, rows, title.clone())
         } else {
-            line_chart(live, &info, rows)
+            line_chart(live, &info, rows, title.clone())
         };
         return view! {
             <article class=class style=place>
@@ -540,41 +534,55 @@ fn kpi(live: Live, info: &VisualInfo, rows: &[Vec<Value>], compare: Option<&Valu
     .into_any()
 }
 
-fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> AnyView {
+fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: String) -> AnyView {
     let field = info.dimensions[0].field.clone();
     let metrics = info.metrics.clone();
+    let data = Memo::new(move |_| rows.with(|rows| Data::new(rows, &metrics)));
     let shown = field.clone();
-    let option = Signal::derive(move || {
-        // the selection colours the bars too
-        let chosen = live.selection.with(|s| {
+    // the selection colours the bars too
+    let selected = Signal::derive(move || {
+        live.selection.with(|s| {
             s.iter()
                 .find(|f| f.field == shown)
                 .and_then(|f| f.values.as_ref())
                 .map(|v| v.iter().map(display).collect::<Vec<_>>())
                 .unwrap_or_default()
-        });
-        rows.with(|rows| bar(rows, &metrics, &chosen, palette(dark())))
+        })
     });
-    let clickable = info.on_click;
-    let on_click = Callback::new(move |click: Click| {
-        if !clickable {
-            return;
-        }
-        let value =
-            rows.with_untracked(|rows| rows.get(click.data_index).and_then(|r| r.first()).cloned());
-        if let Some(value) = value {
-            live.select(&field, &[value], click.additive);
-        }
+    let on_select = info.on_click.then(|| {
+        Callback::new(move |(categories, additive): (Vec<usize>, bool)| {
+            let values: Vec<Value> = rows.with_untracked(|rows| {
+                categories
+                    .iter()
+                    .filter_map(|&i| rows.get(i).and_then(|r| r.first()).cloned())
+                    .collect()
+            });
+            if !values.is_empty() {
+                live.select(&field, &values, additive);
+            }
+        })
     });
-    view! { <div class="chart"><EChart option=option on_click=on_click /></div> }.into_any()
+    view! {
+        <div class="chart">
+            <BarChart data=data selected=selected on_select=on_select label=title />
+        </div>
+    }
+    .into_any()
 }
 
-fn line_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> AnyView {
+fn line_chart(
+    live: Live,
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    title: String,
+) -> AnyView {
     let metrics = info.metrics.clone();
-    let option = Signal::derive(move || rows.with(|rows| line(rows, &metrics, palette(dark()))));
+    let data = Memo::new(move |_| rows.with(|rows| Data::new(rows, &metrics)));
     let dimension = info.dimensions[0].clone();
+    let grain = dimension.grain.clone();
     if !info.on_brush {
-        return view! { <div class="chart"><EChart option=option /></div> }.into_any();
+        return view! { <div class="chart"><LineChart data=data grain=grain label=title /></div> }
+            .into_any();
     }
     // a brushed span of periods selects their range: from the first one's
     // start to the start of the period after the last
@@ -597,7 +605,7 @@ fn line_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> Any
             "to": to.map(|t| format!("{t}T00:00:00Z")),
         }));
     });
-    view! { <div class="chart"><EChart option=option on_brush_x=on_brush /></div> }.into_any()
+    view! { <div class="chart"><LineChart data=data grain=grain on_brush=on_brush label=title /></div> }.into_any()
 }
 
 /// A table: sortable by any column (the server sorts), a row click selects

@@ -25,15 +25,14 @@ use wasm_bindgen::JsCast;
 
 use crate::api::{get_json, post_json};
 use crate::board::display;
-use crate::charts::{bar, line, palette};
+use crate::charts::Data;
 use crate::configui::{SignIn, error_of, sleep};
-use crate::dashboard::dark;
 use crate::design::{
     Reach, TYPES, default_type, fits, retype, set_fields, short, size_of, title, type_label,
     visual_id,
 };
-use crate::echarts::EChart;
 use crate::layout::{cells, depth, free, moved, nudge, place, resized};
+use crate::plot::{BarChart, LineChart};
 use crate::route::Route;
 
 /// The CSS gap between grid cells, in pixels (`.grid`).
@@ -936,20 +935,23 @@ fn Preview(visual: Memo<Option<Visual>>) -> impl IntoView {
     let metrics = Memo::new(move |_| {
         visual.with(|v| v.as_ref().map(|v| v.metrics.clone()).unwrap_or_default())
     });
+    let data = Memo::new(move |_| rows.with(|r| metrics.with(|m| Data::new(r, m))));
+    let grain = Memo::new(move |_| {
+        visual.with(|v| {
+            v.as_ref()
+                .and_then(|v| v.dimensions.first())
+                .and_then(DimensionRef::grain)
+                .map(|g| format!("{g:?}").to_lowercase())
+        })
+    });
     move || {
         if let Some(Err(err)) = result.get() {
             return view! { <p class="problem preview">{format!("Can't show this: {err}")}</p> }
                 .into_any();
         }
         match kind.get() {
-            Some(VisualType::Bar) => {
-                let option = Signal::derive(move || rows.with(|r| metrics.with(|m| bar(r, m, &[], palette(dark())))));
-                view! { <div class="chart preview"><EChart option=option /></div> }.into_any()
-            }
-            Some(VisualType::Line) => {
-                let option = Signal::derive(move || rows.with(|r| metrics.with(|m| line(r, m, palette(dark())))));
-                view! { <div class="chart preview"><EChart option=option /></div> }.into_any()
-            }
+            Some(VisualType::Bar) => view! { <div class="chart preview"><BarChart data=data /></div> }.into_any(),
+            Some(VisualType::Line) => view! { <div class="chart preview"><LineChart data=data grain=grain /></div> }.into_any(),
             Some(VisualType::Kpi) => view! {
                 <p class="kpi-value preview">{move || rows.with(|r| r.first().and_then(|r| r.first()).map(display).unwrap_or_default())}</p>
             }.into_any(),

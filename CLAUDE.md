@@ -486,15 +486,22 @@ a `?token=` from the page URL) and the signals its messages feed; frames
 are applied to a `Board`. Rules the dashboard follows:
 
 - **Nothing that receives clicks is rebuilt per frame.** Each filter and
-  visual reads its own entry through a `Memo`; charts are one `EChart` for
-  the visual's life, fed a derived option signal (re-created, a chart
-  replays its intro and loses the click in flight). State that must outlive
-  a frame (a table's sort) lives in `Live`, not in the rebuilt view.
-- **Options are plain JSON built in `charts.rs`**, where `cargo test`
-  reaches them; `echarts.rs` (from the spike: read its README's interop
-  pitfalls before changing it) only hands them over. ECharts is vendored in
-  `frontend/vendor/` with its licence.
-- Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs`,
+  visual reads its own entry through a `Memo`; a chart is one `BarChart`
+  or `LineChart` for the visual's life, fed a data memo. State that must
+  outlive a frame (a table's sort) lives in `Live`, not in the rebuilt view.
+- **Charts are our own** (no chart library). `scale.rs` (linear and band
+  scales, nice ticks) and `charts.rs` (`BarLayout`, `LineLayout`: where
+  every mark and label goes for a size, `hit`/`nearest` for which category
+  a position means, `span` for a brush, `blend` for the frames between two
+  layouts) have no DOM and get plain tests. `plot.rs` draws them as SVG,
+  coloured only by classes in `style.css` (so the theme applies), and
+  handles pointer events once on the chart's box, turning positions into
+  categories through the layout: the marks carry no handlers, so a frame
+  may rebuild them mid-click. A click or a drag selects (a drag across
+  bars chooses several; across a line, a range), and the keyboard does the
+  same (arrows, Shift to extend, Enter; `aria-activedescendant` names the
+  place). Text is measured with a canvas (`plot::measure`).
+- Logic without a DOM goes in `board.rs`, `charts.rs`, `scale.rs`, `route.rs`,
   `textdiff.rs`, `highlight.rs` (the config editor's YAML colours, drawn
   by a `<pre>` behind a transparent textarea), `layout.rs` (the editor's grid: snapping, moving,
   resizing, never overlapping), `diagram.rs` (the relationship diagram's
@@ -510,7 +517,7 @@ are applied to a `Board`. Rules the dashboard follows:
   (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
   protocol against the built UI (on a copy of the example: config
   changes are written back), clicking a bar, watching a live update,
-  going back, adding a table in the config editor, and making a dashboard
+  going back, brushing the trend, dragging across bars, choosing with the keys, adding a table in the config editor, and making a dashboard
   in the dashboard editor (dragging and resizing with real mouse events). It needs Chrome, so it isn't in `just ci`; run it after UI
   changes.
 

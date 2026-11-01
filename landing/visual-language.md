@@ -143,7 +143,8 @@ Very little:
 
 - A value that changed with the last epoch flashes: a 30% coral background
   that fades over 1.2 s. Off under `prefers-reduced-motion`.
-- ECharts animates a bar to its new length.
+- A bar moves to its new length, and a point to its new value, over 300 ms
+  (at once under `prefers-reduced-motion`).
 - No hover lifts, no parallax, no entrance animations.
 
 The motion that exists is data that changed.
