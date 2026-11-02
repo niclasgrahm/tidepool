@@ -7,6 +7,7 @@ use tidepool_config::dashboard::{
     DashboardFile, FilterWidget, Visual as VisualSpec, VisualType, WindowUnit,
 };
 use tidepool_config::diag::{Diagnostic, suggest};
+use tidepool_config::format::NumberFormat;
 use tidepool_config::source::YamlPath;
 
 use super::metrics::Metrics;
@@ -240,7 +241,15 @@ fn visual(
         (None, false)
     };
 
-    let ok = metrics_ok && dimensions_ok && shape_ok && combinations_ok && reach_ok && sort_ok;
+    let (formats, formats_ok) = visual_formats(cx, &site, spec, metrics);
+
+    let ok = metrics_ok
+        && dimensions_ok
+        && shape_ok
+        && combinations_ok
+        && reach_ok
+        && sort_ok
+        && formats_ok;
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -251,8 +260,55 @@ fn visual(
         limit: spec.limit,
         on_click: spec.on_click.is_some(),
         on_brush: spec.on_brush.is_some(),
+        formats,
         at: spec.at,
     })
+}
+
+/// The visual's formats: each for a metric it shows, each one that reads.
+/// A metric that didn't resolve is that metric's error, not this one's.
+fn visual_formats(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    metrics: &Metrics,
+) -> (Vec<(MetricId, String)>, bool) {
+    let shown: Vec<&String> = spec.metrics.iter().chain(spec.compare.iter()).collect();
+    let mut ok = true;
+    let mut formats = Vec::new();
+    for (name, format) in &spec.format {
+        let at = site.path.key("format").key(name.as_str());
+        if !shown.contains(&name) {
+            ok = false;
+            let help = if shown.is_empty() {
+                "this visual shows no metrics, so it has nothing to format".to_string()
+            } else {
+                suggest("its metrics", name, shown.iter().map(|m| m.as_str()))
+            };
+            cx.push(
+                Diagnostic::error(format!(
+                    "{} formats `{name}`, which it doesn't show",
+                    site.what
+                ))
+                .at_key(site.file, at)
+                .help(help),
+            );
+            continue;
+        }
+        if let Err(problem) = format.parse::<NumberFormat>() {
+            ok = false;
+            cx.push(
+                Diagnostic::error(format!("{}: format `{format}`: {problem}", site.what))
+                    .at(site.file, at)
+                    .help(tidepool_config::format::HELP),
+            );
+            continue;
+        }
+        if let Some(id) = metrics.by_name.get(name) {
+            formats.push((*id, format.clone()));
+        }
+    }
+    (formats, ok)
 }
 
 /// The visual's metrics and comparison metric, resolved.

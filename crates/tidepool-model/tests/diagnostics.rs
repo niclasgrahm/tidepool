@@ -296,6 +296,14 @@ case!(
 // --- metrics -------------------------------------------------------------------
 
 case!(
+    metric_format_unknown_word,
+    [Replace(
+        "model.ossie.yaml",
+        "data: '{\"table\": \"orders\"}'",
+        "data: '{\"table\": \"orders\", \"format\": \"int compakt\"}'"
+    )]
+);
+case!(
     metric_without_aggregate,
     [Replace(
         "model.ossie.yaml",
@@ -449,6 +457,22 @@ case!(
 
 // --- dashboards ------------------------------------------------------------------
 
+case!(
+    dashboard_format_for_a_metric_not_shown,
+    [Replace(
+        "dashboards/sales.yaml",
+        "format: { revenue: compact }",
+        "format: { revenu: compact }"
+    )]
+);
+case!(
+    dashboard_format_unknown_word,
+    [Replace(
+        "dashboards/sales.yaml",
+        "format: { revenue: compact }",
+        "format: { revenue: compact millions }"
+    )]
+);
 case!(
     dashboard_unknown_metric,
     [Replace(

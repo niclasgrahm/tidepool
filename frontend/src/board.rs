@@ -4,10 +4,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
+use tidepool_config::format::{NumberFormat, Style};
 use tidepool_protocol::live::{
     FilterFrame, RelativeUnit, RelativeWindow, SelectedField, ServerMessage, TreeNode, ValueState,
-    VisualFrame,
+    VisualFrame, VisualInfo,
 };
+
+use crate::calendar::{civil_from_days, days_from_civil};
 
 /// The open dashboard's latest content.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -125,29 +128,6 @@ pub fn socket_url(protocol: &str, host: &str, search: &str) -> String {
         Some(token) => format!("{scheme}://{host}/v1/ws?{token}"),
         None => format!("{scheme}://{host}/v1/ws"),
     }
-}
-
-/// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 /// The start of the period after the one starting at `date` (`YYYY-MM-DD`):
@@ -365,23 +345,104 @@ pub fn node_class(node: &TreeNode) -> String {
     value_class(node.state, node.inside, node.holds)
 }
 
-/// A filter's measure as it reads beside a value: by the metric's
-/// display hint (`percent` is a fraction), or as any value.
+/// A metric's value as it reads on screen, by its format (see
+/// [`tidepool_config::format`]): `compact` reads 167,791,795.92 as 167.8M.
+/// Without a format, or one that doesn't read, as any value. The value
+/// itself is never changed, only shown.
 #[must_use]
-pub fn measured(value: &Value, format: Option<&str>) -> String {
-    match (format, number(value)) {
-        (Some("percent"), Some(n)) => format!("{:.1}%", n * 100.0),
-        (Some(f), Some(n)) if f.starts_with("currency:") => {
-            format!(
-                "{} {}",
-                &f["currency:".len()..],
-                grouped(&format!("{n:.2}"))
-            )
+pub fn formatted(value: &Value, format: Option<&str>) -> String {
+    let (Some(format), Some(n)) = (
+        format.and_then(|f| f.parse::<NumberFormat>().ok()),
+        number(value),
+    ) else {
+        return display(value);
+    };
+    let (n, unit) = match format.style {
+        Style::Percent => (n * 100.0, "%"),
+        _ => (n, ""),
+    };
+    let places = |default: usize| format.decimals.map_or(default, usize::from);
+    let digits = if format.compact && n.abs() >= 1000.0 {
+        short(n, places(1))
+    } else {
+        match format.style {
+            Style::Int => fixed(n, places(0)),
+            Style::Percent => fixed(n, places(1)),
+            Style::Decimal | Style::Currency(_) => fixed(n, places(2)),
+            // as it comes, unless the format says how many places
+            Style::Plain => match format.decimals {
+                Some(d) => fixed(n, d.into()),
+                None => display(value),
+            },
         }
-        (_, Some(n)) if matches!(value, Value::Number(_)) && n.fract() != 0.0 => {
-            grouped(&format!("{n:.2}"))
+    };
+    match format.style {
+        Style::Currency(code) => {
+            let (sign, digits) = digits
+                .strip_prefix('-')
+                .map_or(("", digits.as_str()), |d| ("-", d));
+            match symbol(&code) {
+                Some(symbol) => format!("{sign}{symbol}{digits}"),
+                None => format!("{sign}{code} {digits}"),
+            }
         }
-        _ => display(value),
+        _ => format!("{digits}{unit}"),
+    }
+}
+
+/// The few currency signs nobody misreads; other currencies by their code.
+fn symbol(code: &str) -> Option<&'static str> {
+    match code {
+        "EUR" => Some("€"),
+        "USD" => Some("$"),
+        "GBP" => Some("£"),
+        "JPY" => Some("¥"),
+        _ => None,
+    }
+}
+
+/// `n` with `places` decimals, digits grouped; never "-0".
+fn fixed(n: f64, places: usize) -> String {
+    let text = format!("{:.places$}", half_up(n, places));
+    let zero = text
+        .trim_start_matches('-')
+        .chars()
+        .all(|c| matches!(c, '0' | '.'));
+    grouped(if zero {
+        text.trim_start_matches('-')
+    } else {
+        &text
+    })
+}
+
+/// `n` rounded to `places` decimals, halves away from zero (as people
+/// round: 2.5 is 3), where `{:.N}` alone would round them to even.
+fn half_up(n: f64, places: usize) -> f64 {
+    let scale = 10f64.powi(i32::try_from(places).unwrap_or(0));
+    let rounded = (n * scale).round() / scale;
+    if rounded.is_finite() { rounded } else { n }
+}
+
+/// `n` (a thousand or more) in thousands, millions, billions or trillions,
+/// with `places` decimals: 167.8M. A value that rounds up to the next unit
+/// reads in it (999,960 is 1.0M, not 1000.0k).
+fn short(n: f64, places: usize) -> String {
+    const UNITS: [(f64, &str); 4] = [(1e3, "k"), (1e6, "M"), (1e9, "B"), (1e12, "T")];
+    let mut unit = UNITS
+        .iter()
+        .rposition(|(size, _)| n.abs() >= *size)
+        .unwrap_or(0);
+    loop {
+        let (size, suffix) = UNITS[unit];
+        let text = format!("{:.places$}", half_up(n / size, places));
+        let rounded_up = text
+            .trim_start_matches('-')
+            .parse::<f64>()
+            .is_ok_and(|v| v >= 1000.0);
+        if !rounded_up || unit + 1 == UNITS.len() {
+            return format!("{}{suffix}", grouped(&text));
+        }
+        unit += 1;
     }
 }
 
@@ -395,7 +456,7 @@ pub fn beside(
     format: Option<&str>,
 ) -> String {
     if measured_by {
-        return measured(measure.unwrap_or(&Value::Null), format);
+        return formatted(measure.unwrap_or(&Value::Null), format);
     }
     if rows > 0 {
         display(&Value::from(rows))
@@ -420,26 +481,148 @@ pub fn chip_label(selected: &SelectedField, frame: Option<&FilterFrame>) -> Stri
 }
 
 /// The messages sent and not answered yet, oldest first: whether each
-/// changes the selection. The server answers each with a `done`, in order,
-/// after everything it caused.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InFlight(VecDeque<bool>);
+/// changes the selection, and when it went out. The server answers each
+/// with a `done`, in order, after everything it caused.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InFlight {
+    queue: VecDeque<(bool, f64)>,
+    /// How long the last selection took to be answered.
+    answered: Option<f64>,
+}
 
 impl InFlight {
-    /// A message of type `kind` went out.
-    pub fn sent(&mut self, kind: &str) {
-        self.0.push_back(reselects(kind));
+    /// A message of type `kind` went out at `at` (milliseconds).
+    pub fn sent(&mut self, kind: &str, at: f64) {
+        self.queue.push_back((reselects(kind), at));
     }
 
-    /// The oldest one is answered.
-    pub fn done(&mut self) {
-        self.0.pop_front();
+    /// The oldest one is answered at `at`: how long it took, when it was a
+    /// selection.
+    pub fn done(&mut self, at: f64) -> Option<f64> {
+        let (reselected, sent) = self.queue.pop_front()?;
+        let took = reselected.then(|| (at - sent).max(0.0));
+        if took.is_some() {
+            self.answered = took;
+        }
+        took
+    }
+
+    /// How long the last selection took to be answered (what the context
+    /// bar shows as "answered in").
+    pub fn answered(&self) -> Option<f64> {
+        self.answered
+    }
+
+    /// The connection dropped: nothing is waiting any more.
+    pub fn reset(&mut self) {
+        self.queue.clear();
     }
 
     /// A selection is under way: what the dashboard shows is about to
     /// change.
     pub fn busy(&self) -> bool {
-        self.0.contains(&true)
+        self.queue.iter().any(|(reselects, _)| *reselects)
+    }
+}
+
+/// A duration in milliseconds, compactly: "3.1 ms", "48 ms", "1.20 s".
+#[must_use]
+pub fn millis(ms: f64) -> String {
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.2} s", ms / 1000.0)
+    }
+}
+
+/// The line beside a filter's name: how many values and how many are
+/// selected, and the measure shown beside each. "1 of 5 · revenue",
+/// "12 values".
+#[must_use]
+pub fn filter_meta(
+    total: Option<usize>,
+    selected: usize,
+    measure: Option<&str>,
+    tree: bool,
+) -> String {
+    let count = match (total, selected) {
+        (_, n) if n > 0 && tree => format!("{n} selected"),
+        (Some(total), n) if n > 0 => format!("{n} of {total}"),
+        (_, n) if n > 0 => format!("{n} selected"),
+        (Some(1), _) if !tree => "1 value".into(),
+        (Some(total), _) if !tree => format!("{total} values"),
+        _ => "tree".into(),
+    };
+    match measure {
+        Some(m) => format!("{count} · {m}"),
+        None => count,
+    }
+}
+
+/// How a visual is set up, as the tags in its header: "grain: day",
+/// `on_click: select`, `on_brush: select_range`.
+#[must_use]
+pub fn visual_tags(info: &VisualInfo) -> Vec<String> {
+    let mut tags: Vec<String> = info
+        .dimensions
+        .iter()
+        .filter_map(|d| d.grain.as_ref().map(|g| format!("grain: {g}")))
+        .collect();
+    if info.on_click {
+        tags.push("on_click: select".into());
+    }
+    if info.on_brush {
+        tags.push("on_brush: select_range".into());
+    }
+    tags
+}
+
+/// A bar's length in percent of the longest, for meters beside values: 0
+/// for what isn't a number or a largest that isn't positive.
+#[must_use]
+pub fn share(value: Option<&Value>, largest: f64) -> f64 {
+    match value.and_then(number) {
+        Some(n) if largest > 0.0 && n > 0.0 => (n / largest * 100.0).min(100.0),
+        _ => 0.0,
+    }
+}
+
+/// What the server holds, for the status bar: "2.42M rows · 148 segments
+/// · 6 tables".
+#[must_use]
+pub fn data_summary(tables: &[tidepool_protocol::TableStatus]) -> String {
+    let rows: u64 = tables.iter().map(|t| t.rows).sum();
+    let segments: usize = tables.iter().map(|t| t.segments).sum();
+    #[allow(clippy::cast_precision_loss)] // a display figure
+    let rows = compact(rows as f64);
+    let plural = |n: usize, one: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {one}s")
+        }
+    };
+    format!(
+        "{rows} rows · {} · {}",
+        plural(segments, "segment"),
+        plural(tables.len(), "table")
+    )
+}
+
+/// A count compactly, for the status bar: "950", "12.4k", "2.42M".
+#[must_use]
+pub fn compact(n: f64) -> String {
+    let n = n.max(0.0);
+    if n < 1000.0 {
+        format!("{n:.0}")
+    } else if n < 1_000_000.0 {
+        format!("{:.1}k", n / 1000.0)
+    } else if n < 1_000_000_000.0 {
+        format!("{:.2}M", n / 1_000_000.0)
+    } else {
+        format!("{:.2}G", n / 1_000_000_000.0)
     }
 }
 
@@ -658,6 +841,7 @@ mod tests {
             on_click: true,
             on_brush: false,
             widget: None,
+            formats: std::collections::BTreeMap::new(),
             at: GridAt {
                 x: 0,
                 y: 0,
@@ -755,14 +939,51 @@ mod tests {
 
     #[test]
     fn measures_read_by_their_metrics_hint() {
-        assert_eq!(measured(&json!(0.8234), Some("percent")), "82.3%");
+        assert_eq!(formatted(&json!(0.8234), Some("percent")), "82.3%");
         assert_eq!(
-            measured(&json!("1234.5"), Some("currency:EUR")),
-            "EUR 1,234.50"
+            formatted(&json!("1234.5"), Some("currency:EUR")),
+            "€1,234.50"
         );
-        assert_eq!(measured(&json!(7.333_333), None), "7.33");
-        assert_eq!(measured(&json!("10.00"), None), "10.00");
-        assert_eq!(measured(&json!(null), Some("percent")), "–");
+        assert_eq!(formatted(&json!(7.333_333), None), "7.33");
+        assert_eq!(formatted(&json!("10.00"), None), "10.00");
+        assert_eq!(formatted(&json!(null), Some("percent")), "–");
+    }
+
+    #[test]
+    fn compact_makes_a_large_total_short() {
+        let f = |value: Value, format: &str| formatted(&value, Some(format));
+        // the KPI that moves all the time
+        assert_eq!(f(json!("167791795.92"), "compact"), "167.8M");
+        assert_eq!(f(json!("167791795.92"), "currency:EUR compact"), "€167.8M");
+        assert_eq!(f(json!(167_791_795.92), "compact decimals:2"), "167.79M");
+        assert_eq!(f(json!(1234), "compact"), "1.2k");
+        assert_eq!(f(json!(-2_500_000), "compact decimals:0"), "-3M");
+        assert_eq!(f(json!(4.2e12), "compact"), "4.2T");
+        assert_eq!(f(json!(5.0e15), "compact"), "5,000.0T");
+        // rounding up into the next unit reads in it
+        assert_eq!(f(json!(999_960), "compact"), "1.0M");
+        assert_eq!(f(json!(999_940), "compact"), "999.9k");
+        // under a thousand there is nothing to shorten: the style decides
+        assert_eq!(f(json!("950.37"), "compact"), "950.37");
+        assert_eq!(f(json!(950.37), "int compact"), "950");
+        assert_eq!(f(json!("10.00"), "compact"), "10.00");
+        assert_eq!(f(json!(0.25), "percent compact"), "25.0%");
+    }
+
+    #[test]
+    fn styles_and_decimals() {
+        let f = |value: Value, format: &str| formatted(&value, Some(format));
+        assert_eq!(f(json!("1234.567"), "int"), "1,235");
+        assert_eq!(f(json!(3), "decimal"), "3.00");
+        assert_eq!(f(json!("1234.5"), "decimals:0"), "1,235");
+        assert_eq!(f(json!(0.123_45), "percent decimals:2"), "12.35%");
+        assert_eq!(f(json!(-0.001), "decimal decimals:1"), "0.0");
+        assert_eq!(f(json!("12"), "currency:SEK decimals:0"), "SEK 12");
+        assert_eq!(f(json!(-5), "currency:USD"), "-$5.00");
+        assert_eq!(f(json!("-1234"), "currency:SEK"), "-SEK 1,234.00");
+        // not a number, or a format that doesn't read: as it comes
+        assert_eq!(f(json!("north"), "compact"), "north");
+        assert_eq!(f(json!("1234567"), "compakt"), "1,234,567");
     }
 
     #[test]
@@ -802,25 +1023,105 @@ mod tests {
     #[test]
     fn a_selection_is_under_way_until_its_done_arrives() {
         let mut flight = InFlight::default();
-        flight.sent("hello");
-        flight.sent("open_dashboard");
+        flight.sent("hello", 0.0);
+        flight.sent("open_dashboard", 1.0);
         assert!(!flight.busy(), "nothing selected yet");
-        flight.sent("select");
-        flight.sent("filter_window");
+        flight.sent("select", 10.0);
+        flight.sent("filter_window", 11.0);
         assert!(flight.busy());
-        flight.done(); // hello
-        flight.done(); // open_dashboard
+        assert_eq!(flight.done(12.0), None, "hello isn't a selection");
+        assert_eq!(flight.done(13.0), None, "nor is open_dashboard");
         assert!(flight.busy(), "the select isn't answered yet");
-        flight.done(); // select
+        assert_eq!(flight.done(14.5), Some(4.5), "the select took 4.5 ms");
         assert!(!flight.busy(), "only a list page is left");
-        flight.done(); // filter_window
-        flight.sent("back");
-        flight.sent("forward");
-        flight.done();
+        assert_eq!(flight.done(15.0), None);
+        flight.sent("back", 20.0);
+        flight.sent("forward", 21.0);
+        flight.done(22.0);
         assert!(flight.busy(), "forward isn't answered yet");
-        flight.done();
+        assert_eq!(flight.done(30.0), Some(9.0));
         assert!(!flight.busy());
-        flight.done(); // one too many does no harm
-        assert_eq!(flight, InFlight::default());
+        assert_eq!(flight.done(31.0), None, "one too many does no harm");
+        assert_eq!(
+            flight.answered(),
+            Some(9.0),
+            "the last selection's time is kept"
+        );
+        flight.reset();
+        assert!(!flight.busy());
+    }
+
+    #[test]
+    fn durations_and_counts_read_compactly() {
+        assert_eq!(millis(3.06), "3.1 ms");
+        assert_eq!(millis(48.4), "48 ms");
+        assert_eq!(millis(1204.0), "1.20 s");
+        assert_eq!(compact(950.0), "950");
+        assert_eq!(compact(12_400.0), "12.4k");
+        assert_eq!(compact(2_418_330.0), "2.42M");
+        assert_eq!(compact(3.5e9), "3.50G");
+        assert_eq!(compact(-1.0), "0");
+    }
+
+    #[test]
+    fn a_filter_says_how_many_and_what_it_measures() {
+        assert_eq!(
+            filter_meta(Some(5), 1, Some("revenue"), false),
+            "1 of 5 · revenue"
+        );
+        assert_eq!(filter_meta(Some(12), 0, None, false), "12 values");
+        assert_eq!(filter_meta(Some(1), 0, None, false), "1 value");
+        assert_eq!(
+            filter_meta(None, 2, None, false),
+            "2 selected",
+            "before its first frame"
+        );
+        assert_eq!(filter_meta(Some(14), 0, None, true), "tree");
+        assert_eq!(
+            filter_meta(Some(14), 2, Some("revenue"), true),
+            "2 selected · revenue"
+        );
+    }
+
+    #[test]
+    fn a_visual_is_tagged_with_its_setup() {
+        let info: VisualInfo = match serde_json::from_value(json!({
+            "id": "trend", "type": "line",
+            "dimensions": [{"field": "orders.ordered_at", "grain": "day"}],
+            "metrics": ["revenue"], "on_click": false, "on_brush": true,
+            "at": {"x": 0, "y": 0, "w": 6, "h": 4},
+        })) {
+            Ok(info) => info,
+            Err(e) => panic!("a visual: {e}"),
+        };
+        assert_eq!(visual_tags(&info), ["grain: day", "on_brush: select_range"]);
+    }
+
+    #[test]
+    fn meters_are_shares_of_the_largest() {
+        assert!((share(Some(&json!(50)), 200.0) - 25.0).abs() < 1e-9);
+        assert!(
+            (share(Some(&json!("412.30")), 412.3) - 100.0).abs() < 1e-9,
+            "decimals are strings"
+        );
+        assert!(share(Some(&json!(-3)), 10.0).abs() < 1e-9);
+        assert!(share(None, 10.0).abs() < 1e-9);
+        assert!(share(Some(&json!(3)), 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_status_bar_sums_the_tables() {
+        let table = |rows, segments| tidepool_protocol::TableStatus {
+            name: "t".into(),
+            rows,
+            bytes: 0,
+            segments,
+            rows_per_second: 0.0,
+        };
+        assert_eq!(
+            data_summary(&[table(2_400_000, 140), table(18_330, 8)]),
+            "2.42M rows · 148 segments · 2 tables"
+        );
+        assert_eq!(data_summary(&[table(5, 1)]), "5 rows · 1 segment · 1 table");
     }
 }

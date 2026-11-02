@@ -771,6 +771,7 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                             .map(|f| name(&serde_json::to_value(f.widget).unwrap_or_default()))
                     })
                     .flatten(),
+                formats: formats(model, v),
                 at: GridAt {
                     x: v.at.x,
                     y: v.at.y,
@@ -783,6 +784,25 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
 }
 
 /// A visual as a one-shot query request.
+/// How each of a visual's metrics reads: its format there, else the
+/// metric's own.
+fn formats(
+    model: &Model,
+    visual: &tidepool_model::ir::Visual,
+) -> std::collections::BTreeMap<String, String> {
+    visual
+        .metrics
+        .iter()
+        .chain(visual.compare.iter())
+        .filter_map(|id| {
+            let metric = model.metric(*id)?;
+            let own = visual.formats.iter().find(|(m, _)| m == id).map(|(_, f)| f);
+            let format = own.or(metric.format.as_ref())?;
+            Some((metric.name.clone(), format.clone()))
+        })
+        .collect()
+}
+
 fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
     let metric_name = |id| {
         model

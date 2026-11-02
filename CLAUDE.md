@@ -474,6 +474,19 @@ output under `assets/` (`data-target-path` in `index.html`) so the server's
 immutable-cache rule applies to them. It depends on `tidepool-protocol`
 directly: request and response types are shared, never generated or copied.
 
+The look is Radix Themes' (slate, teal accent, ruby for the selection;
+the system's fonts, fetched from nowhere): `style.css` defines Radix's colour steps once,
+light and dark, and the rules use only its named tokens (`--ink`, `--line`,
+`--tide`, `--anemone`…). Every page has the top bar (sections, the ⌘K
+palette, the pulse) and a status bar (`/v1/status` every 5 s); a dashboard
+adds the context bar (where you are, the selection, "answered in", timed by
+`InFlight`).
+
+Every metric value on screen goes through `board::formatted` with the
+format that applies to it (`VisualInfo::formats`, `FilterInfo::measure_format`):
+the grammar is `tidepool_config::format` (one parser, for the compiler and the
+UI), and a format is display only, never applied to what's queried or exported.
+
 Pages (hash routes, `route.rs`): the dashboard list, dashboards, the
 dashboard editor (`designer.rs`), the model browser (tables with an ingest `curl`, a relationship diagram, the metric
 catalog; from `GET /v1/model`), the config pages (`configui.rs`: the files
@@ -502,6 +515,10 @@ are applied to a `Board`. Rules the dashboard follows:
   same (arrows, Shift to extend, Enter; `aria-activedescendant` names the
   place). Text is measured with a canvas (`plot::measure`).
 - Logic without a DOM goes in `board.rs`, `charts.rs`, `scale.rs`, `route.rs`,
+  `calendar.rs` (the date range picker's days, months, typed bounds and
+  half-open ranges; `datepick.rs` draws it, no native date inputs),
+  `commands.rs` (what the ⌘K palette offers and how a query ranks it;
+  `palette.rs` draws it),
   `textdiff.rs`, `highlight.rs` (the config editor's YAML colours, drawn
   by a `<pre>` behind a transparent textarea), `layout.rs` (the editor's grid: snapping, moving,
   resizing, never overlapping), `diagram.rs` (the relationship diagram's

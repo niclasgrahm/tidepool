@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `kpi_revenue` formats `revenu`, which it doesn't show
+  --> dashboards/sales.yaml:15:15
+   |
+15 |     format: { revenu: compact }         # 167.8M: a total that moves all the time, made readable
+   |               ^^^^^^
+   = help: did you mean `revenue`?
+
+1 error, 0 warnings

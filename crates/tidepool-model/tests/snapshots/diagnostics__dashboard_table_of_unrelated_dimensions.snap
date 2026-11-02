@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `top_products`: no table relates `products`, `stores`, so their values can't be shown side by side
-  --> dashboards/sales.yaml:31:5
+  --> dashboards/sales.yaml:32:5
    |
-31 |     dimensions: [products.category, stores.city]
+32 |     dimensions: [products.category, stores.city]
    |     ^^^^^^^^^^
    = help: without metrics, a table shows the combinations of its dimensions that rows of one table have: one that reaches all of them through relationships
 

@@ -1037,3 +1037,46 @@ async fn every_message_is_done_after_what_it_caused() {
     }
     assert_eq!(until_done(&mut socket).await, ["error"]);
 }
+
+#[tokio::test]
+async fn a_visual_says_how_its_metrics_read() {
+    // revenue reads in euros everywhere; the sales KPI says compact instead
+    let model = retail_with(
+        "model.ossie.yaml",
+        "expression: \"SUM(orders.amount)\" }] }\n  - name: paid_revenue",
+        "expression: \"SUM(orders.amount)\" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{\"format\": \"currency:EUR\"}'
+  - name: paid_revenue",
+    );
+    let (_state, url) = server_for(state(model, tidepool_server::Tokens::default(), None)).await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let model = next(&mut socket, "model").await;
+    let Some(sales) = model["dashboards"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["id"] == "sales"))
+    else {
+        panic!("no sales dashboard in {model}");
+    };
+    let formats = |id: &str| match sales["visuals"]
+        .as_array()
+        .and_then(|v| v.iter().find(|v| v["id"] == id))
+    {
+        Some(visual) => visual["formats"].clone(),
+        None => panic!("no visual {id} in {sales}"),
+    };
+    // the visual's own format wins over the metric's
+    assert_eq!(formats("kpi_revenue"), json!({"revenue": "compact"}));
+    // elsewhere the metric's own; metrics without one aren't listed
+    assert_eq!(formats("top_products"), json!({"revenue": "currency:EUR"}));
+    // a filter's measure reads by the metric's format
+    let Some(region) = sales["filters"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["field"] == "customers.region"))
+    else {
+        panic!("no region filter in {sales}");
+    };
+    assert_eq!(region["measure_format"], "currency:EUR");
+}

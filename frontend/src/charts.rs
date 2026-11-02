@@ -6,12 +6,12 @@
 //! Colours are not decided here. The SVG takes them from `style.css`
 //! through classes, so the charts follow light and dark like the page.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 use serde_json::Value;
 
-use crate::board::{display, number};
+use crate::board::{display, formatted, number};
 use crate::scale::{Band, Linear, Points, compact};
 
 /// How wide a piece of text is, in pixels, in the charts' font. The browser
@@ -92,8 +92,19 @@ pub struct Data {
 }
 
 impl Data {
+    #[cfg(test)]
     #[must_use]
     pub fn new(rows: &[Vec<Value>], metrics: &[String]) -> Self {
+        Self::formatted(rows, metrics, &BTreeMap::new())
+    }
+
+    /// The same, with each metric's value shown by its format (by name).
+    #[must_use]
+    pub fn formatted(
+        rows: &[Vec<Value>],
+        metrics: &[String],
+        formats: &BTreeMap<String, String>,
+    ) -> Self {
         let keys = rows
             .iter()
             .map(|r| r.first().map(display).unwrap_or_default())
@@ -105,8 +116,15 @@ impl Data {
             values: (0..metrics.len())
                 .map(|m| rows.iter().map(|r| number(&cell(r, m))).collect())
                 .collect(),
-            texts: (0..metrics.len())
-                .map(|m| rows.iter().map(|r| display(&cell(r, m))).collect())
+            texts: metrics
+                .iter()
+                .enumerate()
+                .map(|(m, name)| {
+                    let format = formats.get(name).map(String::as_str);
+                    rows.iter()
+                        .map(|r| formatted(&cell(r, m), format))
+                        .collect()
+                })
                 .collect(),
         }
     }
@@ -1017,6 +1035,23 @@ mod tests {
         assert_eq!(short_period("2026-01-01", Some("year")), "2026");
         assert_eq!(short_period("north", Some("day")), "north");
         assert_eq!(short_period("2026-13-01", Some("day")), "2026-13-01");
+    }
+
+    #[test]
+    fn the_tooltip_reads_each_metric_by_its_format() {
+        let rows = vec![vec![json!("north"), json!("1500000.00"), json!(3)]];
+        let formats = [("revenue".to_string(), "currency:EUR compact".to_string())].into();
+        let data = Data::formatted(&rows, &["revenue".into(), "orders".into()], &formats);
+        let Some((_, values)) = data.tip(0) else {
+            panic!("a tip for the first row");
+        };
+        assert_eq!(values[0].1, "€1.5M");
+        assert_eq!(
+            values[1].1, "3",
+            "a metric without a format reads as it comes"
+        );
+        // the values the chart scales by are untouched
+        assert_eq!(data.values[0][0], Some(1_500_000.0));
     }
 
     #[test]

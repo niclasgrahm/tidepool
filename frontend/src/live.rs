@@ -79,7 +79,7 @@ impl Live {
         });
         if sent {
             let kind = message["type"].as_str().unwrap_or_default();
-            self.in_flight.update(|f| f.sent(kind));
+            self.in_flight.update(|f| f.sent(kind, now()));
         }
     }
 
@@ -155,7 +155,11 @@ impl Live {
                 self.rate.set(rows_per_second);
             }
             ServerMessage::Error { message } => self.problem.set(Some(message)),
-            ServerMessage::Done => self.in_flight.update(InFlight::done),
+            ServerMessage::Done => {
+                self.in_flight.update(|f| {
+                    f.done(now());
+                });
+            }
         }
     }
 
@@ -198,7 +202,7 @@ impl Live {
         on_message.forget();
         let on_close = Closure::<dyn Fn()>::new(move || {
             self.connected.set(false);
-            self.in_flight.set(InFlight::default());
+            self.in_flight.update(InFlight::reset);
             self.problem.set(Some(
                 "Disconnected from the server. Reload to reconnect.".into(),
             ));

@@ -592,6 +592,13 @@
             "description": "The SQL expression.",
             "type": "string"
           },
+          "format": {
+            "description": "How its value shows, when a visual does not set a different format:\n`currency:EUR compact`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ignores": {
             "description": "Fields whose selection it ignores (`*` for all).",
             "items": {

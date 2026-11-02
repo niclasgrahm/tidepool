@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tidepool_config::dashboard::{BrushAction, ClickAction, DimensionRef, Visual, VisualType};
+use tidepool_config::format::NumberFormat;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
@@ -180,6 +181,57 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
     if visual.sort.as_ref().is_some_and(|s| !shown(&s.by)) {
         visual.sort = None;
     }
+    // a format only for a metric it still shows
+    let metrics: Vec<String> = visual
+        .metrics
+        .iter()
+        .chain(&visual.compare)
+        .cloned()
+        .collect();
+    visual.format.retain(|m, _| metrics.contains(m));
+}
+
+/// How `metric` reads in `visual`: the visual's own format for it, else
+/// the metric's (`own`), else as it comes. A format that doesn't read
+/// (the compiler says so) counts as none.
+#[must_use]
+pub fn format_of(visual: &Visual, metric: &str, own: Option<&str>) -> NumberFormat {
+    visual
+        .format
+        .get(metric)
+        .map(String::as_str)
+        .or(own)
+        .and_then(|f| f.parse().ok())
+        .unwrap_or_default()
+}
+
+/// How each metric `visual` shows reads, by name, as the dashboard would
+/// show it: what [`format_of`] says, for those that say something.
+#[must_use]
+pub fn formats_of(visual: &Visual, own: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    visual
+        .metrics
+        .iter()
+        .chain(&visual.compare)
+        .filter_map(|m| {
+            let format = format_of(visual, m, own.get(m).map(String::as_str));
+            (format != NumberFormat::default()).then(|| (m.clone(), format.to_string()))
+        })
+        .collect()
+}
+
+/// Set how `metric` reads in `visual`. Saying what the metric says anyway
+/// (`own`) removes the visual's format: the metric's own then applies,
+/// and goes on applying if it changes.
+pub fn set_format(visual: &mut Visual, metric: &str, format: &NumberFormat, own: Option<&str>) {
+    let inherited = own
+        .and_then(|f| f.parse::<NumberFormat>().ok())
+        .unwrap_or_default();
+    if *format == inherited {
+        visual.format.shift_remove(metric);
+    } else {
+        visual.format.insert(metric.to_string(), format.to_string());
+    }
 }
 
 /// The query a visual runs, without a selection: what the editor previews.
@@ -343,6 +395,7 @@ mod tests {
             limit: None,
             on_click: None,
             on_brush: None,
+            format: indexmap::IndexMap::new(),
             at: GridPosition {
                 x: 0,
                 y: 0,
@@ -393,6 +446,62 @@ mod tests {
         assert_eq!(allowed(&[], 1), ["Table", "KPI"]);
         assert_eq!(allowed(&[field("a.b"), field("c.d")], 1), ["Table"]);
         assert_eq!(allowed(&[], 0), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_visual_formats_over_its_metrics_own() {
+        let mut kpi = visual(VisualType::Kpi, vec![], &["revenue"]);
+        let parse = |f: &str| match f.parse::<NumberFormat>() {
+            Ok(f) => f,
+            Err(e) => panic!("expected {f} to read: {e}"),
+        };
+        // nothing said: the metric's own, else as it comes
+        assert_eq!(
+            format_of(&kpi, "revenue", Some("currency:EUR")),
+            parse("currency:EUR")
+        );
+        assert_eq!(format_of(&kpi, "revenue", None), NumberFormat::default());
+        // compact on top of the metric's euros is the visual's own
+        set_format(
+            &mut kpi,
+            "revenue",
+            &parse("currency:EUR compact"),
+            Some("currency:EUR"),
+        );
+        assert_eq!(
+            kpi.format.get("revenue").map(String::as_str),
+            Some("currency:EUR compact")
+        );
+        assert_eq!(
+            format_of(&kpi, "revenue", Some("currency:EUR")),
+            parse("currency:EUR compact")
+        );
+        // back to what the metric says: the visual says nothing again
+        set_format(
+            &mut kpi,
+            "revenue",
+            &parse("currency:EUR"),
+            Some("currency:EUR"),
+        );
+        assert!(kpi.format.is_empty(), "{:?}", kpi.format);
+        set_format(&mut kpi, "revenue", &NumberFormat::default(), None);
+        assert!(kpi.format.is_empty(), "{:?}", kpi.format);
+        // what the preview reads by: the visual's own over the metric's
+        let own: BTreeMap<String, String> =
+            [("revenue".to_string(), "currency:EUR".to_string())].into();
+        set_format(&mut kpi, "revenue", &parse("compact"), Some("currency:EUR"));
+        assert_eq!(
+            formats_of(&kpi, &own),
+            [("revenue".to_string(), "compact".to_string())].into()
+        );
+        assert_eq!(
+            formats_of(&visual(VisualType::Kpi, vec![], &["revenue"]), &own),
+            own
+        );
+        // a metric the visual stops showing loses its format
+        set_format(&mut kpi, "revenue", &parse("compact"), None);
+        set_fields(&mut kpi, vec![], vec!["order_count".into()], &|_| false);
+        assert!(kpi.format.is_empty(), "{:?}", kpi.format);
     }
 
     #[test]
@@ -554,6 +663,7 @@ mod tests {
             role: None,
         };
         let metric = |name: &str, anchor: Option<&str>| MetricInfo {
+            format: None,
             name: name.into(),
             description: None,
             expression: String::new(),

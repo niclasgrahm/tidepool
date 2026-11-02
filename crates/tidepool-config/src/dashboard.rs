@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +143,11 @@ pub struct Visual {
     /// Line charts: what brushing the time axis does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_brush: Option<BrushAction>,
+    /// How each metric shows in this visual, by the name of the metric:
+    /// `{ revenue: compact }`. It replaces the `format` of the metric here.
+    /// It changes only what shows on the screen, not the value.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub format: IndexMap<String, String>,
     pub at: GridPosition,
 }
 
@@ -285,6 +291,14 @@ impl DashboardFile {
             }
             if let Some(action) = &visual.on_brush {
                 let _ = writeln!(out, "    on_brush: {}", word(action));
+            }
+            if !visual.format.is_empty() {
+                let formats: Vec<String> = visual
+                    .format
+                    .iter()
+                    .map(|(metric, format)| format!("{}: {}", scalar(metric), scalar(format)))
+                    .collect();
+                let _ = writeln!(out, "    format: {{ {} }}", formats.join(", "));
             }
             let at = visual.at;
             let _ = writeln!(
@@ -434,6 +448,10 @@ visuals:
                     limit: None,
                     on_click: None,
                     on_brush: None,
+                    format: IndexMap::from([
+                        (name.to_string(), "currency:EUR compact".to_string()),
+                        ("b".to_string(), name.to_string()),
+                    ]),
                     at: GridPosition {
                         x: 0,
                         y: 0,

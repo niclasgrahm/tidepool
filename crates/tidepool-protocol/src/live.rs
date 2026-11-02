@@ -10,6 +10,8 @@
 //! changed: the client applies it as a whole, so what it shows is always
 //! one consistent epoch.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -257,7 +259,8 @@ pub struct FilterInfo {
     /// The metric shown beside each value instead of its rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
-    /// Its display hint: `int`, `decimal`, `percent` or `currency:XXX`.
+    /// The measure's format (`currency:EUR compact`, …; see the metric's
+    /// `format`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure_format: Option<String>,
 }
@@ -281,6 +284,10 @@ pub struct VisualInfo {
     /// filter frames of its dimension's field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<String>,
+    /// How each metric reads here, by name: the visual's own format for it,
+    /// else the metric's. Metrics without one aren't listed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub formats: BTreeMap<String, String>,
     pub at: GridAt,
 }
 

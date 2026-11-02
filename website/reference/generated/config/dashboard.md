@@ -33,6 +33,7 @@
 | `at` | [`GridPosition`](#dashboard-gridposition) | **required** |  |
 | `compare` | string |  | KPI tiles: a second metric shown as the comparison. |
 | `dimensions` | list of [`DimensionRef`](#dashboard-dimensionref) |  |  |
+| `format` | map of string |  | How each metric shows in this visual, by the name of the metric: `{ revenue: compact }`. It replaces the `format` of the metric here. It changes only what shows on the screen, not the value. |
 | `id` | string | **required** | Unique within the dashboard. |
 | `limit` | integer |  |  |
 | `metrics` | list of string |  | Metrics by name. A filter has none. A table without metrics shows each combination of its dimensions that the data has. |

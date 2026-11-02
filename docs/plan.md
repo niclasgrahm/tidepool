@@ -234,7 +234,7 @@ custom_extensions:
 | metric | `table` | anchor table for expressions that don't name one (`COUNT(*)`) |
 | metric | `ignore_selection: [field…]` | evaluate as if these fields had no selection (`"*"` = all) |
 | metric | `time_offset`, `time_field` | evaluate with the time selection shifted (M8) |
-| metric | `format` | display hint: `currency:EUR`, `percent`, `int`, … |
+| metric | `format` | how the value reads (display only): a style (`int`, `decimal`, `percent`, `currency:XXX`), `compact` (167.8M) and `decimals:N`, as words in any order: `currency:EUR compact`. A visual can say it again per metric (§3.5) |
 | field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`) |
 | dataset | `hierarchy` | `{name, parent, label?, kind?}`: a parent–child tree over the dataset's rows, as a field of its own (§5.6) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
@@ -263,6 +263,7 @@ visuals:
     type: kpi
     metrics: [revenue]
     compare: revenue_prev_year
+    format: { revenue: compact }   # how its metrics read here, over each metric's own format
     at: { x: 0, y: 0, w: 3, h: 2 }
   - id: by_region
     type: bar
@@ -287,6 +288,8 @@ visuals:
 ```
 
 A visual's `metrics` may be left out: a `filter` visual has none (one dimension, its values as a list on the grid), and a `table` without metrics lists the combinations of its dimensions there are. KPIs, bars and lines need at least one metric.
+
+A visual's `format` maps metrics it shows (its `metrics` and `compare`) to formats, in the grammar of the metric `format` (§3.4; `tidepool_config::format`); the compiler checks both, and refuses a format for a metric the visual doesn't show. The live protocol sends each visual the format that applies per metric (`VisualInfo::formats`: the visual's, else the metric's), and the UI formats every value of that metric through it (KPI, table cells, tooltips, filter measures). Formats are display only: queries, CSV and the API answer the full value. They're for values that change every epoch: 167,791,795.92 moving in its last digits can't be read; 167.8M can.
 
 ### 3.6 Machine-readable schemas
 

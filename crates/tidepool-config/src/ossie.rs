@@ -256,7 +256,9 @@ pub struct MetricExtension {
     pub time_offset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_field: Option<String>,
-    /// Display hint: `int`, `decimal`, `percent`, or `currency:XXX`.
+    /// How the value shows: a style (`int`, `decimal`, `percent` or
+    /// `currency:XXX`), `compact` and `decimals:N`, in any order:
+    /// `currency:EUR compact`. A visual can set a different format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }

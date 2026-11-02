@@ -43,8 +43,8 @@ fields combine: region `north` and category `boats`.
 
 ## back and forward
 
-Each change of the selection is a step in a history. **Back** and
-**Forward** go through it.
+Each change of the selection is a step in a history. The arrows above the
+dashboard, **Back** and **Forward**, go through it.
 
 ## relative time windows
 
@@ -52,6 +52,14 @@ A `date_range` filter offers periods relative to now: "Today", "Last 7
 days", "Last month", and "Last hour" for timestamps. A relative period moves
 with the clock. A dashboard on "Today" shows the new day from midnight, with
 or without new data.
+
+Click the filter to open its picker. On the left are the relative periods.
+On the right is a calendar: click the first day, then the last day, of a
+fixed range. You can also type the days (`2026-10-04`), and for a timestamp
+the times (`13:30`), and push Enter. The last day is in the range: "until
+2026-10-27" includes all of 27 October. The footer of the picker says if the
+period moves with the clock or is fixed, and how long it is. Esc closes the
+picker.
 
 `default` sets the period that a dashboard opens on, the first time a viewer
 opens it. The viewer can change it or clear it.

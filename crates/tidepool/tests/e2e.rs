@@ -268,7 +268,12 @@ impl Browser {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("timed out waiting for {what} (last: {last})");
+        // what the page showed, so a timeout says why
+        let page = self.eval(
+            "(() => `${location.href} · ${document.styleSheets.length} sheets · ` + \
+             (document.body?.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 400))()",
+        );
+        panic!("timed out waiting for {what} (last: {last}); the page: {page}");
     }
 
     /// A real mouse click at page coordinates, as a person makes one.
@@ -293,6 +298,23 @@ impl Browser {
             self.call("Input.dispatchMouseEvent", &event("mouseMoved", at, 1));
         }
         self.call("Input.dispatchMouseEvent", &event("mouseReleased", to, 0));
+    }
+
+    /// The middle of `selector`'s element once it has stopped moving: a
+    /// chart tweens from its last layout for a moment after new data, and a
+    /// position read mid-way lands on the wrong mark.
+    fn settled(&mut self, selector: &str) -> (f64, f64) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last = self.middle(selector);
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let now = self.middle(selector);
+            if now == last {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "{selector} never stopped moving");
+            last = now;
+        }
     }
 
     /// The middle of the element `selector` finds, once it's there.
@@ -340,7 +362,12 @@ impl Browser {
     }
 }
 
-const KPI: &str = "document.querySelector('.visual.kpi .kpi-value')?.textContent";
+/// The KPI's whole value: its `title` when a format shortens what it shows
+/// (the example's sales KPI is `compact`), else its text.
+const KPI: &str =
+    "(e => e && (e.title || e.textContent))(document.querySelector('.visual.kpi .kpi-value'))";
+/// What the KPI shows, as formatted.
+const KPI_SHOWN: &str = "document.querySelector('.visual.kpi .kpi-value')?.textContent";
 /// The bars of the first bar chart, in category order (one metric).
 const BARS: &str = "[...document.querySelectorAll('.visual.bar .plot .bar')]";
 
@@ -458,6 +485,8 @@ fn click_a_bar_watch_it_update_go_back() {
         &format!("{KPI} === '1,205.00'"),
         "the KPI to show all 1,205.00",
     );
+    // the example formats it compact: short on the tile, whole on hover
+    browser.wait_for(&format!("{KPI_SHOWN} === '1.2k'"), "the KPI to read 1.2k");
 }
 
 #[test]
@@ -519,8 +548,8 @@ fn brush_the_trend_drag_across_bars_and_choose_with_keys() {
     browser.wait_for(&format!("{dots}.length === 3"), "a dot per day");
     // a drag happens on screen: the trend is below the fold in a small window
     browser.eval("document.querySelector('.visual.line').scrollIntoView({block: 'center'})");
-    let first = browser.middle(&format!("{dots}[0]"));
-    let second = browser.middle(&format!("{dots}[1]"));
+    let first = browser.settled(&format!("{dots}[0]"));
+    let second = browser.settled(&format!("{dots}[1]"));
     browser.drag(first, second);
     browser.wait_for(
         &format!("{CHIPS}.includes('2026-10-01 to 2026-10-02')"),
@@ -535,8 +564,8 @@ fn brush_the_trend_drag_across_bars_and_choose_with_keys() {
     // drag from the first bar to the second: both regions are chosen
     browser.wait_for(&format!("{BARS}.length === 3"), "a bar per region");
     browser.eval("document.querySelector('.visual.bar').scrollIntoView({block: 'center'})");
-    let north = browser.middle(&bar_labelled("north"));
-    let east = browser.middle(&bar_labelled("east"));
+    let north = browser.settled(&bar_labelled("north"));
+    let east = browser.settled(&bar_labelled("east"));
     browser.drag(north, east);
     browser.wait_for(
         &format!("{CHIPS}.includes('north') && {CHIPS}.includes('east')"),
@@ -680,16 +709,14 @@ fn days_ago(days: i64) -> String {
     tidepool_store::value::format_timestamp(now - days * 86_400_000_000, true)
 }
 
-/// Pick `label` in a date range's period list (what choosing an option does:
-/// the value set, then `change`).
+/// Pick `label` among a date range's relative periods: open the picker,
+/// click the window.
 fn choose_period(browser: &mut Browser, label: &str) {
-    let picked = browser.eval(&format!(
-        "(() => {{ const s = document.querySelector('.range select'); \
-         const o = [...s.options].find(o => o.textContent === '{label}'); \
-         if (!o) return false; s.value = o.value; \
-         s.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()"
+    browser.click_element("document.querySelector('.picker-trigger')");
+    browser.click_element(&format!(
+        "[...document.querySelectorAll('.picker-preset')]\
+         .find(b => b.firstElementChild?.textContent === '{label}')"
     ));
-    assert_eq!(picked, json!(true), "no period `{label}` to choose");
 }
 
 #[test]
@@ -744,11 +771,8 @@ fn a_dashboard_opens_on_its_relative_period_and_changes_it() {
         "a chip for the default window",
     );
     browser.wait_for(&format!("{KPI} === '10.00'"), "only this week's order");
-    let shown = browser.eval(
-        "(() => { const s = document.querySelector('.range select'); \
-         return s.options[s.selectedIndex].textContent; })()",
-    );
-    assert_eq!(shown, json!("Last 7 days"), "the period list shows it");
+    let shown = browser.eval("document.querySelector('.picker-trigger .picker-label').textContent");
+    assert_eq!(shown, json!("Last 7 days"), "the picker shows it");
 
     choose_period(&mut browser, "Last 30 days");
     browser.wait_for(
@@ -760,6 +784,29 @@ fn a_dashboard_opens_on_its_relative_period_and_changes_it() {
     choose_period(&mut browser, "All time");
     browser.wait_for(&format!("{CHIPS} === ''"), "no chip for all time");
     browser.wait_for(&format!("{KPI} === '70.00'"), "every order");
+
+    // on the calendar: today, clicked twice, is that one day
+    let today =
+        "document.querySelector(`.picker-day[data-day='${Math.floor(Date.now() / 864e5)}']`)";
+    browser.click_element("document.querySelector('.picker-trigger')");
+    browser.click_element(today);
+    browser.click_element(today);
+    browser.wait_for(
+        "!document.querySelector('.picker-pop')",
+        "the picker to close",
+    );
+    browser.wait_for(&format!("{KPI} === '10.00'"), "only today's order");
+
+    // typed: from 25 days back until today, Enter
+    browser.click_element("document.querySelector('.picker-trigger')");
+    let (from, until) = (&days_ago(25)[..10], &days_ago(0)[..10]);
+    browser.eval(&format!(
+        "(() => {{ const [from, until] = document.querySelectorAll('.picker-input:not(.picker-time)'); \
+         const set = (e, v) => {{ e.value = v; e.dispatchEvent(new Event('input', {{ bubbles: true }})); }}; \
+         set(from, '{from}'); set(until, '{until}'); \
+         until.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }})); }})()"
+    ));
+    browser.wait_for(&format!("{KPI} === '30.00'"), "the typed range's orders");
 }
 
 #[test]

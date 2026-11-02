@@ -95,7 +95,7 @@ The units are `d`, `w`, `m`, `q` and `y`.
 | `"kind": "derived"` | the expression combines other metrics, after the aggregation |
 | `"ignore_selection": [...]` | calculates as if these fields (or `"*"`) had no selection |
 | `"time_offset": "-1y"`, `"time_field": "orders.ordered_at"` | calculates with the time field moved |
-| `"format": "currency:EUR"` | a display hint: `int`, `decimal`, `percent` or `currency:XXX` |
+| `"format": "currency:EUR"` | how the value shows: `int`, `decimal`, `percent` or `currency:XXX`, with `compact` and `decimals:N`. A visual can change it. See [number formats](/project/dashboards#number-formats). |
 
 The [extensions reference](/reference/config/extensions#metrics) has the
 same list, generated from the source.

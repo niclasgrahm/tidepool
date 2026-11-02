@@ -10,7 +10,9 @@
 //! config pipeline as every other change. Saving writes the file in the
 //! examples' style; comments in it aren't kept, and the editor says so.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use indexmap::IndexMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -18,18 +20,19 @@ use serde_json::{Value, json};
 use tidepool_config::dashboard::{
     DashboardFile, DimensionRef, GridPosition as Rect, Layout, Visual, VisualType,
 };
+use tidepool_config::format::{MAX_DECIMALS, NumberFormat, Style};
 use tidepool_config::ossie::TimeGrain;
 use tidepool_protocol::config::{ConfigState, PlanInfo};
 use tidepool_protocol::{ModelInfo, QueryResult};
 use wasm_bindgen::JsCast;
 
 use crate::api::{get_json, post_json};
-use crate::board::display;
+use crate::board::{display, formatted};
 use crate::charts::Data;
 use crate::configui::{SignIn, error_of, sleep};
 use crate::design::{
-    Reach, TYPES, default_type, fits, retype, set_fields, short, size_of, title, type_label,
-    visual_id,
+    Reach, TYPES, default_type, fits, format_of, formats_of, retype, set_fields, set_format, short,
+    size_of, title, type_label, visual_id,
 };
 use crate::layout::{cells, depth, free, moved, nudge, place, resized};
 use crate::plot::{BarChart, LineChart};
@@ -198,6 +201,14 @@ fn Editor(
     let generation = StoredValue::new(0u64);
     let canvas = NodeRef::<leptos::html::Section>::new();
     let reach = StoredValue::new(Reach::of(&model));
+    // each metric's own format, which a visual's says again or not
+    let own = StoredValue::new(
+        model
+            .metrics
+            .iter()
+            .filter_map(|m| Some((m.name.clone(), m.format.clone()?)))
+            .collect::<BTreeMap<String, String>>(),
+    );
     let model = StoredValue::new(model);
     let commented = original
         .as_deref()
@@ -373,6 +384,7 @@ fn Editor(
                     limit: None,
                     on_click: None,
                     on_brush: None,
+                    format: IndexMap::new(),
                     at,
                 };
                 set_fields(&mut visual, pick.dimensions, pick.metrics, &is_time);
@@ -492,7 +504,7 @@ fn Editor(
                             <h2>{name}</h2>
                             <span class="type-tag">{move || visual.with(|v| v.as_ref().map(|v| type_label(v.visual_type)).unwrap_or_default())}</span>
                         </header>
-                        <Preview visual=visual />
+                        <Preview visual=visual own=own />
                         <span
                             class="handle"
                             aria-hidden="true"
@@ -534,7 +546,7 @@ fn Editor(
             return view! { <Picker pick=pick model=model reach=reach on_done=done_picking on_cancel=Callback::new(move |()| picking.set(None)) /> }.into_any();
         }
         match selected.get().and_then(|i| draft.with(|d| d.visuals.get(i).cloned()).map(|v| (i, v))) {
-            Some((index, visual)) => view! { <Properties index=index visual=visual draft=draft selected=selected picking=picking is_time=Callback::new(move |f: String| is_time(&f)) /> }.into_any(),
+            Some((index, visual)) => view! { <Properties index=index visual=visual own=own draft=draft selected=selected picking=picking is_time=Callback::new(move |f: String| is_time(&f)) /> }.into_any(),
             None => view! {
                 <div class="panel-note">
                     <h2>"Visuals"</h2>
@@ -655,6 +667,7 @@ fn open_fields(draft: RwSignal<DashboardFile>, picking: RwSignal<Option<Pick>>, 
 fn Properties(
     index: usize,
     visual: Visual,
+    own: StoredValue<BTreeMap<String, String>>,
     draft: RwSignal<DashboardFile>,
     selected: RwSignal<Option<usize>>,
     picking: RwSignal<Option<Pick>>,
@@ -704,6 +717,7 @@ fn Properties(
                 <dt>"Metrics"</dt>
                 <dd>{if visual.metrics.is_empty() { "none".to_string() } else { visual.metrics.join(", ") }}</dd>
             </dl>
+            {formats(index, &visual, own, draft)}
             <p class="quiet">{format!("Column {}, row {}; {} wide, {} tall", at.x + 1, at.y + 1, at.w, at.h)}</p>
             <div class="actions">
                 <button on:click=move |_| open_fields(draft, picking, index)>"Change fields"</button>
@@ -711,6 +725,173 @@ fn Properties(
             </div>
         </div>
     }
+}
+
+/// The styles a format offers, by their word in the file.
+const STYLES: [(&str, &str); 5] = [
+    ("", "As it comes"),
+    ("int", "Whole number"),
+    ("decimal", "Decimal"),
+    ("percent", "Percent"),
+    ("currency", "Currency"),
+];
+
+fn style_word(style: &Style) -> &'static str {
+    match style {
+        Style::Plain => "",
+        Style::Int => "int",
+        Style::Decimal => "decimal",
+        Style::Percent => "percent",
+        Style::Currency(_) => "currency",
+    }
+}
+
+/// How each metric the visual shows reads in it: a style, compact,
+/// decimals, and what a value then looks like. The metric's own format
+/// applies until this says something else.
+#[allow(clippy::too_many_lines)] // one row of controls per metric, and what each changes
+fn formats(
+    index: usize,
+    visual: &Visual,
+    own: StoredValue<BTreeMap<String, String>>,
+    draft: RwSignal<DashboardFile>,
+) -> impl IntoView + use<> {
+    let shown: Vec<String> = visual
+        .metrics
+        .iter()
+        .chain(&visual.compare)
+        .cloned()
+        .collect();
+    if shown.is_empty() {
+        return ().into_any();
+    }
+    let rows = shown
+        .into_iter()
+        .map(|metric| {
+            let inherited = own.with_value(|o| o.get(&metric).cloned());
+            let current = format_of(visual, &metric, inherited.as_deref());
+            let overridden = visual.format.contains_key(&metric);
+            let change = {
+                let (metric, inherited) = (metric.clone(), inherited.clone());
+                move |edit: &dyn Fn(&mut NumberFormat)| {
+                    draft.update(|d| {
+                        if let Some(v) = d.visuals.get_mut(index) {
+                            let mut format = format_of(v, &metric, inherited.as_deref());
+                            edit(&mut format);
+                            set_format(v, &metric, &format, inherited.as_deref());
+                        }
+                    });
+                }
+            };
+            let on_style = {
+                let change = change.clone();
+                move |ev: leptos::ev::Event| {
+                    let word = event_target_value(&ev);
+                    change(&|f: &mut NumberFormat| {
+                        f.style = match word.as_str() {
+                            "int" => Style::Int,
+                            "decimal" => Style::Decimal,
+                            "percent" => Style::Percent,
+                            "currency" => match &f.style {
+                                Style::Currency(code) => Style::Currency(code.clone()),
+                                _ => Style::Currency("EUR".into()),
+                            },
+                            _ => Style::Plain,
+                        };
+                    });
+                }
+            };
+            let on_code = {
+                let change = change.clone();
+                move |ev: leptos::ev::Event| {
+                    let code = event_target_value(&ev).trim().to_ascii_uppercase();
+                    if code.len() == 3 && code.chars().all(|c| c.is_ascii_uppercase()) {
+                        change(&|f: &mut NumberFormat| f.style = Style::Currency(code.clone()));
+                    }
+                }
+            };
+            let on_compact = {
+                let change = change.clone();
+                move |ev: leptos::ev::Event| {
+                    let on = event_target_checked(&ev);
+                    change(&|f: &mut NumberFormat| f.compact = on);
+                }
+            };
+            let on_decimals = {
+                let change = change.clone();
+                move |ev: leptos::ev::Event| {
+                    let places = event_target_value(&ev).parse::<u8>().ok();
+                    change(&|f: &mut NumberFormat| f.decimals = places);
+                }
+            };
+            let reset = {
+                let metric = metric.clone();
+                move |_| {
+                    draft.update(|d| {
+                        if let Some(v) = d.visuals.get_mut(index) {
+                            v.format.shift_remove(&metric);
+                        }
+                    });
+                }
+            };
+            let sample = if current.style == Style::Percent {
+                Value::from(0.4567)
+            } else {
+                Value::from("1234567.891")
+            };
+            let example = formatted(&sample, Some(&current.to_string()));
+            let code = match &current.style {
+                Style::Currency(code) => Some(code.clone()),
+                _ => None,
+            };
+            let word = style_word(&current.style);
+            let decimals = current.decimals;
+            let source = if overridden {
+                "set here".to_string()
+            } else {
+                match &inherited {
+                    Some(f) => format!("the metric's: {f}"),
+                    None => "as it comes".to_string(),
+                }
+            };
+            view! {
+                <div class="format-row" data-metric=metric.clone()>
+                    <div class="format-head">
+                        <code>{metric.clone()}</code>
+                        <span class="quiet">{source}</span>
+                        {overridden.then(|| view! {
+                            <button class="ghost-button" on:click=reset title="Read as the metric says">"Reset"</button>
+                        })}
+                    </div>
+                    <div class="format-controls">
+                        <select class="format-style" aria-label=format!("How {metric} reads") on:change=on_style>
+                            {STYLES.iter().map(|(w, label)| view! { <option value=*w selected=*w == word>{*label}</option> }).collect_view()}
+                        </select>
+                        {code.map(|code| view! {
+                            <input class="format-code" aria-label="Currency code" maxlength="3" spellcheck="false"
+                                prop:value=code on:change=on_code />
+                        })}
+                        <select class="format-decimals" aria-label="Decimals" on:change=on_decimals>
+                            <option value="" selected=decimals.is_none()>"Auto"</option>
+                            {(0..=MAX_DECIMALS).map(|n| view! {
+                                <option value=n.to_string() selected=decimals == Some(n)>{format!("{n} dp")}</option>
+                            }).collect_view()}
+                        </select>
+                        <label class="format-compact">
+                            <input type="checkbox" prop:checked=current.compact on:change=on_compact />
+                            "Compact"
+                        </label>
+                    </div>
+                    <p class="format-example">"e.g. "<span>{example}</span></p>
+                </div>
+            }
+        })
+        .collect_view();
+    view! {
+        <h3>"Format"</h3>
+        <div class="formats">{rows}</div>
+    }
+    .into_any()
 }
 
 /// Why a type isn't offered for what a visual shows.
@@ -901,7 +1082,10 @@ fn Picker(
 /// What a visual would show now, without a selection: its query run once
 /// whenever what it asks changes.
 #[component]
-fn Preview(visual: Memo<Option<Visual>>) -> impl IntoView {
+fn Preview(
+    visual: Memo<Option<Visual>>,
+    own: StoredValue<BTreeMap<String, String>>,
+) -> impl IntoView {
     let request = Memo::new(move |_| visual.with(|v| v.as_ref().map(crate::design::request)));
     let kind = Memo::new(move |_| visual.with(|v| v.as_ref().map(|v| v.visual_type)));
     let result = RwSignal::new(None::<Result<QueryResult, String>>);
@@ -935,7 +1119,21 @@ fn Preview(visual: Memo<Option<Visual>>) -> impl IntoView {
     let metrics = Memo::new(move |_| {
         visual.with(|v| v.as_ref().map(|v| v.metrics.clone()).unwrap_or_default())
     });
-    let data = Memo::new(move |_| rows.with(|r| metrics.with(|m| Data::new(r, m))));
+    let formats = Memo::new(move |_| {
+        visual.with(|v| {
+            v.as_ref()
+                .map(|v| own.with_value(|own| formats_of(v, own)))
+                .unwrap_or_default()
+        })
+    });
+    let data = Memo::new(move |_| {
+        rows.with(|r| metrics.with(|m| formats.with(|f| Data::formatted(r, m, f))))
+    });
+    // a metric column's value as the dashboard would show it
+    let shown = move |metric: Option<&String>, value: &Value| {
+        let format = metric.and_then(|m| formats.with(|f| f.get(m).cloned()));
+        formatted(value, format.as_deref())
+    };
     let grain = Memo::new(move |_| {
         visual.with(|v| {
             v.as_ref()
@@ -953,7 +1151,10 @@ fn Preview(visual: Memo<Option<Visual>>) -> impl IntoView {
             Some(VisualType::Bar) => view! { <div class="chart preview"><BarChart data=data /></div> }.into_any(),
             Some(VisualType::Line) => view! { <div class="chart preview"><LineChart data=data grain=grain /></div> }.into_any(),
             Some(VisualType::Kpi) => view! {
-                <p class="kpi-value preview">{move || rows.with(|r| r.first().and_then(|r| r.first()).map(display).unwrap_or_default())}</p>
+                <p class="kpi-value preview">{move || {
+                    let metric = metrics.with(|m| m.first().cloned());
+                    rows.with(|r| r.first().and_then(|r| r.first()).map(|v| shown(metric.as_ref(), v)).unwrap_or_default())
+                }}</p>
             }.into_any(),
             Some(VisualType::Filter) => view! {
                 <ul class="preview values-static">
@@ -978,8 +1179,13 @@ fn Preview(visual: Memo<Option<Visual>>) -> impl IntoView {
                         <tbody>
                             {move || {
                                 let dims = visual.with(|v| v.as_ref().map_or(0, |v| v.dimensions.len()));
+                                let names = metrics.get();
                                 rows.with(|r| r.iter().take(50).map(|row| view! {
-                                    <tr>{row.iter().enumerate().map(|(c, v)| { let numeric = c >= dims; view! { <td class:num=numeric>{display(v)}</td> } }).collect_view()}</tr>
+                                    <tr>{row.iter().enumerate().map(|(c, v)| {
+                                        let numeric = c >= dims;
+                                        let text = if numeric { shown(names.get(c - dims), v) } else { display(v) };
+                                        view! { <td class:num=numeric>{text}</td> }
+                                    }).collect_view()}</tr>
                                 }).collect_view())
                             }}
                         </tbody>

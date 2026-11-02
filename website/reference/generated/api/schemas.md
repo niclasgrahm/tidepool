@@ -318,6 +318,7 @@ One problem with a write.
 | `dashboards` | list of string | **required** | Dashboards that show it. |
 | `description` | string |  |  |
 | `expression` | string | **required** | The SQL expression. |
+| `format` | string |  | How its value shows, when a visual does not set a different format: `currency:EUR compact`. |
 | `ignores` | list of string | **required** | Fields whose selection it ignores (`*` for all). |
 | `kind` | string | **required** | `base` (aggregates rows) or `derived` (combines other metrics). |
 | `name` | string | **required** |  |
