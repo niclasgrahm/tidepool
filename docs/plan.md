@@ -26,6 +26,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D13 | Licence split, same as Kayak | `tidepool-protocol` and `tidepool-config` (the types any client needs) are **Apache-2.0**. Everything else (server, engine, frontend) is **AGPL-3.0-or-later**, with a commercial licence available. Every crate declares `license`, and a test enforces it. |
 | D14 | Reuse Kayak's conventions and solved problems | `just` for tasks, `serde_norway` for YAML, the `embed-assets` feature with rust-embed, one endpoint table that generates routes + auth roles + OpenAPI + docs, Kayak's auth stack (basic / session cookie / JWT with the iframe embedding handshake), `${NAME}` secrets, a bench crate, clippy pedantic with `unwrap_used`/`expect_used`, and a "definition of done" in CLAUDE.md. Copy first; extract a shared crate only if a third project needs it. |
 | D15 | Ingest is private by default; public ingest is a grant | The UI being public says nothing about where producers are. Listeners are split by surface (public / ingest / admin), placed from the endpoint table's `Access`. Ingest credentials are named and scoped to tables and operations, and a table becomes writable from the internet only through a credential marked `public`, with mandatory limits. Off loopback, an ingest or admin level without a token refuses to start. Changes to `auth`, `listen` and `agents` are their own change class, never auto-applied. (Decided 2026-10-17; §9.2.) |
+| D16 | Measures grow by structured modifiers, not a formula language | D9 extended to the measures DAX's `CALCULATE` and Qlik's set analysis are used for (shares of totals, fixed selections, level of detail, time windows, sets from sets). The core of a metric stays one SQL aggregate expression. Each new modifier is a key in its `TIDEPOOL` extension, with a plain-SQL translation the oracle checks, a stated place in one order of application, and a plan the engine already knows how to run. Inter-row functions go on visuals, not metrics. (Proposed 2026-11-02; §6.8.) |
 
 ---
 
@@ -238,6 +239,8 @@ custom_extensions:
 | dataset | `hierarchy` | `{name, parent, label?, kind?}`: a parent–child tree over the dataset's rows, as a field of its own (§5.6) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
 | model | `filter_direction` | `one_to_many` (default) or `both`: selections also flow from the many side to the one side (§5.4) |
+
+The next metric modifiers (`total`, `set`, `per`/`then`, `time_window`) are proposed in §6.8.
 
 Only `OSSIE_SQL_2026` and `ANSI_SQL` are read (in that order of preference). Other dialects in the file are kept but ignored, so a model can be shared with other Ossie tools. A YAML gotcha the validator explains: in a `{ … }` flow mapping a comma ends the value, so write `type: "decimal(14,2)"` quoted.
 
@@ -710,6 +713,63 @@ result(view, selection, epoch) =
 
 `POST /v1/query` takes `{metrics, dimensions, filters, sort, limit}` and returns JSON or Arrow. It uses the same engine without a subscription. It's used by agents, tests (the oracle), CSV export and scripts. It's built before the live path (M3).
 
+### 6.8 Measure vocabulary (after v0.1)
+
+**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Nothing here is built.
+
+**Where we are.** A metric is one SQL aggregate expression (`SUM`, `COUNT`, `COUNT(DISTINCT …)`, `MIN`, `MAX`, `AVG`, with `FILTER (WHERE …)`), or a `derived` expression over other metrics. Four modifiers change what it sees: `table`, `ignore_selection`, `time_offset` and the model's `filter_direction`. That covers the simple half of what DAX's `CALCULATE` and Qlik's set analysis are used for. These are the gaps users will meet first:
+
+| Gap | DAX | Qlik | Example |
+|---|---|---|---|
+| share of a total over the visual's own dimensions | `ALL(dim)` in `CALCULATE` | `TOTAL <dim>` | revenue share per region |
+| a fixed value that replaces the selection on a field | `CALCULATE(…, field = v)` | `{<field={v}>}` | paid revenue, whatever status is selected |
+| more aggregates | `MEDIAN`, `PERCENTILEX`, `STDEV`, `LASTNONBLANK` | `Median`, `Fractile`, `Stdev`, `FirstSortedValue` | median order value, the latest state of an asset |
+| aggregation in two steps (level of detail) | `AVERAGEX(VALUES(c), …)` | `Aggr()` | average revenue per customer; customers with revenue over 1,000 |
+| time windows other than a shift | `DATESYTD`, `DATESINPERIOD` | set analysis with `$(=…)` dates | year to date, the last 12 months |
+| sets from other sets | `CALCULATETABLE`, `TREATAS` | `P()`, `E()` | revenue on all products from customers who bought bikes |
+
+Apache Ossie doesn't limit any of this. Its metric is a name, an expression and `custom_extensions`, and our extension's `data` is ours to define. The limits are D9's (no formula language) and the engine's (every path exact, incremental where possible, checked by the oracle).
+
+**The rule for new modifiers (D16).** The core stays a SQL aggregate expression. Every way to change what a metric sees or how it rolls up is a key in the metric's `TIDEPOOL` extension, and it must:
+
+- have a translation to plain SQL that the oracle can generate (`combinations_sql` and its neighbours), so DuckDB checks it;
+- compose with the other modifiers in a stated order (below), with no special cases between pairs;
+- compile to anchor plans the engine already has (one per anchor table, selection and shape), joined on the group key as §6.4 does today. A modifier may start on the general path only (`prepare` returns `None`) and get fast-path support later;
+- get golden diagnostics for its mistakes, a metric in the retail example, a generator in the oracle, and a page on the doc site.
+
+**Order of application,** for each base metric in a visual: the selection (with `filter_direction`), then `ignore_selection`, then `set`, then `time_offset` or `time_window`, then `FILTER (WHERE …)`, then grouping (the visual's dimensions without `total`, plus `per`), then `then`. Derived metrics come last, as now.
+
+#### The modifiers, in order of work
+
+1. **`total: [field…]`** (or `"*"`). The metric is computed without these of the visual's dimensions, and its value is repeated across them. Selections still apply, as with Qlik's `TOTAL` (to get DAX's `ALL`, combine it with `ignore_selection`). A total field the visual doesn't group by does nothing. Share of total is then a derived metric: `revenue / revenue_total`. It is one more anchor plan with fewer dimensions, joined back on the dimensions it kept. Incremental like any other plan. Oracle: the same aggregate grouped by the kept dimensions, joined.
+
+2. **`set: {field: [values…]}`.** The metric sees these values on these fields *instead of* the session's selection on them. This is shorthand for `ignore_selection` plus a condition, but a condition on a dimension's field (`customers.region`), not only on the anchor's columns, as `FILTER` requires. A `set` field is never in `relevant` (§6.6), so changing it in the session costs nothing.
+
+3. **More aggregates.** `MEDIAN(x)`, `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP`, and `ARG_MAX(x, t)` / `ARG_MIN(x, t)` (the value of `x` on the row with the largest `t`: the latest reading, the closing balance). All exact. States: a code → count histogram for dictionary columns, a value list otherwise (§6.4's t-digest only behind an explicit `APPROX_` name, like `APPROX_COUNT_DISTINCT`). Deletes recompute, as for `MIN` and `MAX`. These take over item 4 of "After v0.1".
+
+4. **`per: [field…]` with `then`.** Aggregation in two steps. The expression is aggregated per combination of the visual's dimensions and the `per` fields (inner). Then `then`, a SQL aggregate over the inner value named `value`, aggregates those to the visual's dimensions (outer):
+
+   ```json
+   {"per": ["orders.customer_id"], "then": "AVG(value)"}
+   {"per": ["orders.customer_id"], "then": "COUNT(*) FILTER (WHERE value > 1000)"}
+   ```
+
+   With `total: "*"` as well, the inner groups are the `per` fields alone (Tableau's `FIXED`). `per` fields must be on the anchor or reachable from it through many → one paths, like every other read. The inner state is kept per epoch like any grouped answer, and the outer one is recomputed from it, which costs the number of inner groups, not rows. A `per` field with very many values (one row each) is the expensive case. `tidepool plan` reports its cardinality, and the compiler warns over a limit. Oracle: a `GROUP BY` subquery inside a `GROUP BY`.
+
+5. **`time_window`** with `time_field`: `ytd`, `qtd`, `mtd`, `wtd`, or `last:<n><unit>` (`last:12mo`, `last:7d`). Without a time dimension in the visual, the window ends where the time selection ends (or now, §5.5). With one, each group gets its own window, ending where the group ends (a running year to date per month, a rolling 12 months per month). The per-group case is a range join of groups against groups. It's exact for every aggregate when each window is computed from the rows, and cheap for sums and counts when it's computed from finer groups. Start with the exact version on the general path. Needs a short design spike before it's built: the interaction with a `grain` coarser than the window, and with `time_offset` on the same metric.
+
+6. **Sets from sets.** A condition that is the possible values of a field under another selection: `{"in": {"field": "orders.customer_id", "under": {"products.category": ["bikes"]}, "keep_selection": true}}` (shape not final). It's Qlik's `P()`. The engine already computes such sets: `assoc.rs` turns the passing rows of one side into a `Condition::Set` on another. So this is mostly syntax, planning and the oracle. `E()` is the complement. Design after items 1–4 are in, when we know how they read in practice.
+
+Smaller items to fold in on the way: `via: <relationship>` to choose a relationship by its `role` per metric (DAX's `USERELATIONSHIP`), and `time_offset` with `time_window` on the same metric.
+
+**Not planned:**
+
+- **A formula language** (DAX, Qlik expressions). Its power comes with an evaluation model (context transition, implicit iteration) that is hard to learn, hard to plan and can't be checked against SQL. If the JSON gets heavy, a short surface syntax that compiles to the same keys is a separate, later decision.
+- **Inter-row functions** (rank, running total, difference to the previous row; Qlik's `Above`, DAX's `RANKX`). They work on a visual's result rows, not on data, so they belong on the visual (a `rank` or `running` option in the dashboard file), computed after `sort`. Plan them with the visuals.
+- **Alternate states** (two selections side by side). That's a session and protocol feature. It belongs with bookmarks (§12).
+
+**Portability.** Another Ossie tool reads `revenue_prev_year` as plain `SUM(orders.amount)`, and gets a different number without an error. The more of a metric's meaning moves into the extension, the more this is true. See §14.
+
 ---
 
 ## 7. Client protocol (WebSocket `/v1/ws`)
@@ -1133,7 +1193,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
 2. ~~Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns~~ (done 2026-10-17)
 3. Late binding of dimension attributes (no fact rescans on dimension upserts)
-4. Percentiles/median, approximate distinct
+4. Percentiles/median, approximate distinct (now part of 19, §6.8)
 5. Segment compaction and dictionary compaction
 6. Row-level deltas in frames for large tables
 7. Bookmarks and shareable selection URLs
@@ -1148,6 +1208,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 16. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
 17. GitOps: the config from a branch of a remote repository, plan checks on pull requests, UI changes pushed as commits. Design in [gitops.md](gitops.md)
 18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
+19. The measure vocabulary (§6.8, D16): `total`, `set`, more aggregates, `per`/`then`, `time_window`, sets from sets
 
 ---
 
@@ -1177,7 +1238,8 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 5. **Ossie upgrade:** we write the 0.2 shape already (D8). When 0.2 is released, check whether it adds any of our extension concepts (derived metrics, filters, time grains) natively, and read those too.
 6. **Who approves a `security` change?** (§9.2) Approval is an admin endpoint, and agents use the admin token too, so an agent could approve its own proposal. Options: approval only from a browser session (a human at the UI), or a separate approver token.
 7. **Stronger producer identity for edge sites** (§9.2): mTLS or HMAC-signed requests (a timestamp against replays) for Kayaks pushing across the internet. Kayak's `tidepool` output would have to speak it too. After the bearer-token version is in.
-8. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
+8. **Metrics other Ossie tools misread** (§6.8): a metric whose meaning depends on its `TIDEPOOL` extension still carries a plain `ANSI_SQL` expression, which other tools compute without the extension. Options: accept it and say so in `describe_model` and the docs; read a `TIDEPOOL` dialect first and keep `ANSI_SQL` only for metrics that mean the same without the extension; or have `validate` warn. Related: extension `data` is a JSON string because Ossie says so, which is heavy to write by hand. Should we also accept a YAML mapping there and write it back as a string?
+9. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
 
 ---
 
