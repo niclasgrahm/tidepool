@@ -623,6 +623,123 @@ longer. Like Looker's "in the last 7 days", the current period counts, so
 - **Tested** by the oracle: a generated dimension sometimes points at an earlier row of itself (`up`), rewritten (moves), deleted (orphans), with subtree selections and level dimensions checked against DuckDB's recursive CTEs. Planted bugs it catches: a subtree without its own node, a tree cached by anything but the table's identity, a level off by one on the fast path, an incremental answer kept across a move. Cycle breaking is unit-tested (DuckDB can't express it).
 - **Limits.** Placement is current-state: past facts roll up to where a node is now. Under one-directional filtering fact selections don't narrow the tree (D5); `both` does. A hierarchy field as a visual dimension groups by key.
 
+### 5.7 Text search, and rows as they arrive
+
+**Status: done 2026-11-03, after v0.1.** For logs and other text: a
+table of log lines (`message` stored `encoding: plain`, plan §3.3) is
+searched live from the dashboard, and the search is a selection like any
+other, so every visual answers for the matching rows. Type `timeout` and
+the per-level bars, the per-service counts and the rate line show the
+lines that contain it; click a service and the matches narrow. That is
+what a log store's grep can't do. Loki narrows by labels, then greps; here
+the labels are dictionary columns (service, level, pod: cheap
+filters), and the search runs only on what they leave.
+
+- **The condition.** `Condition::Contains(Needle)`: the value contains the
+  text, ignoring the case of ASCII letters (`A`–`Z` match `a`–`z`; other
+  characters must match exactly). One phrase, no operators: `lock
+  timeout` is that phrase. An empty text selects nothing (it's removed).
+  NULL never contains anything. It applies to string fields (columns of
+  either encoding, and derived string fields). On the wire:
+  `search { field, text }` in the live protocol (empty text clears it),
+  `{"field", "contains": "…"}` in `POST /v1/query` filters, and
+  `selection` reports it as `contains`. It goes into history, `back`
+  undoes it.
+- **On a dictionary column** it's evaluated once per value, like every
+  other condition (§5.2): searching `service` costs the dictionary, not
+  the rows.
+- **On a plain column** the fast path searches the text where it's
+  stored. A segment's strings are one byte arena with offsets
+  (`ColumnData::Str`), so a morsel's rows are one contiguous slice: it is
+  lowercased (ASCII only, a branch-free pass the compiler vectorizes) into
+  a scratch buffer and searched with `memchr::memmem` (SIMD), and each hit
+  is mapped to its row by walking the offsets. After a hit the search
+  jumps to the next row, so each row is found at most once, and a hit
+  that crosses into the next row is no hit. Needles without letters skip
+  the lowercasing. Measured on 157 MB of synthetic Postgres log lines, one
+  core of an M1 Max: ~16 GB/s with lowercasing and ~27 GB/s without,
+  against 1.5–9 GB/s for a case-insensitive `regex` and Aho-Corasick. So
+  100M lines of ~150 bytes are a ~1 s scan on one core, ~100 ms on ten.
+  When other conditions have already left few rows (fewer than one in
+  four), only those rows are searched, one at a time.
+- **Hits are cached per segment** (§6.5): a bitset per morsel, keyed by
+  the segment's identity (`Arc<SegmentData>`), the column and the needle,
+  filled the first time a scan reads it, like join columns. Segments are
+  immutable, so a live dashboard with a search open searches each new
+  chunk once and then never again, every other visual with the same
+  search reuses the bits, and a session toggling back is answered from
+  them. **Typing narrows:** a needle that contains an earlier needle (for
+  `time` then `timeo`) only searches the rows the earlier one matched in
+  a morsel, one at a time, when that morsel's bits are there and hold
+  fewer than one row in four (otherwise searching the morsel whole is
+  faster: measured, `d` → `de` row by row was 2.5× slower). Entries go
+  when their segment does, and past 64 MB the least recently used go.
+- **The general path** tests the same `Needle` on each decoded value.
+  Both paths, cached and uncached, are checked against DuckDB:
+  `contains(translate(x, 'A…Z', 'a…z'), translate(text, 'A…Z', 'a…z'))`
+  folds the same way (ASCII only, as `lower` would not).
+- **Rows, newest first: the `rows` visual.** `type: rows` with
+  `dimensions` (the columns to show) and `limit` (default 100, at most
+  1000) shows the newest rows of one table that pass the selection, most
+  recent arrival first (row id order: ingest order, which for a log tail
+  is what you want; it isn't sorted by a time column). The table is the
+  one the columns' tables are reached from, by the rule of a table
+  without metrics (`rows_anchor`). Columns may be fields of related
+  tables (a log line's service owner). The engine
+  (`Engine::rows`) runs the anchor's conditions the fast way (a plain
+  column can be searched but not otherwise read by the fast path), morsel
+  by morsel from the newest, in parallel waves of a few morsels per
+  thread, and stops when it has the limit. Only the rows it keeps are
+  decoded. With an `Engine` the answer is kept: the next epoch scans only
+  rows appended since, puts their hits in front and drops kept rows that
+  were deleted; it starts over when it's short of the limit after that,
+  or when a related table changed (the same check as for incremental
+  answers, §6.5). Over HTTP: `POST /v1/rows`.
+- **The search box: `widget: search`** is a filter on a string field: a
+  text box that sends `search` as you type (debounced, 150 ms). The UI
+  marks the matches in `rows` visuals.
+- **Measured** with `just bench-search` on the M1 Max (10 cores), 10M
+  synthetic Postgres lines (1.2 GB of text): a new needle is counted in
+  ~20 ms (~60 GB/s over the text; a needle without letters, which skips
+  lowercasing, ~11 ms); the same needle under another selection, its hits
+  cached, 2–4 ms; typing `deadlock` costs ~20 ms for each of the first
+  three keys and ~2 ms for each after (narrowing), 80 ms in all; the
+  newest 200 matching rows ~1 ms (a needle found nowhere is a scan of
+  everything, 24 ms); after 100k more lines, the kept views 0.3–0.7 ms.
+  By the same rate a new needle over 100M lines is ~200 ms: over the
+  fresh-selection target of §2.3, which wasn't written for text. The skip
+  indexes below are what would bring it down.
+- **Also built on the way:** the general path's key indexes (row by
+  primary-key code, for following relationships) are cached by the
+  table's identity, as the other caches are: a `rows` visual showing a
+  related column read one every epoch. `POST /v1/rows`, the MCP tool
+  `read_rows`, and `contains` filters in `POST /v1/query` and
+  `query_metrics`.
+- **The example** (`examples/pglogs`, `just pglogs`): Postgres logging
+  everything as JSON (statements with durations, connections, lock waits,
+  checkpoints, vacuum, its `DEBUG` lines), a Python shop app that makes
+  the usual mistakes on purpose (unique and check violations, syntax
+  errors, deadlocks, lock and statement timeouts, wrong passwords, a
+  missing database), and a standard-library shipper tailing the log into
+  Tidepool. The shipper sends the minute as its own dictionary column (the
+  trend's buckets), saves where it read each file to, and keys each batch
+  by where it starts, so restarts lose and repeat nothing (checked: line
+  counts equal across restarts of the shipper and of Tidepool). Kayak has
+  no file input, which is why the shipper is a script; a Kayak `file`
+  input would replace it.
+- **Out of scope here:** token or n-gram skip indexes per sealed segment
+  (ClickHouse's `tokenbf_v1`), so a search can skip segments that can't
+  match; several terms, `NOT`, regular expressions; sorting `rows` by a
+  column; a count of matching rows in the `rows` visual (a KPI over
+  `COUNT(*)` shows it).
+- **Tested** by the oracle (a plain-encoded `note` column on the fact,
+  `Contains` on it, on dictionary columns and on derived fields, with
+  needles cut from stored values, sometimes in other case or absent; the
+  rows of a `rows` query compared with DuckDB's as a set, and its order
+  and limit by unit tests), planted bugs (a hit crossing into the next row
+  counted, hits cached by the needle only, a narrowed search that keeps
+  rows the longer needle doesn't match), and `just bench-search`.
+
 ## 6. Query execution
 
 ### 6.1 Visual query (canonical form)
@@ -1212,6 +1329,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 17. GitOps: the config from a branch of a remote repository, plan checks on pull requests, UI changes pushed as commits. Design in [gitops.md](gitops.md)
 18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
 19. The measure vocabulary (§6.8, D16): `total`, `set`, more aggregates, `per`/`then`, `time_window`, sets from sets
+20. Text search as a selection and the `rows` visual, for logs (§5.7), with an example of Postgres logs (`examples/pglogs`)
 
 ---
 

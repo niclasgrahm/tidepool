@@ -10,8 +10,8 @@ use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
 
 use crate::api::{post_text, save_file};
 use crate::board::{
-    beside, display, export_request, filter_meta, formatted, next_period, next_sort, node_class,
-    number, share, value_class, visual_tags, wanted_window,
+    beside, brush_range, display, export_request, export_rows_request, filter_meta, formatted,
+    marks, next_sort, node_class, number, share, value_class, visual_tags, wanted_window,
 };
 use crate::charts::Data;
 use crate::datepick::DateRange;
@@ -79,7 +79,99 @@ fn Filter(info: FilterInfo, height: f64) -> impl IntoView {
     match info.widget.as_str() {
         "date_range" => view! { <DateRange title=short(&info.field) field=info.field timed=info.timed /> }.into_any(),
         "tree" => view! { <FilterTree field=info.field measure=info.measure format=info.measure_format height=height /> }.into_any(),
+        "search" => view! { <SearchBox field=info.field /> }.into_any(),
         _ => view! { <FilterList field=info.field measure=info.measure format=info.measure_format height=height /> }.into_any(),
+    }
+}
+
+/// How long typing pauses before a search goes to the server.
+const TYPING: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A search box (`widget: search`): what's typed selects the rows whose
+/// value contains it, sent once typing pauses. It follows the selection
+/// (back, clear) unless the viewer is typing something newer.
+#[component]
+fn SearchBox(field: String) -> impl IntoView {
+    let live = expect_context::<Live>();
+    let text = RwSignal::new(String::new());
+    // texts sent and not answered yet, oldest first: the selection
+    // catching up with one of them isn't news, and mustn't undo what was
+    // typed since
+    let pending = StoredValue::new(Vec::<String>::new());
+    let shown = StoredValue::new(String::new());
+    let typed = StoredValue::new(0u64);
+    {
+        let field = field.clone();
+        Effect::new(move |_| {
+            let chosen = live.selection.with(|s| {
+                s.iter()
+                    .find(|f| f.field == field)
+                    .and_then(|f| f.contains.clone())
+                    .unwrap_or_default()
+            });
+            let ours = pending.with_value(|p| p.iter().position(|t| *t == chosen));
+            match ours {
+                Some(at) => pending.update_value(|p| {
+                    p.drain(..=at);
+                }),
+                // changed elsewhere (back, clear): the box follows
+                None if chosen != shown.get_value() => {
+                    pending.update_value(Vec::clear);
+                    text.set(chosen.clone());
+                }
+                None => {}
+            }
+            shown.set_value(chosen);
+        });
+    }
+    let name = StoredValue::new(field.clone());
+    let send = move |value: String| {
+        pending.update_value(|p| p.push(value.clone()));
+        live.send(&json!({"type": "search", "field": name.get_value(), "text": value}));
+    };
+    // what was sent last, or what the selection says when nothing is on
+    // its way
+    let last = move || {
+        pending
+            .with_value(|p| p.last().cloned())
+            .unwrap_or_else(|| shown.get_value())
+    };
+    let on_input = move |event| {
+        let value = event_target_value(&event);
+        text.set(value.clone());
+        let n = typed.get_value() + 1;
+        typed.set_value(n);
+        set_timeout(
+            move || {
+                if typed.get_value() == n && value != last() {
+                    send(value);
+                }
+            },
+            TYPING,
+        );
+    };
+    let title = short(&field);
+    view! {
+        <section class="filter search-filter" data-field=field.clone()>
+            <header class="filter-head"><h2>{title.clone()}</h2></header>
+            <input
+                type="search"
+                placeholder="Contains…"
+                aria-label=format!("Search {title}")
+                prop:value=move || text.get()
+                on:input=on_input
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    // Enter sends at once
+                    if ev.key() == "Enter" {
+                        typed.set_value(typed.get_value() + 1);
+                        let value = text.get_untracked();
+                        if value != last() {
+                            send(value);
+                        }
+                    }
+                }
+            />
+        </section>
     }
 }
 
@@ -462,10 +554,19 @@ fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
     let info = info.clone();
     let failed = RwSignal::new(None::<String>);
     let export = move |_| {
-        let request = live.selection.with_untracked(|s| export_request(&info, s));
         let name = format!("{}.csv", info.id);
+        // a rows visual exports its rows, as many as it can show
+        let rows = (info.visual_type == "rows").then(|| {
+            live.selection
+                .with_untracked(|s| export_rows_request(&info, s, 1000))
+        });
+        let request = live.selection.with_untracked(|s| export_request(&info, s));
         leptos::task::spawn_local(async move {
-            let outcome = match post_text("/v1/query?format=csv", &request).await {
+            let reply = match rows {
+                Some(rows) => post_text("/v1/rows?format=csv", &rows).await,
+                None => post_text("/v1/query?format=csv", &request).await,
+            };
+            let outcome = match reply {
                 Ok((200, text)) => save_file(&name, &text, "text/csv"),
                 Ok((status, text)) => Err(format!("the server answered {status}: {text}")),
                 Err(err) => Err(err),
@@ -486,6 +587,7 @@ fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
 fn body(live: Live, info: &VisualInfo, rows: Vec<Vec<Value>>, compare: Option<&Value>) -> AnyView {
     match info.visual_type.as_str() {
         "kpi" => kpi(live, info, &rows, compare),
+        "rows" => view! { <RowsTable info=info.clone() rows=rows /> }.into_any(),
         _ => view! { <Table info=info.clone() rows=rows /> }.into_any(),
     }
 }
@@ -571,8 +673,8 @@ fn line_chart(
         return view! { <div class="chart"><LineChart data=data grain=grain label=title /></div> }
             .into_any();
     }
-    // a brushed span of periods selects their range: from the first one's
-    // start to the start of the period after the last
+    // a brushed span selects its range: whole periods at a grain, the
+    // values themselves otherwise (`brush_range`)
     let on_brush = Callback::new(move |(start, end): (usize, usize)| {
         let at = |i: usize| {
             rows.with_untracked(|rows| {
@@ -582,14 +684,14 @@ fn line_chart(
                     .map(str::to_string)
             })
         };
-        let (Some(from), Some(last)) = (at(start), at(end.max(start))) else {
+        let (Some(first), Some(last)) = (at(start), at(end.max(start))) else {
             return;
         };
-        let to = next_period(&last, dimension.grain.as_deref().unwrap_or("day"));
+        let Some((from, to)) = brush_range(&first, &last, dimension.grain.as_deref()) else {
+            return;
+        };
         live.send(&json!({
-            "type": "select_range", "field": dimension.field,
-            "from": format!("{from}T00:00:00Z"),
-            "to": to.map(|t| format!("{t}T00:00:00Z")),
+            "type": "select_range", "field": dimension.field, "from": from, "to": to,
         }));
     });
     view! { <div class="chart"><LineChart data=data grain=grain on_brush=on_brush label=title /></div> }.into_any()
@@ -597,6 +699,59 @@ fn line_chart(
 
 /// A table: sortable by any column (the server sorts), a row click selects
 /// its first dimension's value, changed cells flash.
+/// A `rows` visual: the newest rows, newest first, each as it is. Text a
+/// search selects is marked where it's found.
+#[component]
+fn RowsTable(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
+    let live = expect_context::<Live>();
+    let fields: Vec<String> = info.dimensions.iter().map(|d| d.field.clone()).collect();
+    // the text searched for in each column, if any
+    let searched: Vec<Option<String>> = live.selection.with_untracked(|s| {
+        fields
+            .iter()
+            .map(|f| {
+                s.iter()
+                    .find(|c| c.field == *f)
+                    .and_then(|c| c.contains.clone())
+            })
+            .collect()
+    });
+    let empty = rows.is_empty();
+    view! {
+        <div class="table-wrap rows-wrap">
+            <table class="rows-table">
+                <thead><tr>
+                    {fields.iter().map(|f| view! { <th>{short(f)}</th> }).collect_view()}
+                </tr></thead>
+                <tbody>
+                    {rows.into_iter().map(|row| view! {
+                        <tr>
+                            {row.into_iter().enumerate().map(|(c, v)| {
+                                let text = display(&v);
+                                let numeric = v.is_number();
+                                let parts = match searched.get(c).cloned().flatten() {
+                                    Some(needle) => marks(&text, &needle),
+                                    None => vec![(text, false)],
+                                };
+                                view! {
+                                    <td class:num=numeric class:null=v.is_null()>
+                                        {parts.into_iter().map(|(part, hit)| if hit {
+                                            view! { <mark>{part}</mark> }.into_any()
+                                        } else {
+                                            part.into_any()
+                                        }).collect_view()}
+                                    </td>
+                                }
+                            }).collect_view()}
+                        </tr>
+                    }).collect_view()}
+                </tbody>
+            </table>
+            {empty.then(|| view! { <p class="quiet">"No rows match."</p> })}
+        </div>
+    }
+}
+
 #[component]
 fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
     let live = expect_context::<Live>();

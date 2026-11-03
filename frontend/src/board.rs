@@ -2,6 +2,7 @@
 //! formatted, bars scaled. No DOM here, so `cargo test` covers all of it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 
 use serde_json::Value;
 use tidepool_config::format::{NumberFormat, Style};
@@ -152,6 +153,70 @@ pub fn next_period(date: &str, grain: &str) -> Option<String> {
     Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// A timestamp as the server writes one (`2026-11-03T19:05:00Z`, maybe with
+/// a fraction of a second, maybe without the `Z`): microseconds since the
+/// Unix epoch, and whether it had the `Z`.
+fn micros_of(text: &str) -> Option<(i64, bool)> {
+    let (rest, zoned) = match text.strip_suffix('Z') {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    };
+    let (date, time) = rest.split_once('T')?;
+    let mut ymd = date.split('-').map(|p| p.parse::<i64>().ok());
+    let days = days_from_civil(ymd.next()??, ymd.next()??, ymd.next()??);
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut hms = clock.split(':').map(|p| p.parse::<i64>().ok());
+    let seconds = hms.next()?? * 3600 + hms.next()?? * 60 + hms.next()??;
+    if fraction.len() > 6 || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let micros = format!("{fraction:0<6}").parse::<i64>().ok()?;
+    Some((days * MICROS_PER_DAY + seconds * 1_000_000 + micros, zoned))
+}
+
+/// [`micros_of`]'s inverse, with a fraction only when there is one.
+fn timestamp_text(micros: i64, zoned: bool) -> String {
+    let (y, m, d) = civil_from_days(micros.div_euclid(MICROS_PER_DAY));
+    let of_day = micros.rem_euclid(MICROS_PER_DAY);
+    let (seconds, fraction) = (of_day / 1_000_000, of_day % 1_000_000);
+    let mut text = format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if fraction != 0 {
+        let _ = write!(text, ".{fraction:06}");
+    }
+    if zoned {
+        text.push('Z');
+    }
+    text
+}
+
+/// What brushing a line chart's categories `first` to `last` selects, as
+/// `select_range` bounds (half-open): for a time field at a grain, whole
+/// periods, from the first one's start to the start of the period after the
+/// last; for a date, the days; for a timestamp, the values themselves, from
+/// the first to just after the last.
+#[must_use]
+pub fn brush_range(first: &str, last: &str, grain: Option<&str>) -> Option<(String, String)> {
+    let midnight = |date: String| format!("{date}T00:00:00Z");
+    match grain {
+        Some(grain) => Some((
+            midnight(first.to_string()),
+            midnight(next_period(last, grain)?),
+        )),
+        None if micros_of(last).is_none() => Some((first.to_string(), next_period(last, "day")?)),
+        None => {
+            let (at, zoned) = micros_of(last)?;
+            Some((first.to_string(), timestamp_text(at + 1, zoned)))
+        }
+    }
+}
+
 /// A selected range as it reads in a chip. Ranges are half-open, so a range
 /// of whole days shows the last day it includes: `2026-09-22T00:00:00Z` to
 /// `2026-09-28T00:00:00Z` is "2026-09-22 to 2026-09-27".
@@ -173,8 +238,15 @@ pub fn range_label(from: Option<&Value>, to: Option<&Value>) -> String {
         let (y, m, d) = civil_from_days(days);
         format!("{y:04}-{m:02}-{d:02}")
     };
+    // a brushed range of timestamps ends just after its last value: shown
+    // as that value
+    let last = |v: &Value| {
+        let (at, zoned) = micros_of(v.as_str()?)?;
+        (at.rem_euclid(1_000_000) == 1).then(|| timestamp_text(at - 1, zoned))
+    };
     let start = from.map(|v| day(v).map_or_else(|| display(v), civil));
-    let end = to.map(|v| day(v).map_or_else(|| display(v), |d| civil(d - 1)));
+    let end =
+        to.map(|v| day(v).map_or_else(|| last(v).unwrap_or_else(|| display(v)), |d| civil(d - 1)));
     match (start, end) {
         (Some(start), Some(end)) if start == end => start,
         (Some(start), Some(end)) => format!("{start} to {end}"),
@@ -211,6 +283,9 @@ pub fn presets(timed: bool) -> Vec<RelativeWindow> {
 /// days"), values listed, a range by its ends.
 #[must_use]
 pub fn selected_label(selected: &SelectedField) -> String {
+    if let Some(text) = &selected.contains {
+        return format!("“{text}”");
+    }
     match (&selected.relative, &selected.values) {
         (Some(window), _) => window.label(),
         (None, Some(values)) => values.iter().map(display).collect::<Vec<_>>().join(", "),
@@ -248,11 +323,64 @@ pub fn export_request(
                 from: s.from.clone(),
                 to: s.to.clone(),
                 relative: None,
+                contains: s.contains.clone(),
             })
             .collect(),
         sort: Vec::new(),
         limit: None,
     }
+}
+
+/// What a `rows` visual's CSV export reads: its rows under the selection,
+/// as many as it shows.
+#[must_use]
+pub fn export_rows_request(
+    info: &tidepool_protocol::live::VisualInfo,
+    selection: &[tidepool_protocol::live::SelectedField],
+    limit: usize,
+) -> tidepool_protocol::RowsRequest {
+    let query = export_request(info, selection);
+    tidepool_protocol::RowsRequest {
+        fields: info.dimensions.iter().map(|d| d.field.clone()).collect(),
+        filters: query.filters,
+        limit: Some(limit),
+    }
+}
+
+/// `text` cut where `needle` is found, ignoring the case of ASCII letters
+/// as the server does: (part, whether it's a match), in order. No needle,
+/// or none found, is the whole text unmarked.
+#[must_use]
+pub fn marks(text: &str, needle: &str) -> Vec<(String, bool)> {
+    let fold = |b: u8| b.to_ascii_lowercase();
+    let (hay, find) = (text.as_bytes(), needle.as_bytes());
+    let mut parts = Vec::new();
+    if find.is_empty() || find.len() > hay.len() {
+        return vec![(text.to_string(), false)];
+    }
+    let (mut from, mut at) = (0, 0);
+    while at + find.len() <= hay.len() {
+        let hit = hay[at..at + find.len()]
+            .iter()
+            .zip(find)
+            .all(|(h, n)| fold(*h) == fold(*n));
+        // a match of whole characters only: the needle is whole ones, so
+        // it starts and ends where they do
+        if hit && text.is_char_boundary(at) && text.is_char_boundary(at + find.len()) {
+            if at > from {
+                parts.push((text[from..at].to_string(), false));
+            }
+            parts.push((text[at..at + find.len()].to_string(), true));
+            at += find.len();
+            from = at;
+        } else {
+            at += 1;
+        }
+    }
+    if from < text.len() {
+        parts.push((text[from..].to_string(), false));
+    }
+    parts
 }
 
 /// The window a filter list should ask for, if the rows on screen
@@ -790,6 +918,60 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_selects_periods_days_or_the_values_themselves() {
+        let range = |first: &str, last: &str, grain: Option<&str>| brush_range(first, last, grain);
+        let both = |f: &str, t: &str| Some((f.to_string(), t.to_string()));
+        // a timestamp at a grain: whole periods
+        assert_eq!(
+            range("2026-09-22", "2026-09-28", Some("day")),
+            both("2026-09-22T00:00:00Z", "2026-09-29T00:00:00Z")
+        );
+        assert_eq!(
+            range("2026-01-05", "2026-02-02", Some("week")),
+            both("2026-01-05T00:00:00Z", "2026-02-09T00:00:00Z")
+        );
+        // a date: the days, as dates
+        assert_eq!(
+            range("2026-02-27", "2026-02-28", None),
+            both("2026-02-27", "2026-03-01")
+        );
+        // a timestamp as it is (a minute column): the values, the last
+        // included
+        assert_eq!(
+            range("2026-11-03T19:05:00Z", "2026-11-03T19:09:00Z", None),
+            both("2026-11-03T19:05:00Z", "2026-11-03T19:09:00.000001Z")
+        );
+        assert_eq!(
+            range(
+                "2026-12-31T23:59:59.999999Z",
+                "2026-12-31T23:59:59.999999Z",
+                None
+            ),
+            both("2026-12-31T23:59:59.999999Z", "2027-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            range("2026-11-03T19:05:00.25", "2026-11-03T19:05:00.25", None),
+            both("2026-11-03T19:05:00.25", "2026-11-03T19:05:00.250001")
+        );
+        // and the chip reads it as the values brushed
+        assert_eq!(
+            range_label(
+                Some(&json!("2026-11-03T19:05:00Z")),
+                Some(&json!("2026-11-03T19:09:00.000001Z"))
+            ),
+            "2026-11-03T19:05:00Z to 2026-11-03T19:09:00Z"
+        );
+        assert_eq!(
+            range_label(
+                Some(&json!("2026-11-03T19:05:00Z")),
+                Some(&json!("2026-11-03T19:05:00.000001Z"))
+            ),
+            "2026-11-03T19:05:00Z"
+        );
+        assert_eq!(range("x", "y", Some("day")), None);
+    }
+
+    #[test]
     fn whole_day_ranges_show_the_last_day_they_include() {
         let at = |s: &str| json!(s);
         assert_eq!(
@@ -855,6 +1037,7 @@ mod tests {
             from: Some(json!("2026-01-01T00:00:00Z")),
             to: None,
             relative: None,
+            contains: None,
         }];
         let request = export_request(&info, &selection);
         assert_eq!(request.metrics, vec!["revenue".to_string()]);
@@ -876,6 +1059,7 @@ mod tests {
             from: Some(json!("2026-10-02T00:00:00Z")),
             to: Some(json!("2026-10-09T00:00:00Z")),
             relative: Some(window),
+            contains: None,
         };
         assert_eq!(selected_label(&selected), "Last 7 days");
         let plain = SelectedField {
@@ -987,6 +1171,67 @@ mod tests {
     }
 
     #[test]
+    fn matches_are_marked_as_the_server_finds_them() {
+        let parts = |text: &str, needle: &str| -> Vec<(String, bool)> { marks(text, needle) };
+        let owned = |p: &[(&str, bool)]| -> Vec<(String, bool)> {
+            p.iter().map(|(t, m)| ((*t).to_string(), *m)).collect()
+        };
+        assert_eq!(
+            parts("canceling due to Lock Timeout", "lock timeout"),
+            owned(&[("canceling due to ", false), ("Lock Timeout", true)])
+        );
+        assert_eq!(
+            parts("ERROR: error", "Error"),
+            owned(&[("ERROR", true), (": ", false), ("error", true)])
+        );
+        assert_eq!(parts("café", "é"), owned(&[("caf", false), ("é", true)]));
+        // no needle, none found, or longer than the text: as it is
+        assert_eq!(parts("x", ""), owned(&[("x", false)]));
+        assert_eq!(parts("abc", "zz"), owned(&[("abc", false)]));
+        assert_eq!(parts("ab", "abc"), owned(&[("ab", false)]));
+        // matches don't overlap
+        assert_eq!(parts("aaa", "aa"), owned(&[("aa", true), ("a", false)]));
+    }
+
+    #[test]
+    fn a_search_reads_as_its_text_and_exports_as_contains() {
+        let selected = SelectedField {
+            field: "logs.message".into(),
+            values: None,
+            from: None,
+            to: None,
+            relative: None,
+            contains: Some("timeout".into()),
+        };
+        assert_eq!(selected_label(&selected), "“timeout”");
+        let info = VisualInfo {
+            id: "tail".into(),
+            visual_type: "rows".into(),
+            dimensions: vec![tidepool_protocol::QueryDimension {
+                field: "logs.message".into(),
+                grain: None,
+                level: None,
+            }],
+            metrics: Vec::new(),
+            compare: None,
+            on_click: false,
+            on_brush: false,
+            widget: None,
+            formats: std::collections::BTreeMap::new(),
+            at: tidepool_protocol::live::GridAt {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+        };
+        let request = export_rows_request(&info, &[selected], 50);
+        assert_eq!(request.fields, vec!["logs.message".to_string()]);
+        assert_eq!(request.filters[0].contains.as_deref(), Some("timeout"));
+        assert_eq!(request.limit, Some(50));
+    }
+
+    #[test]
     fn a_tree_chip_shows_the_paths_of_its_nodes() {
         let selected = SelectedField {
             field: "categories.tree".into(),
@@ -994,6 +1239,7 @@ mod tests {
             from: None,
             to: None,
             relative: None,
+            contains: None,
         };
         let mut frame = FilterFrame {
             field: "categories.tree".into(),

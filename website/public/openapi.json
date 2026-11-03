@@ -932,8 +932,15 @@
       },
       "QueryFilter": {
         "additionalProperties": false,
-        "description": "A condition on a field: `in`, a half-open range `from <= value < to`\n(either end may be left out), or a window of time `relative` to now\n(`{\"unit\": \"day\", \"last\": 7}`). Values are written as in ingested rows:\ndecimals, dates and timestamps as strings or numbers.",
+        "description": "A condition on a field: `in`, a half-open range `from <= value < to`\n(either end may be left out), a window of time `relative` to now\n(`{\"unit\": \"day\", \"last\": 7}`), or for a string field the values that\n`contains` a text, ignoring the case of ASCII letters. Values are written\nas in ingested rows: decimals, dates and timestamps as strings or numbers.",
         "properties": {
+          "contains": {
+            "description": "The text a string field's values contain.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "field": {
             "description": "`dataset.field`.",
             "type": "string"
@@ -1344,6 +1351,42 @@
           "category",
           "list_price"
         ],
+        "type": "object"
+      },
+      "RowsRequest": {
+        "additionalProperties": false,
+        "description": "The newest rows of a table that pass some filters (`POST /v1/rows`).",
+        "properties": {
+          "fields": {
+            "description": "The columns, `dataset.field`: fields of the table whose rows these\nare, and of tables it reaches. The table is the one that reaches\nall of them (and the fewest others).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "filters": {
+            "default": [],
+            "description": "As in a query: the fields the table reaches filter its rows.",
+            "items": {
+              "$ref": "#/components/schemas/QueryFilter"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "How many rows, newest first: 100 when not given, 1000 at most.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "title": "RowsRequest",
         "type": "object"
       },
       "ServerInfo": {
@@ -2482,6 +2525,82 @@
           }
         ],
         "summary": "Run a query",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/rows": {
+      "post": {
+        "description": "The newest rows of a table that pass the filters, newest first (the order they arrived in): a log tail. A `contains` filter searches a string field for a text, ignoring the case of ASCII letters, and is fast on `encoding: plain` columns of the table itself. Filters are one-directional, as in a query: the fields the table reaches through relationships filter its rows.",
+        "operationId": "rows",
+        "parameters": [
+          {
+            "description": "`csv` for the rows as CSV, JSON otherwise.",
+            "example": "json",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RowsRequest"
+              }
+            }
+          },
+          "description": "Which rows, and which of their fields.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The rows, newest first, one column per field."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A field the model doesn't have, or no table reaching all of them."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Read the newest rows",
         "tags": [
           "queries"
         ],

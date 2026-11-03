@@ -120,6 +120,7 @@ async fn the_handshake_lists_the_tools() {
             "describe_model",
             "preview_table",
             "query_metrics",
+            "read_rows",
             "get_config",
             "plan_change",
             "apply_change",
@@ -173,6 +174,29 @@ async fn an_agent_writes_rows_and_queries_them() {
     .await;
     assert!(!failed, "{answer}");
     assert_eq!(answer["rows"], json!([["north", "10.00"]]));
+    // the rows themselves, found by their text
+    let (failed, _) = tool(
+        &state,
+        None,
+        "ingest_rows",
+        json!({"table": "orders", "rows": [
+            {"order_id": "o2", "customer_id": "c1", "product_id": "p1", "status": "paid",
+             "ordered_at": "2026-02-02T10:00:00Z", "quantity": 1, "amount": "2.00",
+             "note": "Gift wrap, please"}
+        ]}),
+    )
+    .await;
+    assert!(!failed);
+    let (failed, answer) = tool(
+        &state,
+        None,
+        "read_rows",
+        json!({"fields": ["orders.order_id", "customers.name"],
+               "filters": [{"field": "orders.note", "contains": "GIFT"}]}),
+    )
+    .await;
+    assert!(!failed, "{answer}");
+    assert_eq!(answer["rows"], json!([["o2", "Ada"]]));
     // a mistake comes back as a tool error the agent can read
     let (failed, answer) = tool(
         &state,

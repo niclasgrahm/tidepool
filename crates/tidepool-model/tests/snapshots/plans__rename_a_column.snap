@@ -1,7 +1,8 @@
 ---
 source: crates/tidepool-model/tests/plans.rs
-expression: "plan_for(&\n[Replace(\"tables/orders.yaml\",\n\"  note:        { type: string, nullable: true, encoding: plain }\",\n\"  comment:     { type: string, nullable: true, encoding: plain, renamed_from: note }\")])"
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\",\n\"  note:        { type: string, nullable: true, encoding: plain }\",\n\"  comment:     { type: string, nullable: true, encoding: plain, renamed_from: note }\"),\nReplace(\"dashboards/shipping_notes.yaml\", \"field: orders.note\",\n\"field: orders.comment\"),\nReplace(\"dashboards/shipping_notes.yaml\", \", orders.note]\",\n\", orders.comment]\")])"
 ---
-1 change (1 safe, 0 rebuild, 0 destructive)
+2 changes (2 safe, 0 rebuild, 0 destructive)
 
   > column       orders.note → orders.comment  safe
+  ~ dashboard    shipping_notes                safe

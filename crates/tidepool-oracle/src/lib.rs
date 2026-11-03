@@ -14,7 +14,10 @@ use std::sync::Arc;
 use serde_json::Value as Json;
 use tidepool_config::ConfigSet;
 use tidepool_config::diag::render_all;
-use tidepool_engine::{Condition, Dim, Engine, Query, Relative, Selection, run, run_general};
+use tidepool_engine::{
+    Condition, Dim, Engine, Query, Relative, RowsQuery, Selection, rows, rows_general, run,
+    run_general,
+};
 use tidepool_expr::temporal::Part;
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, Model};
@@ -109,6 +112,9 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
                 from: Some(scalar(from, &source)),
                 to: Some(scalar(to, &source)),
             },
+            Cond::Contains(text) => {
+                Condition::Contains(Arc::new(tidepool_engine::Needle::new(text)))
+            }
             Cond::Relative {
                 now,
                 unit,
@@ -252,6 +258,20 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
                 compare(seed, q, path, &query, &sql, ours, theirs.clone())?;
             }
         }
+        typing(seed, q, &db, &schema, &model, snapshot, &cached, &query)?;
+        let limit = 1 + rng.below(30);
+        check_rows(
+            seed,
+            q,
+            &db,
+            &schema,
+            &model,
+            snapshot,
+            &cached,
+            &query,
+            &engine.selection,
+            limit,
+        )?;
         // every execution path must agree with DuckDB: the fast one, the
         // general one, and the fast one with caches built by earlier queries
         for (path, ours) in [
@@ -271,6 +291,143 @@ pub fn check_seed(seed: u64, queries: usize) -> Result<usize, String> {
     }
     replay(seed, &history, &replayed)?;
     Ok(queries)
+}
+
+/// A search typed a character at a time: each prefix of the query's first
+/// needle in turn, on the cached engine, so a needle narrows the one before
+/// it (plan §5.7). Every answer against DuckDB.
+#[allow(clippy::too_many_arguments)]
+fn typing(
+    seed: u64,
+    q: usize,
+    db: &duckdb::Connection,
+    schema: &Schema,
+    model: &Model,
+    snapshot: &Snapshot,
+    cached: &Engine,
+    query: &generate::Query,
+) -> Result<(), String> {
+    let Some(at) = query
+        .selection
+        .iter()
+        .position(|(_, _, c)| matches!(c, Cond::Contains(t) if t.chars().count() > 1))
+    else {
+        return Ok(());
+    };
+    let Cond::Contains(text) = &query.selection[at].2 else {
+        return Ok(());
+    };
+    let chars: Vec<char> = text.chars().collect();
+    for typed in 1..=chars.len() {
+        let mut partial = query.clone();
+        partial.selection[at].2 = Cond::Contains(chars[..typed].iter().collect());
+        let engine = engine_query(model, schema, &partial)
+            .map_err(|e| format!("seed {seed} query {q}: {e}"))?;
+        let sql = duck::sql(schema, &partial);
+        let width = partial.dims.len() + partial.metrics.len();
+        let theirs = duck::run(db, &sql, width)
+            .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
+        let ours = cached
+            .run(snapshot, &engine)
+            .map_err(|e| format!("seed {seed} query {q}: {e}"))?;
+        let ours: Vec<Vec<Canon>> = ours
+            .rows
+            .iter()
+            .map(|row| row.iter().map(canon).collect())
+            .collect();
+        compare(seed, q, "typed", &partial, &sql, ours, theirs)?;
+    }
+    Ok(())
+}
+
+/// The fields a `rows` query in the oracle shows: `f0`'s, its text and a
+/// field of a table it reaches.
+const ROWS_FIELDS: [(&str, &str); 5] = [
+    ("f0", "day"),
+    ("f0", "note"),
+    ("f0", "status"),
+    ("f0", "amount"),
+    ("d0", "name"),
+];
+
+/// A `rows` query on `f0` under `selection`.
+fn rows_query(model: &Model, selection: &Selection, limit: usize) -> Result<RowsQuery, String> {
+    let fields = ROWS_FIELDS
+        .iter()
+        .map(|(table, field)| {
+            let table = model.table_named(table).ok_or("unknown table")?;
+            Ok(FieldRef {
+                table: table.id,
+                field: (*field).to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(RowsQuery {
+        fields,
+        selection: selection.clone(),
+        limit,
+    })
+}
+
+/// A `rows` query checked: every row there is (at most 1000, which the
+/// generated facts stay under) against DuckDB as a set, and the newest
+/// `limit` of them the same on every path, a prefix of all of them.
+#[allow(clippy::too_many_arguments)]
+fn check_rows(
+    seed: u64,
+    q: usize,
+    db: &duckdb::Connection,
+    schema: &Schema,
+    model: &Model,
+    snapshot: &Snapshot,
+    cached: &Engine,
+    query: &generate::Query,
+    selection: &Selection,
+    limit: usize,
+) -> Result<(), String> {
+    let fields: Vec<(String, String)> = ROWS_FIELDS
+        .iter()
+        .map(|(t, f)| ((*t).to_string(), (*f).to_string()))
+        .collect();
+    let sql = duck::rows_sql(schema, &fields, query);
+    let theirs = duck::run(db, &sql, fields.len())
+        .map_err(|e| format!("seed {seed} query {q}: DuckDB: {e}"))?;
+    let all = rows_query(model, selection, tidepool_engine::MAX_ROWS)?;
+    let some = rows_query(model, selection, limit)?;
+    let canon_rows = |r: &tidepool_engine::ResultSet| -> Vec<Vec<Canon>> {
+        r.rows
+            .iter()
+            .map(|row| row.iter().map(canon).collect())
+            .collect()
+    };
+    let every = rows(snapshot, &all).map_err(|e| format!("seed {seed} query {q}: rows: {e}"))?;
+    compare(seed, q, "rows", query, &sql, canon_rows(&every), theirs)?;
+    let newest: Vec<Vec<Canon>> = canon_rows(&every).into_iter().take(limit).collect();
+    for (path, ours) in [
+        ("rows, general", rows_general(snapshot, &all)),
+        ("rows, cached", cached.rows(snapshot, &all)),
+    ] {
+        let ours = ours.map_err(|e| format!("seed {seed} query {q}: {path}: {e}"))?;
+        if canon_rows(&ours) != canon_rows(&every) {
+            return Err(format!(
+                "seed {seed} query {q}: {path} differs from rows, in order\nquery: {query:?}"
+            ));
+        }
+    }
+    for (path, ours) in [
+        ("newest rows", rows(snapshot, &some)),
+        ("newest rows, general", rows_general(snapshot, &some)),
+        ("newest rows, cached", cached.rows(snapshot, &some)),
+    ] {
+        let ours = ours.map_err(|e| format!("seed {seed} query {q}: {path}: {e}"))?;
+        if canon_rows(&ours) != newest {
+            return Err(format!(
+                "seed {seed} query {q}: the {limit} {path} aren't the first of every row\nquery: {query:?}\nours: {:?}\nnewest: {newest:?}",
+                canon_rows(&ours)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The incremental oracle (plan §11): a few queries kept live on one cached
@@ -310,7 +467,25 @@ pub fn check_live(seed: u64, live: usize) -> Result<usize, String> {
     let mut store = Store::with_seal_rows(Arc::clone(&model), 8 + rng.below(200));
     let engine = Engine::default();
     let mut compared = 0;
+    // a `rows` view kept live as well: its kept answer brought up to date
+    // epoch by epoch (new rows in front, deleted ones gone)
+    let limit = 1 + rng.below(30);
     let check = |snapshot: &Snapshot, compared: &mut usize| -> Result<(), String> {
+        if let Some((query, live)) = queries.first() {
+            check_rows(
+                seed,
+                0,
+                &db,
+                &schema,
+                &model,
+                snapshot,
+                &engine,
+                query,
+                &live.selection,
+                limit,
+            )
+            .map_err(|e| format!("{e}\n(live, epoch {})", snapshot.epoch))?;
+        }
         for (q, (query, live)) in queries.iter().enumerate() {
             let sql = duck::sql(&schema, query);
             let width = query.dims.len() + query.metrics.len();
@@ -383,6 +558,7 @@ fn before(schema: &Schema, rng: &mut Rng) -> Vec<(String, String)> {
                 match column {
                     Some(c)
                         if c != "key"
+                            && !line.contains("encoding")
                             && !keys.iter().any(|(t, k)| t == name && *k == c)
                             && rng.chance(50) =>
                     {

@@ -61,6 +61,7 @@ Whole periods relative to now: the `last` ones of `unit`, ending with the curren
 | `list` | A searchable list of values. |
 | `date_range` | A from/to range, for time fields. |
 | `tree` | An expandable tree, for a dataset's hierarchy field (the default for one). |
+| `search` | A text box, for a string field: the rows whose value contains what is typed are selected, ignoring the case of ASCII letters. |
 
 
 ## `GridPosition` {#dashboard-gridposition}
@@ -107,6 +108,7 @@ One of:
 
 - `kpi` · `bar` · `line` · `table`
 - `filter`: The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics.
+- `rows`: The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics.
 
 
 ## `WindowUnit` {#dashboard-windowunit}

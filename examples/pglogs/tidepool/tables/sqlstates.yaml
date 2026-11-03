@@ -1,0 +1,9 @@
+# SQLSTATE codes: the condition's name and its class. The shipper writes the
+# common ones when it starts and any other code the first time it sees it.
+name: sqlstates
+mode: upsert
+primary_key: [code]
+columns:
+  code:      { type: string }
+  condition: { type: string }     # unique_violation, deadlock_detected, …
+  class:     { type: string }     # Integrity Constraint Violation, …

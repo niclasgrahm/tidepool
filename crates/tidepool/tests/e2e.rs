@@ -489,6 +489,102 @@ fn click_a_bar_watch_it_update_go_back() {
     browser.wait_for(&format!("{KPI_SHOWN} === '1.2k'"), "the KPI to read 1.2k");
 }
 
+/// The rows of the first `rows` visual, as their text.
+const ROWS: &str =
+    "[...document.querySelectorAll('.visual.rows tbody tr')].map(r => r.textContent)";
+
+#[test]
+fn search_as_you_type_and_the_rows_follow() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([
+            {"customer_id": "c-north", "name": "Nora", "region": "north", "segment": null},
+            {"customer_id": "c-south", "name": "Sami", "region": "south", "segment": null},
+        ]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, customer: &str, note: Value| {
+        json!({
+            "order_id": id, "customer_id": customer, "product_id": "p1", "status": "paid",
+            "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": "1.00", "note": note,
+        })
+    };
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "c-north", json!("Leave at the DOOR")),
+            order("o2", "c-south", json!("gift wrap")),
+            order("o3", "c-south", json!("door code 4417")),
+            order("o4", "c-north", Value::Null),
+        ]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/shipping_notes") }),
+    );
+    browser.wait_for(&format!("{ROWS}.length === 4"), "four orders in the rows");
+    browser.wait_for(
+        &format!("{ROWS}[0].includes('Nora')"),
+        "the newest order first",
+    );
+
+    // typed: once typing pauses, a chip, the KPI and the rows follow
+    browser.click_element("document.querySelector('[data-field=\"orders.note\"] input')");
+    browser.call("Input.insertText", &json!({ "text": "door" }));
+    browser.wait_for(
+        &format!("{CHIPS}.includes('“door”')"),
+        "a chip for the search",
+    );
+    browser.wait_for(
+        &format!("{KPI} === '2'"),
+        "two orders with door in the note",
+    );
+    browser.wait_for(&format!("{ROWS}.length === 2"), "the two rows");
+    let marked = browser
+        .eval("[...document.querySelectorAll('.visual.rows mark')].map(m => m.textContent).join()");
+    assert_eq!(
+        marked,
+        json!("door,DOOR"),
+        "the matches marked as typed, in any case"
+    );
+
+    // a click on a bar narrows the search
+    browser.click_element(&bar_labelled("south"));
+    browser.wait_for(&format!("{ROWS}.length === 1"), "south's one door");
+
+    // back twice: the click, then the whole search, and the box empties
+    let back =
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')";
+    browser.click_element(back);
+    browser.wait_for(
+        &format!("!{CHIPS}.includes('south') && {CHIPS}.includes('“door”')"),
+        "the click gone, the search kept",
+    );
+    browser.click_element(back);
+    browser.wait_for(&format!("{CHIPS} === ''"), "the search gone at once");
+    browser.wait_for(
+        "document.querySelector('[data-field=\"orders.note\"] input').value === ''",
+        "the search box empty",
+    );
+    browser.wait_for(&format!("{ROWS}.length === 4"), "every order again");
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // one scenario, start to end
 fn brush_the_trend_drag_across_bars_and_choose_with_keys() {

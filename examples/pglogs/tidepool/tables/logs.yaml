@@ -1,0 +1,25 @@
+# Every log line, from Postgres (its jsonlog) and from the app. The text is
+# stored as it is (`encoding: plain`): searched, never grouped. What lines
+# are grouped and filtered by comes out of them before they arrive, as
+# dictionary columns: severity, database, the minute.
+name: logs
+mode: append
+event_time: logged_at
+retention: 2d
+columns:
+  logged_at:   { type: timestamptz }
+  # the line's minute, from the shipper: the trend's buckets, a small
+  # dictionary (a derived field over logged_at would read every row)
+  minute:      { type: timestamptz, encoding: dict }
+  source:      { type: string }                     # postgres, app
+  severity:    { type: string }                     # DEBUG, LOG, … PANIC
+  sqlstate:    { type: string, nullable: true }     # 23505, 40P01, …
+  database:    { type: string, nullable: true }
+  user_name:   { type: string, nullable: true }
+  application: { type: string, nullable: true }
+  backend:     { type: string, nullable: true }     # client backend, autovacuum worker, …
+  pid:         { type: int64, nullable: true }
+  message:     { type: string, encoding: plain }
+  detail:      { type: string, nullable: true, encoding: plain }
+  hint:        { type: string, nullable: true, encoding: plain }
+  statement:   { type: string, nullable: true, encoding: plain }

@@ -74,6 +74,10 @@ bench *args:
 bench-query *args:
   cargo run --release -p tidepool-bench -- query {{args}}
 
+# text search and rows on synthetic log lines, release build (args: --lines N --runs N)
+bench-search *args:
+  cargo run --release -p tidepool-bench -- search {{args}}
+
 # keep a running server (`just run`) fed with retail data (args: --rate N --server URL)
 feed *args:
   cargo run --release -p tidepool-bench -- feed {{args}}
@@ -102,6 +106,10 @@ demo:
 # Northwind, live: dims in Postgres, orders as events, Kayak → Tidepool (needs Kayak beside this repo, or KAYAK_SRC)
 northwind:
   cd examples/northwind && docker compose up --build
+
+# Postgres' logs, live and searched: a shop app → Postgres jsonlog → shipper → Tidepool (docker compose)
+pglogs:
+  cd examples/pglogs && docker compose up --build
 
 # how fresh the Northwind dashboards are: event time → queryable, from the host
 northwind-freshness seconds="30":

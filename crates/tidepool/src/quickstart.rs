@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The project `init` writes: the retail example, compiled in.
-const FILES: [(&str, &str); 8] = [
+const FILES: [(&str, &str); 9] = [
     (
         "model.ossie.yaml",
         include_str!("../../../examples/retail/model.ossie.yaml"),
@@ -37,6 +37,10 @@ const FILES: [(&str, &str); 8] = [
     (
         "dashboards/sales_recent.yaml",
         include_str!("../../../examples/retail/dashboards/sales_recent.yaml"),
+    ),
+    (
+        "dashboards/shipping_notes.yaml",
+        include_str!("../../../examples/retail/dashboards/shipping_notes.yaml"),
     ),
     ("tidepool.yaml", SERVER),
 ];
@@ -183,8 +187,16 @@ fn order(rng: &mut Rng, id: &str, at: i64) -> String {
         1..=3 => "shipped",
         _ => "paid",
     };
+    // one order in four says something, for the notes dashboard's search
+    let note = match rng.below(16) {
+        0 => r#""Gift wrap, please""#,
+        1 => r#""Leave at the door""#,
+        2 => r#""Deliver after 5 pm""#,
+        3 => r#""Call before delivery: gate code 4417""#,
+        _ => "null",
+    };
     format!(
-        r#"{{"order_id":"{id}","customer_id":"c{customer}","product_id":"p{product}","status":"{status}","ordered_at":"{}","quantity":{quantity},"amount":"{}.{:02}","note":null}}"#,
+        r#"{{"order_id":"{id}","customer_id":"c{customer}","product_id":"p{product}","status":"{status}","ordered_at":"{}","quantity":{quantity},"amount":"{}.{:02}","note":{note}}}"#,
         rfc3339(at),
         cents / 100,
         cents % 100
@@ -361,7 +373,7 @@ mod tests {
         assert_eq!(
             contents(),
             "4 tables (orders, customers, products, categories), a model with metrics, \
-             and 2 dashboards (sales, sales_recent)"
+             and 3 dashboards (sales, sales_recent, shipping_notes)"
         );
     }
 

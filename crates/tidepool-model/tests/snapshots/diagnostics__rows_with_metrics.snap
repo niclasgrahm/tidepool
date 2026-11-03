@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `latest`: a rows visual shows rows, so it has no metrics
+  --> dashboards/shipping_notes.yaml:25:5
+   |
+25 |     metrics: [order_count]
+   |     ^^^^^^^
+
+1 error, 0 warnings

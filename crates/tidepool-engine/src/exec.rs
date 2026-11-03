@@ -31,7 +31,7 @@ struct RowRef {
 
 /// The live row holding each primary-key code, for following relationships
 /// into a table.
-struct KeyIndex(Vec<Option<RowRef>>);
+pub(crate) struct KeyIndex(Vec<Option<RowRef>>);
 
 impl KeyIndex {
     fn build(model: &Model, snapshot: &Snapshot, table: TableId) -> Self {
@@ -70,7 +70,7 @@ impl KeyIndex {
 /// What a scan needs to read values.
 struct Reader<'a> {
     snapshot: &'a Snapshot,
-    indexes: HashMap<TableId, KeyIndex>,
+    indexes: HashMap<TableId, Arc<KeyIndex>>,
     /// The trees of hierarchies read at a level.
     trees: HashMap<TableId, Arc<crate::hierarchy::Hierarchy>>,
 }
@@ -521,6 +521,97 @@ fn slow(
         .collect()
 }
 
+/// A reader for the accesses of `anchors`: key indexes for every table a
+/// path leads into, and the trees of hierarchies read at a level.
+fn reader<'a, 'p>(
+    model: &Model,
+    snapshot: &'a Snapshot,
+    anchors: impl Iterator<Item = &'p AnchorPlan> + Clone,
+    caches: Option<&crate::cache::Caches>,
+) -> Reader<'a> {
+    let mut indexes = HashMap::new();
+    for anchor in anchors.clone() {
+        for access in &anchor.accesses {
+            for hop in &access.path {
+                indexes.entry(hop.to).or_insert_with(|| {
+                    let build = || KeyIndex::build(model, snapshot, hop.to);
+                    // kept while the table is unchanged: a rows view with a
+                    // related column reads it every epoch
+                    match (caches, snapshot.tables.get(&hop.to)) {
+                        (Some(caches), Some(table)) => caches.key_index(table, build),
+                        _ => Arc::new(build()),
+                    }
+                });
+            }
+        }
+    }
+    let trees = anchors
+        .flat_map(|a| &a.accesses)
+        .filter(|a| matches!(a.target, Target::Ancestor { .. }))
+        .filter_map(|a| {
+            let columns = crate::hierarchy::columns(model, &a.field)?;
+            let tree = crate::hierarchy::get(snapshot, caches, a.field.table, &columns).ok()?;
+            Some((a.field.table, tree))
+        })
+        .collect();
+    Reader {
+        snapshot,
+        indexes,
+        trees,
+    }
+}
+
+/// One anchor plan's rows, read the general way: whether a row passes the
+/// plan's conditions, and the values of its accesses.
+pub(crate) struct Rows<'a> {
+    reader: Reader<'a>,
+    plan: &'a AnchorPlan,
+    table: &'a TableSnapshot,
+}
+
+impl<'a> Rows<'a> {
+    pub(crate) fn new(
+        model: &Model,
+        snapshot: &'a Snapshot,
+        plan: &'a AnchorPlan,
+        caches: Option<&crate::cache::Caches>,
+    ) -> Option<Self> {
+        Some(Self {
+            reader: reader(model, snapshot, std::iter::once(plan), caches),
+            plan,
+            table: snapshot.table(plan.table)?,
+        })
+    }
+
+    /// Whether the live or deleted row at `offset` of `segment` passes
+    /// every condition.
+    pub(crate) fn passes(&self, segment: usize, offset: u32) -> bool {
+        let at = RowRef {
+            segment: u32::try_from(segment).unwrap_or(u32::MAX),
+            offset,
+        };
+        self.plan.conditions.iter().all(|(access, condition)| {
+            condition.matches(
+                &self
+                    .reader
+                    .value(self.table, at, &self.plan.accesses[*access]),
+            )
+        })
+    }
+
+    /// The values of `accesses` at a row.
+    pub(crate) fn values(&self, segment: usize, offset: u32, accesses: &[usize]) -> Vec<Scalar> {
+        let at = RowRef {
+            segment: u32::try_from(segment).unwrap_or(u32::MAX),
+            offset,
+        };
+        accesses
+            .iter()
+            .map(|a| self.reader.value(self.table, at, &self.plan.accesses[*a]))
+            .collect()
+    }
+}
+
 /// Run `plan`: rows of dimension values and every planned metric's value
 /// (in `plan.metrics` order).
 pub(crate) fn execute(
@@ -542,37 +633,16 @@ pub(crate) fn execute(
         })
         .collect();
     // key indexes for every table some path of the general path leads into
-    let mut indexes = HashMap::new();
-    for (anchor, _) in plan
-        .anchors
-        .iter()
-        .zip(&prepared)
-        .filter(|(_, p)| p.is_none())
-    {
-        for access in &anchor.accesses {
-            for hop in &access.path {
-                indexes
-                    .entry(hop.to)
-                    .or_insert_with(|| KeyIndex::build(model, snapshot, hop.to));
-            }
-        }
-    }
-    let trees = plan
-        .anchors
-        .iter()
-        .flat_map(|a| &a.accesses)
-        .filter(|a| matches!(a.target, Target::Ancestor { .. }))
-        .filter_map(|a| {
-            let columns = crate::hierarchy::columns(model, &a.field)?;
-            let tree = crate::hierarchy::get(snapshot, caches, a.field.table, &columns).ok()?;
-            Some((a.field.table, tree))
-        })
-        .collect();
-    let reader = Reader {
+    let reader = reader(
+        model,
         snapshot,
-        indexes,
-        trees,
-    };
+        plan.anchors
+            .iter()
+            .zip(&prepared)
+            .filter(|(_, p)| p.is_none())
+            .map(|(a, _)| a),
+        caches,
+    );
 
     let mut rows: HashMap<Vec<Key>, (Vec<Scalar>, Vec<Scalar>)> = HashMap::new();
     let width = plan.metrics.len();

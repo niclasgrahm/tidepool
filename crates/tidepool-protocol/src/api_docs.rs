@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::{
     IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus, QueryRequest, QueryResult,
-    ServerInfo, SessionInfo, StatusInfo, TableInfo, config,
+    RowsRequest, ServerInfo, SessionInfo, StatusInfo, TableInfo, config,
 };
 
 /// The error body every failing request comes back with.
@@ -89,6 +89,7 @@ pub enum Operation {
     GetTable,
     PreviewTable,
     Query,
+    Rows,
     Live,
     GetModel,
     GetStatus,
@@ -108,7 +109,7 @@ pub enum Operation {
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 28] = [
+pub const OPERATIONS: [Operation; 29] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -121,6 +122,7 @@ pub const OPERATIONS: [Operation; 28] = [
     Operation::GetTable,
     Operation::PreviewTable,
     Operation::Query,
+    Operation::Rows,
     Operation::Live,
     Operation::GetModel,
     Operation::GetStatus,
@@ -156,6 +158,7 @@ impl Operation {
             Self::GetTable => "getTable",
             Self::PreviewTable => "previewTable",
             Self::Query => "query",
+            Self::Rows => "rows",
             Self::Live => "live",
             Self::GetModel => "getModel",
             Self::GetStatus => "getStatus",
@@ -696,6 +699,43 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/v1/rows",
+            method: Method::Post,
+            operation: Operation::Rows,
+            summary: "Read the newest rows",
+            description: "The newest rows of a table that pass the filters, newest first (the \
+                          order they arrived in): a log tail. A `contains` filter searches a \
+                          string field for a text, ignoring the case of ASCII letters, and \
+                          is fast on `encoding: plain` columns of the table itself. \
+                          Filters are one-directional, as in a query: the fields the table \
+                          reaches through relationships filter its rows.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![ParamDoc {
+                name: "format",
+                description: "`csv` for the rows as CSV, JSON otherwise.",
+                example: "json",
+            }],
+            request: Some(RequestDoc {
+                description: "Which rows, and which of their fields.",
+                body: Body::Json("RowsRequest"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The rows, newest first, one column per field.",
+                    body: Body::JsonOrCsv("QueryResult"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "A field the model doesn't have, or no table reaching all \
+                                  of them.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/v1/ws",
             method: Method::Get,
             operation: Operation::Live,
@@ -1226,6 +1266,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("TableInfo", of(schema_for!(TableInfo)));
     schemas.insert("Preview", of(schema_for!(Preview)));
     schemas.insert("QueryRequest", of(schema_for!(QueryRequest)));
+    schemas.insert("RowsRequest", of(schema_for!(RowsRequest)));
     schemas.insert("QueryResult", of(schema_for!(QueryResult)));
     schemas.insert("ModelInfo", of(schema_for!(ModelInfo)));
     schemas.insert("StatusInfo", of(schema_for!(StatusInfo)));

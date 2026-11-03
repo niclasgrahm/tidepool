@@ -172,9 +172,10 @@ pub struct QueryDimension {
 }
 
 /// A condition on a field: `in`, a half-open range `from <= value < to`
-/// (either end may be left out), or a window of time `relative` to now
-/// (`{"unit": "day", "last": 7}`). Values are written as in ingested rows:
-/// decimals, dates and timestamps as strings or numbers.
+/// (either end may be left out), a window of time `relative` to now
+/// (`{"unit": "day", "last": 7}`), or for a string field the values that
+/// `contains` a text, ignoring the case of ASCII letters. Values are written
+/// as in ingested rows: decimals, dates and timestamps as strings or numbers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryFilter {
@@ -188,6 +189,25 @@ pub struct QueryFilter {
     pub to: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative: Option<live::RelativeWindow>,
+    /// The text a string field's values contain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+/// The newest rows of a table that pass some filters (`POST /v1/rows`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RowsRequest {
+    /// The columns, `dataset.field`: fields of the table whose rows these
+    /// are, and of tables it reaches. The table is the one that reaches
+    /// all of them (and the fewest others).
+    pub fields: Vec<String>,
+    /// As in a query: the fields the table reaches filter its rows.
+    #[serde(default)]
+    pub filters: Vec<QueryFilter>,
+    /// How many rows, newest first: 100 when not given, 1000 at most.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// A result column to sort by, by its name in [`QueryResult::columns`].

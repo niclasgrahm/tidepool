@@ -150,6 +150,16 @@ fn filter(
             return None;
         }
     };
+    if filter.widget == FilterWidget::Search && field.ty != tidepool_expr::Type::String {
+        cx.push(
+            Diagnostic::error(format!(
+                "`{}` is not a string field, so it can't be searched",
+                filter.field
+            ))
+            .at(file, path.key("widget"))
+            .help("a search box finds text in a string field: a log message, a name"),
+        );
+    }
     if filter.widget == FilterWidget::DateRange && !field.is_time {
         cx.push(
             Diagnostic::error(format!(
@@ -435,6 +445,8 @@ fn visual_shape(
         }
         _ => {}
     }
+    let grained_rows =
+        spec.visual_type == VisualType::Rows && !rows_shape(cx, site, spec, &mut problems);
     let grained = spec.visual_type == VisualType::Filter
         && spec.dimensions.len() == 1
         && spec.dimensions[0].grain().is_some();
@@ -489,7 +501,11 @@ fn visual_shape(
             "it has no dimensions and no metrics, so there's nothing to show",
             "give it `dimensions: [...]`, `metrics: [...]` or both",
         )),
-        VisualType::Table | VisualType::Filter => None,
+        VisualType::Rows if dims == 0 => Some((
+            "a rows visual shows columns, and it has none",
+            "give it `dimensions: [...]`: the fields to show of each row",
+        )),
+        VisualType::Table | VisualType::Filter | VisualType::Rows => None,
     };
     if let Some((message, help)) = empty {
         cx.push(
@@ -504,8 +520,47 @@ fn visual_shape(
                 .at_key(site.file, site.path.key(*key)),
         );
     }
-    problems.is_empty() && empty.is_none() && !grained
+    problems.is_empty() && empty.is_none() && !grained && !grained_rows
 }
+
+/// What only a `rows` visual can get wrong: a limit past [`ROWS_LIMIT`],
+/// metrics or a sort (into `problems`), a grain (reported here; `false`).
+fn rows_shape(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    problems: &mut Vec<(&str, &str)>,
+) -> bool {
+    if spec.limit.is_some_and(|l| l as usize > ROWS_LIMIT) {
+        problems.push(("limit", "a rows visual shows 1000 rows at most"));
+    }
+    if !spec.metrics.is_empty() {
+        problems.push(("metrics", "a rows visual shows rows, so it has no metrics"));
+    }
+    if spec.sort.is_some() {
+        problems.push((
+            "sort",
+            "a rows visual shows the newest rows first, so it has no sort",
+        ));
+    }
+    let Some(at) = spec.dimensions.iter().position(|d| d.grain().is_some()) else {
+        return true;
+    };
+    cx.push(
+        Diagnostic::error(format!(
+            "{}: a rows visual shows each row's own values, so its columns have no grain",
+            site.what
+        ))
+        .at(
+            site.file,
+            site.path.key("dimensions").index(at).key("grain"),
+        ),
+    );
+    false
+}
+
+/// Rows a `rows` visual shows at most (`tidepool_engine::MAX_ROWS`).
+const ROWS_LIMIT: usize = 1000;
 
 /// A table without metrics shows the combinations of its dimensions that
 /// rows of one table have, so some table must reach every dimension.

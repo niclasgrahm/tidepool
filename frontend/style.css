@@ -598,6 +598,16 @@ td.barred { position: relative; }
 .cell-bar { position: absolute; left: 4px; top: 4px; bottom: 4px; max-width: calc(100% - 8px); border-radius: 2px; background: var(--tide-soft); }
 td .cell { position: relative; }
 .visual tbody tr { cursor: pointer; }
+
+/* rows: the newest first, each as it is, long text wrapped; what a search
+   selected is marked in the selection's colour */
+.visual.rows tbody tr { cursor: default; }
+.rows-table td { font: 11.5px/1.45 var(--mono); vertical-align: top; }
+/* the last column (a log line's text, usually) takes the room and wraps */
+.rows-table td:last-child { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.rows-table td:first-child { color: var(--ink-soft); }
+.rows-table td.null { color: var(--gray-8); }
+.rows-table mark { background: var(--anemone-soft); color: var(--anemone-text); border-radius: 2px; box-shadow: 0 0 0 1px var(--anemone-line); }
 .visual tbody tr:hover td { background: var(--gray-2); }
 .num { text-align: right; }
 th.num button { text-align: right; }

@@ -35,11 +35,13 @@ just docs-build      # production build of the doc site
 just docker          # the container image, UI included (tidepool:dev)
 just demo            # the Kayak demo: MQTT → Kayak → Tidepool (docker compose)
 just northwind       # Northwind live: Postgres dims + order events → Kayak → Tidepool
+just pglogs          # Postgres logs live: app → Postgres jsonlog → shipper → Tidepool, searched
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
 just bench-query     # query latency on the reference dataset (args: --orders N --runs N --metrics a,b,c)
 just bench-live      # freshness: 50 WebSocket sessions while ingesting 100k rows/s
+just bench-search    # text search and rows on synthetic log lines (args: --lines N --runs N)
 just feed            # keep a running server (`just run`) fed with retail data, to watch it live
 just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
 just crash           # 1,000 crash points and 25 kill -9 cycles (`just test` runs fewer)
@@ -92,7 +94,7 @@ resolves names in expressions.)
 | `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, live sessions, model/status, the config pipeline | M0–M7 ✓ |
 | `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 ✓ / M4 ✓ |
 | `tidepool` | AGPL | the binary: CLI and wiring; crash and browser e2e tests | M0–M6 ✓ |
-| `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
+| `tidepool-bench` | AGPL | load/latency harness (`just bench`, `bench-search`…, not in CI) | M2 ✓ (ingest) |
 | `tidepool-docsgen` | AGPL | the doc site's generated reference (`just docs`), and the tests that keep `website/` true | ✓ |
 | `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M6 ✓ / M7 ✓ |
 
@@ -333,6 +335,26 @@ change to `auth`, `listen` or `agents` is class `security`
   tree (map-cache variant `ancestor:d`) and never put in
   `Caches::derived`, whose values must not change.
 
+- **Text search** (`text.rs`, plan §5.7): `Condition::Contains(Needle)`,
+  ASCII case folded. On a plain string column the fast path reads it as
+  `Kind::Text` (searched, never decoded: a plain string in a dimension or
+  argument still means the general path), searching a morsel's arena
+  slice at once (fold into scratch + `memchr::memmem`, hits mapped to
+  rows by the offsets, a hit across a row boundary is none). Hits are
+  cached per segment and morsel (`Caches::text`, keyed by segment
+  identity, column and folded needle; a needle that contains a cached
+  one searches only its hits). Text tests run after the other
+  conditions; when few rows are left they're searched one at a time.
+  On a dictionary column it's an ordinary per-code test.
+- **Rows** (`rows.rs`): `Engine::rows` is the `rows` visual and
+  `POST /v1/rows`: the newest rows passing the anchor's conditions, by
+  row id, scanned in waves of morsels from the newest (`Prepared::select`,
+  shared with `scan`), only the kept rows decoded (`exec::Rows`). The
+  answer is kept per plan and brought up to date with the rows appended
+  since (`Kept`); deletes of kept rows that leave it short start over.
+  The oracle compares rows with DuckDB as a set, and order and limit
+  across paths (`check_rows`, also live in `check_live`).
+
 - **Queries without metrics** (`plan::rows_anchor`): dimensions only are
   the combinations there are. They're counted (`ROWS`) on the table that
   reaches every dimension and reaches fewest tables (ties by name), and
@@ -552,6 +574,12 @@ It is a workspace member, so `just ci` lints and tests it natively.
   (`snapshot`) into upsert tables (unchanged rows skipped), and a publisher
   replaying its orders as events through Kayak's `http` input;
   `freshness.py` measures event → queryable.
+- `examples/pglogs/` (`just pglogs`) is the logs test bed: Postgres
+  logging everything as jsonlog, a Python shop app that makes errors on
+  purpose, a stdlib shipper tailing the log into Tidepool (positions
+  saved, idempotency keys from where a batch starts). `sample.ndjson` is
+  a real run's lines, used by `tidepool-server/tests/pglogs.rs`; refresh
+  it from a running stack when the shipper's mapping changes.
 - `examples/retail/` is the example project. Keep it covering every config
   feature as features land. A server run on it writes applied changes back
   into it (`git_commit: false` keeps them out of history); the demo in

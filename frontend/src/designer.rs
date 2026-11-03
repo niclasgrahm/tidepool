@@ -901,6 +901,7 @@ fn why_not(t: VisualType) -> String {
         VisualType::Filter => "A filter lists one dimension's values, without metrics",
         VisualType::Bar | VisualType::Line => "A chart shows metrics by one dimension",
         VisualType::Kpi => "A KPI shows metrics, without dimensions",
+        VisualType::Rows => "Rows show fields of each row, without metrics or grains",
     }
     .to_string()
 }
@@ -1098,8 +1099,19 @@ fn Preview(
             result.set(None);
             return;
         }
+        let rows = kind.get_untracked() == Some(VisualType::Rows);
         spawn_local(async move {
-            let reply = post_json("/v1/query", &request).await;
+            // rows are read, not queried: the newest ones
+            let reply = if rows {
+                let request = tidepool_protocol::RowsRequest {
+                    fields: request.dimensions.iter().map(|d| d.field.clone()).collect(),
+                    filters: Vec::new(),
+                    limit: request.limit,
+                };
+                post_json("/v1/rows", &request).await
+            } else {
+                post_json("/v1/query", &request).await
+            };
             if generation.get_value() != n {
                 return;
             }
@@ -1163,7 +1175,7 @@ fn Preview(
                     }).collect_view())}
                 </ul>
             }.into_any(),
-            Some(VisualType::Table) => view! {
+            Some(VisualType::Table | VisualType::Rows) => view! {
                 <div class="table-wrap preview">
                     <table>
                         <thead><tr>

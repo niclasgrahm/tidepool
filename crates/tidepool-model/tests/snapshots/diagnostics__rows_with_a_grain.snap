@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `latest`: a rows visual shows each row's own values, so its columns have no grain
+  --> dashboards/shipping_notes.yaml:24:53
+   |
+24 |     dimensions: [{ field: orders.ordered_at, grain: day }, customers.name, orders.status, orders.amount, orders.note]
+   |                                                     ^^^
+
+1 error, 0 warnings

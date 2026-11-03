@@ -66,7 +66,24 @@ fn the_retail_example_compiles_without_diagnostics() {
             .any(|f| f.measure.is_some()),
         "a filter shows a measure"
     );
-    assert_eq!(model.dashboards.len(), 2);
+    assert_eq!(model.dashboards.len(), 3);
+    // the notes dashboard searches a plain text column and shows rows
+    assert!(
+        model
+            .dashboards
+            .iter()
+            .flat_map(|d| &d.filters)
+            .any(|f| f.widget == tidepool_config::dashboard::FilterWidget::Search),
+        "a filter is a search box"
+    );
+    assert!(
+        model
+            .dashboards
+            .iter()
+            .flat_map(|d| &d.visuals)
+            .any(|v| v.visual_type == tidepool_config::dashboard::VisualType::Rows),
+        "a visual shows rows"
+    );
     // the recent dashboard opens on a window of the last seven days
     let windows: Vec<_> = model
         .dashboards

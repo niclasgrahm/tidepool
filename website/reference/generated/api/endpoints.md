@@ -147,6 +147,23 @@ Request: [`QueryRequest`](/reference/schemas#schema-queryrequest). What to compu
 | `200` | [`QueryResult`](/reference/schemas#schema-queryresult) or CSV | The answer. |
 | `400` | [`ApiError`](/reference/schemas#schema-apierror) | The query names something the model doesn't have, or asks for something the engine can't do. |
 
+### `POST /v1/rows` {#op-rows}
+
+**Read the newest rows** · access: `read`
+
+The newest rows of a table that pass the filters, newest first (the order they arrived in): a log tail. A `contains` filter searches a string field for a text, ignoring the case of ASCII letters, and is fast on `encoding: plain` columns of the table itself. Filters are one-directional, as in a query: the fields the table reaches through relationships filter its rows.
+
+| query parameter | description | example |
+| --- | --- | --- |
+| `format` | `csv` for the rows as CSV, JSON otherwise. | `json` |
+
+Request: [`RowsRequest`](/reference/schemas#schema-rowsrequest). Which rows, and which of their fields.
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`QueryResult`](/reference/schemas#schema-queryresult) or CSV | The rows, newest first, one column per field. |
+| `400` | [`ApiError`](/reference/schemas#schema-apierror) | A field the model doesn't have, or no table reaching all of them. |
+
 ### `GET /v1/ws` {#op-live}
 
 **Live dashboards (WebSocket)** · access: `read`

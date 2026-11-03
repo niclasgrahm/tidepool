@@ -11,8 +11,9 @@ use tidepool_config::format::NumberFormat;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
-pub const TYPES: [VisualType; 5] = [
+pub const TYPES: [VisualType; 6] = [
     VisualType::Table,
+    VisualType::Rows,
     VisualType::Filter,
     VisualType::Bar,
     VisualType::Line,
@@ -28,6 +29,7 @@ pub fn type_label(t: VisualType) -> &'static str {
         VisualType::Bar => "Bar",
         VisualType::Line => "Line",
         VisualType::Kpi => "KPI",
+        VisualType::Rows => "Rows",
     }
 }
 
@@ -43,6 +45,9 @@ pub fn fits(t: VisualType, dimensions: &[DimensionRef], metrics: usize) -> bool 
         }
         VisualType::Bar | VisualType::Line => dims == 1 && metrics > 0,
         VisualType::Kpi => dims == 0 && metrics > 0,
+        VisualType::Rows => {
+            dims > 0 && metrics == 0 && dimensions.iter().all(|d| d.grain().is_none())
+        }
     }
 }
 
@@ -63,6 +68,7 @@ pub fn size_of(t: VisualType) -> (u16, u16) {
     match t {
         VisualType::Kpi => (3, 2),
         VisualType::Filter => (3, 4),
+        VisualType::Rows => (12, 5),
         VisualType::Table | VisualType::Bar | VisualType::Line => (6, 4),
     }
 }
@@ -174,6 +180,10 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
     if matches!(t, VisualType::Kpi | VisualType::Filter) {
         visual.sort = None;
         visual.limit = None;
+    }
+    // rows come newest first
+    if t == VisualType::Rows {
+        visual.sort = None;
     }
     let shown = |by: &str| {
         visual.metrics.iter().any(|m| m == by) || visual.dimensions.iter().any(|d| d.field() == by)
@@ -441,10 +451,17 @@ mod tests {
                 .map(|t| type_label(*t))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(allowed(&one, 0), ["Table", "Filter"]);
+        assert_eq!(allowed(&one, 0), ["Table", "Rows", "Filter"]);
         assert_eq!(allowed(&one, 2), ["Table", "Bar", "Line"]);
         assert_eq!(allowed(&[], 1), ["Table", "KPI"]);
         assert_eq!(allowed(&[field("a.b"), field("c.d")], 1), ["Table"]);
+        assert_eq!(allowed(&[field("a.b"), field("c.d")], 0), ["Table", "Rows"]);
+        // rows show each row's own values: no grain
+        let grained = [DimensionRef::Grained {
+            field: "orders.ordered_at".into(),
+            grain: tidepool_config::ossie::TimeGrain::Day,
+        }];
+        assert_eq!(allowed(&grained, 0), ["Table"]);
         assert_eq!(allowed(&[], 0), Vec::<&str>::new());
     }
 

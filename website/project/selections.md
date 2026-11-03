@@ -7,13 +7,14 @@ allows. The selection shows at the top of the page, one chip for each field.
 
 ## filters
 
-There are three filter widgets:
+There are four filter widgets:
 
 | widget | for | default for |
 | --- | --- | --- |
 | `list` | any field: a list of values with a search box | most fields |
 | `tree` | a [hierarchy](/project/hierarchies) field: nodes to open and select | hierarchy fields |
 | `date_range` | a date or time field: fixed dates, or a period relative to now | |
+| `search` | a string field: a text box. It selects the rows that contain the text. | |
 
 ### the three states
 
@@ -34,6 +35,33 @@ filters:
   - field: customers.region
     measure: revenue
 ```
+
+## search
+
+A `search` filter selects the rows whose value contains the text that you
+type. It is for text: log lines, notes, messages. The case of the letters
+A to Z does not matter. Other characters must be the same. The text is one
+phrase: `lock timeout` finds those two words, together.
+
+```yaml
+# fragment
+filters:
+  - field: logs.message
+    widget: search
+```
+
+The search is a selection, as a click is. Each visual on the dashboard then
+shows only the rows that contain the text: the counts, the charts, the
+lists. A click on a bar narrows the search results more. The chip of the
+selection shows the text. **Back** removes the text in one step, not one
+letter at a time. A `rows` visual marks the text where it occurs.
+
+The search is fast on a column with `encoding: plain`. tidepool searches the
+text where it stores it, about 16 GB a second for each core, and keeps the
+result for each segment. On a column with a dictionary, tidepool searches
+each value one time. To find text in log lines, store the text `plain`, and
+store what you filter by (the severity, the service) as separate columns
+with a dictionary.
 
 ## more than one value
 

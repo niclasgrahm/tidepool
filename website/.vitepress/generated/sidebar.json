@@ -35,6 +35,10 @@
       "text": "query_metrics"
     },
     {
+      "link": "/reference/mcp#tool-read-rows",
+      "text": "read_rows"
+    },
+    {
       "link": "/reference/mcp#tool-get-config",
       "text": "get_config"
     },

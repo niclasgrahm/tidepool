@@ -62,6 +62,7 @@ that no two visuals overlap and that no visual goes past the last column.
 | `line` | metrics over a time dimension at a grain. A second metric gets its own axis. | selects the period. A drag selects a range (`on_brush: select_range`). |
 | `table` | metrics by one or more dimensions, sortable. Without metrics, each combination of its dimensions that the data has. | selects the row (`on_click: select`) |
 | `filter` | the values of one dimension, as a list (a tree for a hierarchy). It has no metrics. | selects the value |
+| `rows` | the newest rows of one table that the selection allows, the newest first. Its dimensions are the columns. It has no metrics. | |
 
 A table without metrics reads the rows of one table: the table that reaches
 all its dimensions and is nearest to the one side. For `customers.region`
@@ -183,3 +184,24 @@ dashboard, a table or a page. The arrow keys move through the results, and
 Enter goes there. On a filter, Enter puts the cursor in its search box.
 
 Filters and selections have [a page of their own](/project/selections).
+
+## rows
+
+A `rows` visual shows the rows themselves: a log tail, the latest orders.
+The newest row is at the top, in the order that the rows arrived. `limit`
+sets how many rows it shows: 100 by default, 1000 at most. The columns can
+be fields of the table, and fields of the tables that it relates to.
+
+```yaml
+# fragment: a visual of dashboards/shipping_notes.yaml
+  - id: latest
+    type: rows
+    dimensions: [orders.ordered_at, customers.name, orders.status, orders.amount, orders.note]
+    limit: 50
+    at: { x: 3, y: 0, w: 9, h: 7 }
+```
+
+The rows are the rows of the table that reaches all the columns, as for a
+table without metrics. The selection filters them as it filters a metric on
+that table. When new rows arrive, the visual reads only the new rows. A row
+visual has no sort and no grain.

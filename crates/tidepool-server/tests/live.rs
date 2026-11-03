@@ -1080,3 +1080,144 @@ async fn a_visual_says_how_its_metrics_read() {
     };
     assert_eq!(region["measure_format"], "currency:EUR");
 }
+
+#[tokio::test]
+async fn a_search_selects_as_it_is_typed_and_rows_follow() {
+    let (state, url) = server().await;
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([
+            {"order_id": "o3", "customer_id": "c1", "product_id": "p1", "status": "paid",
+             "ordered_at": "2026-02-02T10:00:00Z", "quantity": 1, "amount": "3.00",
+             "note": "Leave at the DOOR"},
+            {"order_id": "o4", "customer_id": "c2", "product_id": "p1", "status": "shipped",
+             "ordered_at": "2026-02-03T10:00:00Z", "quantity": 1, "amount": "4.00",
+             "note": "door code 4417"},
+        ]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "shipping_notes"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    // the newest orders first, every one of them
+    let ids = |frame: &Value| -> Vec<Value> {
+        rows(frame, "latest")
+            .as_array()
+            .map(|r| r.iter().map(|row| row[4].clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        ids(&frame),
+        vec![
+            json!("door code 4417"),
+            json!("Leave at the DOOR"),
+            json!(null),
+            json!(null)
+        ]
+    );
+    assert_eq!(rows(&frame, "kpi_orders"), json!([[4]]));
+
+    // typed a key at a time: each is the selection, but one step back;
+    // a frame only when the answer changes (these all find the same rows)
+    for text in ["d", "do", "door"] {
+        say(
+            &mut socket,
+            json!({"type": "search", "field": "orders.note", "text": text}),
+        )
+        .await;
+        let selection = next(&mut socket, "selection").await;
+        assert_eq!(
+            selection["fields"],
+            json!([{"field": "orders.note", "contains": text}])
+        );
+        let _ = next(&mut socket, "done").await;
+    }
+    say(
+        &mut socket,
+        json!({"type": "search", "field": "orders.note", "text": "CODE"}),
+    )
+    .await;
+    let _ = next(&mut socket, "selection").await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(ids(&frame), vec![json!("door code 4417")]);
+    assert_eq!(rows(&frame, "kpi_orders"), json!([[1]]));
+    assert_eq!(rows(&frame, "by_region"), json!([["south", 1]]));
+    let _ = next(&mut socket, "done").await;
+
+    // a click elsewhere narrows the search's rows too
+    say(
+        &mut socket,
+        json!({"type": "search", "field": "orders.note", "text": "door"}),
+    )
+    .await;
+    let _ = next(&mut socket, "done").await;
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["north"]}),
+    )
+    .await;
+    let _ = next(&mut socket, "selection").await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(ids(&frame), vec![json!("Leave at the DOOR")]);
+
+    // back: the region goes, then the whole search at once
+    say(&mut socket, json!({"type": "back"})).await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(
+        selection["fields"],
+        json!([{"field": "orders.note", "contains": "door"}])
+    );
+    say(&mut socket, json!({"type": "back"})).await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"], json!([]));
+    assert_eq!(selection["can_back"], false);
+
+    // an empty search clears it; a number can't be searched
+    say(
+        &mut socket,
+        json!({"type": "search", "field": "orders.quantity", "text": "1"}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("can't be searched")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_rows_visual_shows_new_rows_as_they_arrive() {
+    let (state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "shipping_notes"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "latest").as_array().map(Vec::len),
+        Some(2),
+        "{frame}"
+    );
+    post(
+        &state,
+        "/v1/tables/orders/rows",
+        &json!([{"order_id": "o9", "customer_id": "c2", "product_id": "p1", "status": "paid",
+                 "ordered_at": "2026-02-09T10:00:00Z", "quantity": 2, "amount": "9.00",
+                 "note": "newest"}]),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    let latest = rows(&frame, "latest");
+    assert_eq!(latest[0][4], "newest", "{frame}");
+    assert_eq!(latest[0][1], "Bo");
+    assert_eq!(latest.as_array().map(Vec::len), Some(3));
+}

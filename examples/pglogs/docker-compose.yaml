@@ -1,0 +1,111 @@
+# Postgres' logs, live: a shop app working against Postgres (and getting
+# things wrong now and then), Postgres logging everything as JSON, and a
+# shipper tailing that log into Tidepool. The dashboard searches the text
+# as you type, and every chart answers for the lines you found.
+#
+#   docker compose up --build
+#   open http://localhost:7070/#/d/logs
+#   psql postgresql://shop:shop@localhost:5432/shop
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      # passwords checked on every connection, so a wrong one is logged
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    command:
+      - postgres
+      # the log as JSON lines, in files under PGDATA/log, a new one every
+      # minute; an hour's worth kept, older ones written over
+      - -c
+      - logging_collector=on
+      - -c
+      - log_destination=jsonlog
+      - -c
+      - log_directory=log
+      - -c
+      - log_filename=postgresql-%M.log
+      - -c
+      - log_rotation_age=1min
+      - -c
+      - log_rotation_size=0
+      - -c
+      - log_truncate_on_rotation=on
+      - -c
+      - log_timezone=UTC
+      # and a lot to log: every statement with its duration, connections,
+      # lock waits, checkpoints, vacuum, and the server's own DEBUG1 lines
+      - -c
+      - log_min_messages=debug1
+      - -c
+      - log_min_duration_statement=0
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=200ms
+      - -c
+      - log_checkpoints=on
+      - -c
+      - log_autovacuum_min_duration=0
+      - -c
+      - log_temp_files=0
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "shop", "-d", "shop"]
+      interval: 1s
+      retries: 30
+
+  tidepool:
+    build:
+      context: ../..
+    image: tidepool:pglogs
+    # a local demo: no tokens, so ingest and admin are open on purpose
+    command: ["serve", "--config", "/pglogs", "--data", "/data", "--listen", "0.0.0.0:7070", "--insecure-open", "ingest,admin"]
+    ports: ["${TIDEPOOL_PORT:-7070}:7070"]
+    volumes:
+      - ./tidepool:/pglogs
+      - tidepool-data:/data
+
+  # the shop: orders, payments, sign-ups, and the things that go wrong
+  app:
+    build: ./app
+    image: pglogs-app
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
+      ACTIONS_PER_SECOND: ${ACTIONS_PER_SECOND:-8}
+      APP_LOG: /applogs/app.jsonl
+    volumes:
+      - applogs:/applogs
+
+  # Postgres' log and the app's, into Tidepool
+  shipper:
+    image: python:3.12-alpine
+    depends_on:
+      postgres: { condition: service_healthy }
+      tidepool: { condition: service_started }
+    command: ["python", "-u", "/shipper/ship.py"]
+    environment:
+      TIDEPOOL_URL: http://tidepool:7070
+      PGDATA: /pgdata
+      APP_LOG: /applogs/app.jsonl
+    volumes:
+      - ./shipper:/shipper:ro
+      - pgdata:/pgdata:ro
+      - applogs:/applogs:ro
+      - shipper-state:/state
+
+volumes:
+  pgdata:
+  applogs:
+  shipper-state:
+  tidepool-data:

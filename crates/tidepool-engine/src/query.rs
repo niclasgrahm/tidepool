@@ -9,6 +9,8 @@ use tidepool_expr::temporal::Part;
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, MetricId};
 
+use crate::text::Needle;
+
 /// A dimension: group by a field, optionally truncated to a time grain.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dim {
@@ -45,6 +47,9 @@ pub enum Condition {
     /// of a key, when selections flow both ways (plan §5.4). Looked up by
     /// hash, and printed as a fingerprint (it can hold a million keys).
     Set(Arc<ValueSet>),
+    /// A string containing this text, ignoring the case of ASCII letters
+    /// (plan §5.7).
+    Contains(Arc<Needle>),
 }
 
 /// A set of values for [`Condition::Set`].
@@ -126,6 +131,10 @@ impl Condition {
                 .iter()
                 .any(|v| value.compare(v) == Some(std::cmp::Ordering::Equal)),
             Self::Set(set) => set.contains(value),
+            Self::Contains(needle) => match value {
+                Scalar::String(text) => needle.is_in(text.as_bytes()),
+                _ => false,
+            },
             Self::Range { from, to } => {
                 from.as_ref().is_none_or(|f| {
                     value

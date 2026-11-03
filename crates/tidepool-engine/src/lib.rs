@@ -13,6 +13,8 @@ mod fast;
 pub mod hierarchy;
 mod plan;
 pub mod query;
+mod rows;
+mod text;
 
 use std::sync::Arc;
 
@@ -24,6 +26,11 @@ pub use query::{
     Condition, Dim, Order, Query, QueryError, Relative, ResultColumn, ResultSet, Role, Selection,
     ValueSet,
 };
+pub use rows::{MAX_ROWS, RowsQuery, rows, rows_general};
+
+/// [`relevant`] for a `rows` query.
+pub use rows::relevant as rows_relevant;
+pub use text::Needle;
 
 /// Answer `query` from `snapshot`.
 ///
@@ -76,6 +83,25 @@ impl Engine {
         }
         self.caches.sweep();
         let result = answer(snapshot, query, true, Some(&self.caches))?;
+        self.caches.keep_result(snapshot.epoch, key, result.clone());
+        Ok(result)
+    }
+
+    /// The newest rows passing a selection (plan §5.7), kept up to date
+    /// like any answer.
+    ///
+    /// # Errors
+    /// As [`rows`].
+    pub fn rows(&self, snapshot: &Snapshot, query: &RowsQuery) -> Result<ResultSet, QueryError> {
+        let key = format!(
+            "rows {:p} {query:?}",
+            std::sync::Arc::as_ptr(&snapshot.model)
+        );
+        if let Some(result) = self.caches.result(snapshot.epoch, &key) {
+            return Ok(result);
+        }
+        self.caches.sweep();
+        let result = rows::answer(snapshot, query, true, Some(&self.caches))?;
         self.caches.keep_result(snapshot.epoch, key, result.clone());
         Ok(result)
     }

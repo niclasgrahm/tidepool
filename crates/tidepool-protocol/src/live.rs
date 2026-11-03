@@ -52,6 +52,13 @@ pub enum ClientMessage {
         field: String,
         window: RelativeWindow,
     },
+    /// Select the rows whose value of a string field contains `text`,
+    /// ignoring the case of ASCII letters: a search box. An empty text
+    /// clears the field.
+    Search {
+        field: String,
+        text: String,
+    },
     /// Clear one field's selection, or all of it.
     Clear {
         #[serde(default)]
@@ -247,7 +254,7 @@ pub struct DashboardInfo {
 pub struct FilterInfo {
     /// `dataset.field`.
     pub field: String,
-    /// `list`, `tree` or `date_range`.
+    /// `list`, `tree`, `date_range` or `search`.
     pub widget: String,
     /// Whether the field has a time of day, so windows of hours and
     /// minutes apply to it (a date has none).
@@ -268,7 +275,7 @@ pub struct FilterInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct VisualInfo {
     pub id: String,
-    /// `kpi`, `bar`, `line`, `table`, …
+    /// `kpi`, `bar`, `line`, `table`, `filter` or `rows`.
     #[serde(rename = "type")]
     pub visual_type: String,
     pub dimensions: Vec<QueryDimension>,
@@ -313,6 +320,9 @@ pub struct SelectedField {
     /// A window relative to now; `from` and `to` are where it is now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative: Option<RelativeWindow>,
+    /// The text searched for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
 }
 
 /// A visual's new content.

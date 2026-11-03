@@ -103,6 +103,9 @@ pub enum FilterWidget {
     /// An expandable tree, for a dataset's hierarchy field (the default
     /// for one).
     Tree,
+    /// A text box, for a string field: the rows whose value contains what
+    /// is typed are selected, ignoring the case of ASCII letters.
+    Search,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -115,6 +118,10 @@ pub enum VisualType {
     /// The values of one dimension as a list on the grid. A click selects a
     /// value, as in a filter on the rail. It has no metrics.
     Filter,
+    /// The newest rows of one table that pass the selection, newest first:
+    /// a log tail. Its dimensions are the columns; `limit` is how many rows
+    /// (100 when not given, 1000 at most). It has no metrics.
+    Rows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

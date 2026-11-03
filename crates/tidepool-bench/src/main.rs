@@ -13,6 +13,7 @@
 
 mod live;
 mod query;
+mod search;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -61,6 +62,15 @@ enum Command {
         /// Only this metric set (comma-separated) instead of the standard two.
         #[arg(long)]
         metrics: Option<String>,
+    },
+    /// Text search and `rows` on synthetic Postgres log lines (plan §5.7).
+    Search {
+        /// Log lines to build.
+        #[arg(long, default_value_t = 10_000_000)]
+        lines: u64,
+        /// Runs per measurement (the best is shown).
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
     },
     /// Restart time: the reference dataset checkpointed, then recovered.
     Restart {
@@ -296,6 +306,10 @@ async fn over_http(
 #[allow(clippy::too_many_lines)] // one arm per subcommand
 async fn main() {
     match Cli::parse().command {
+        Command::Search { lines, runs } => {
+            println!("search: {lines} log lines\n");
+            search::measure(lines, runs);
+        }
         Command::Query {
             orders,
             runs,

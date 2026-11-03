@@ -188,6 +188,16 @@ fn condition_sql(schema: &Schema, (table, column, cond): &(String, String, Cond)
             literal(from, &source),
             literal(to, &source)
         ),
+        // ASCII letters folded, nothing else (`lower` would fold more)
+        Cond::Contains(text) => {
+            const UPPER: &str = "'ABCDEFGHIJKLMNOPQRSTUVWXYZ'";
+            const LOWER: &str = "'abcdefghijklmnopqrstuvwxyz'";
+            format!(
+                "contains(translate(CAST({} AS VARCHAR), {UPPER}, {LOWER}), translate('{}', {UPPER}, {LOWER}))",
+                field_sql(schema, table, column),
+                text.replace('\'', "''")
+            )
+        }
         Cond::Relative {
             now,
             unit,
@@ -725,6 +735,33 @@ pub fn values_sql(schema: &Schema, table: &str, field: &str, query: &Query) -> S
         let _ = write!(sql, " WHERE {}", conditions.join(" AND "));
     }
     sql.push_str(" GROUP BY ALL");
+    sql
+}
+
+/// The rows of `f0` a `rows` query shows (plan §5.7), as a set: its own
+/// fields and one it reaches, under the selected fields it reaches.
+#[must_use]
+pub fn rows_sql(schema: &Schema, fields: &[(String, String)], query: &Query) -> String {
+    let reachable: Vec<String> = schema.reachable("f0").into_iter().map(|(t, _)| t).collect();
+    let visible: Vec<&(String, String, Cond)> = query.selection.iter().collect();
+    let mut conditions: Vec<String> = visible
+        .iter()
+        .filter(|(t, _, _)| reachable.contains(t))
+        .map(|s| condition_sql(schema, s))
+        .collect();
+    conditions.extend(upward(schema, "f0", None, &visible));
+    let columns: Vec<String> = fields
+        .iter()
+        .map(|(t, f)| field_sql(schema, t, f))
+        .collect();
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        columns.join(", "),
+        joined(schema, "f0", None)
+    );
+    if !conditions.is_empty() {
+        let _ = write!(sql, " WHERE {}", conditions.join(" AND "));
+    }
     sql
 }
 
