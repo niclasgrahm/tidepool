@@ -17,5 +17,6 @@ tidepool-engine.workspace = true
 tidepool-expr.workspace = true
 tidepool-model.workspace = true
 tidepool-store.workspace = true
-duckdb = { version = "1.10506", features = ["bundled"] }
+# Linked against DuckDB's release of this version: see .cargo/config.toml.
+duckdb = "1.10506"
 serde_json.workspace = true

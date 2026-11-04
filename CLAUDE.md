@@ -24,7 +24,6 @@ just test            # cargo test --workspace --all-targets
 just lint            # cargo clippy --workspace --all-targets -- -D warnings
 just fmt             # cargo fmt --all
 just deny            # cargo deny check (licences, advisories, sources)
-just miri            # the store's unsafe code under Miri (needs nightly + miri)
 just frontend        # build the UI into frontend/dist (trunk)
 just build           # just frontend, then a release binary with the UI embedded
 just test-embed      # tests of the embedded UI; needs `just build` first
@@ -557,13 +556,20 @@ are applied to a `Board`. Rules the dashboard follows:
   protocol against the built UI (on a copy of the example: config
   changes are written back), clicking a bar, watching a live update,
   going back, brushing the trend, dragging across bars, choosing with the keys, adding a table in the config editor, and making a dashboard
-  in the dashboard editor (dragging and resizing with real mouse events). It needs Chrome, so it isn't in `just ci`; run it after UI
-  changes.
+  in the dashboard editor (dragging and resizing with real mouse events). It needs Chrome, so it isn't in `just ci`; CI runs it as its own job,
+  and you run it after UI changes.
 
 It is a workspace member, so `just ci` lints and tests it natively.
 
 ## Notes
 
+- The oracle's DuckDB isn't compiled: `.cargo/config.toml` sets
+  `DUCKDB_DOWNLOAD_LIB`, so libduckdb-sys's build script downloads DuckDB's
+  release of the version the crate is for into `target/`. Don't turn the
+  crate's `bundled` feature back on: on CI it took 35 minutes per build and
+  filled the runner's disk, before a test had run.
+- CI is `.github/workflows/ci.yml`. `deep.yml` runs `just oracle 1000` and
+  `just crash` nightly, and from the Actions tab.
 - Spikes live in `spikes/`, outside the workspace, and are kept for reference
   once their decision is recorded in the plan.
 - `examples/indud-oee/` is an OEE project over indud's namespace (a

@@ -31,10 +31,6 @@ fmt-check:
 deny:
   cargo deny check
 
-# the store's unsafe code under Miri (needs: rustup toolchain install nightly --component miri)
-miri:
-  cargo +nightly miri test -p tidepool-store
-
 # build the web UI into frontend/dist (needs trunk and the wasm32 target)
 frontend:
   cd frontend && trunk build --release

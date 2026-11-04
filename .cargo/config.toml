@@ -1,0 +1,6 @@
+# The oracle's DuckDB is DuckDB's own release of the version the `duckdb` crate
+# is for (1.10506 is v1.5.6). libduckdb-sys's build script downloads it once
+# into the target directory. Compiling it from source (the crate's `bundled`
+# feature) took 35 minutes per build on CI and filled the runner's disk.
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"
