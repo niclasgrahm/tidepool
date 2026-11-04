@@ -33,6 +33,11 @@ pub enum Type {
 
 impl Type {
     #[must_use]
+    pub fn has_time_of_day(self) -> bool {
+        matches!(self, Self::Timestamp | Self::TimestampTz)
+    }
+
+    #[must_use]
     pub fn is_numeric(self) -> bool {
         matches!(
             self,

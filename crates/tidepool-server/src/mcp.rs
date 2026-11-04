@@ -80,8 +80,8 @@ pub fn tools() -> Value {
             "name": "query_metrics",
             "title": "Query metrics",
             "description": "Metrics grouped by fields (`dataset.field`, time fields with a \
-                            grain: day, week, month, quarter, year), under filters (`in` a \
-                            list, `from`/`to` a half-open range, or `contains` a text, for a \
+                            grain: minute, hour, day, week, month, quarter, year), under filters \
+                            (`in` a list, `from`/`to` a half-open range, or `contains` a text, for a \
                             string field, ignoring the case of ASCII letters), sorted and \
                             limited. The body of POST /v1/query.",
             "inputSchema": {

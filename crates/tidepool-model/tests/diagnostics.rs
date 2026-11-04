@@ -552,6 +552,30 @@ case!(
         "dimensions: [{ field: customers.region, grain: month }]"
     )]
 );
+case!(
+    dashboard_hour_grain_on_a_date,
+    [Replace(
+        "tables/orders.yaml",
+        "ordered_at:  { type: timestamptz }",
+        "ordered_at:  { type: date }"
+    )]
+);
+case!(
+    field_hour_grain_on_a_date,
+    [
+        Replace(
+            "tables/orders.yaml",
+            "ordered_at:  { type: timestamptz }",
+            "ordered_at:  { type: date }"
+        ),
+        Replace(
+            "model.ossie.yaml",
+            "datatype: DateTimeTz\n        dimension: { is_time: true }\n",
+            "dimension: { is_time: true }\n        custom_extensions:\n          - vendor_name: TIDEPOOL\n            data: '{\"grain\": [\"hour\", \"day\"]}'\n"
+        ),
+        Replace("dashboards/sales_recent.yaml", "grain: hour", "grain: day"),
+    ]
+);
 case!(dashboards_without_a_model, [Remove("model.ossie.yaml")]);
 case!(
     dashboard_default_on_a_list,

@@ -370,6 +370,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         .map(|(table, field, grain, level)| {
             let sql = field_sql(schema, table, field);
             match (grain, level) {
+                (Some(grain @ ("minute" | "hour")), _) => format!("date_trunc('{grain}', {sql})"),
                 (Some(grain), _) => format!("CAST(date_trunc('{grain}', {sql}) AS DATE)"),
                 (None, Some(level)) => format!(
                     "(SELECT t.anc FROM tree_levels t WHERE t.node = {sql} AND t.level = {level})"

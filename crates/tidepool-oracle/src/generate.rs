@@ -1246,8 +1246,13 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
             {
                 continue;
             }
-            let grain = (temporal && rng.chance(60))
-                .then(|| *rng.pick(&["day", "week", "month", "quarter", "year"]));
+            let timed = matches!(schema.values_of(&table, &field), Some(Gen::Timestamp(..)));
+            let grains: &[&'static str] = if timed {
+                &["minute", "hour", "day", "week", "month", "quarter", "year"]
+            } else {
+                &["day", "week", "month", "quarter", "year"]
+            };
+            let grain = (temporal && rng.chance(60)).then(|| *rng.pick(grains));
             let level = (schema.is_tree(&table, &field) && rng.chance(70))
                 .then(|| u32::try_from(rng.below(4)).unwrap_or(0));
             dims.push((table, field, grain, level));

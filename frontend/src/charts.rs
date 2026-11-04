@@ -493,7 +493,8 @@ pub struct LineLayout {
     pub dots: bool,
 }
 
-/// A period's label on the time axis: `2026-10-01` by day is `Oct 1`.
+/// A period's label on the time axis: `2026-10-01` by day is `Oct 1`,
+/// `2026-10-01T19:00:00Z` by hour is `Oct 1 19:00`, by minute `19:00`.
 #[must_use]
 pub fn short_period(label: &str, grain: Option<&str>) -> String {
     const MONTHS: [&str; 12] = [
@@ -514,6 +515,11 @@ pub fn short_period(label: &str, grain: Option<&str>) -> String {
         Some("quarter") => format!("Q{} {y}", (month - 1) / 3 + 1),
         Some("month") => format!("{name} {y}"),
         Some("day" | "week") => format!("{name} {day}"),
+        Some(grain @ ("hour" | "minute")) => match (grain, label.get(11..16)) {
+            ("hour", Some(time)) => format!("{name} {day} {time}"),
+            (_, Some(time)) => time.to_string(),
+            _ => label.to_string(),
+        },
         _ => label.to_string(),
     }
 }
@@ -1033,6 +1039,11 @@ mod tests {
         assert_eq!(short_period("2026-10-01", Some("month")), "Oct 2026");
         assert_eq!(short_period("2026-10-01", Some("quarter")), "Q4 2026");
         assert_eq!(short_period("2026-01-01", Some("year")), "2026");
+        assert_eq!(
+            short_period("2026-10-07T19:00:00Z", Some("hour")),
+            "Oct 7 19:00"
+        );
+        assert_eq!(short_period("2026-10-07T19:05:00", Some("minute")), "19:05");
         assert_eq!(short_period("north", Some("day")), "north");
         assert_eq!(short_period("2026-13-01", Some("day")), "2026-13-01");
     }

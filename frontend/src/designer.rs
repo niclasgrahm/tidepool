@@ -940,6 +940,8 @@ fn Picker(
     };
     let set_grain = move |field: String, grain: String| {
         let grain = match grain.as_str() {
+            "minute" => Some(TimeGrain::Minute),
+            "hour" => Some(TimeGrain::Hour),
             "day" => Some(TimeGrain::Day),
             "week" => Some(TimeGrain::Week),
             "month" => Some(TimeGrain::Month),
@@ -973,6 +975,7 @@ fn Picker(
                                     dims.with(|d| metrics.with(|m| r.field_fits(&name, d, m)))
                                 });
                             let time = f.is_time;
+                            let timed = f.ty != "date";
                             let grain = chosen
                                 .as_ref()
                                 .and_then(DimensionRef::grain)
@@ -990,6 +993,10 @@ fn Picker(
                                         <select aria-label=format!("Grain of {name}") prop:value=grain
                                             on:change=move |ev| set_grain(regrain.clone(), event_target_value(&ev))>
                                             <option value="">"each value"</option>
+                                            {timed.then(|| view! {
+                                                <option value="minute">"by minute"</option>
+                                                <option value="hour">"by hour"</option>
+                                            })}
                                             <option value="day">"by day"</option>
                                             <option value="week">"by week"</option>
                                             <option value="month">"by month"</option>

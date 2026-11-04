@@ -162,7 +162,8 @@ pub struct QueryRequest {
 pub struct QueryDimension {
     /// `dataset.field`.
     pub field: String,
-    /// For time fields: `day`, `week`, `month`, `quarter` or `year`.
+    /// For time fields: `day`, `week`, `month`, `quarter` or `year`, and for
+    /// timestamps also `minute` or `hour`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<String>,
     /// For hierarchy fields: group by each node's ancestor at this depth

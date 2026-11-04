@@ -909,7 +909,7 @@
             "type": "string"
           },
           "grain": {
-            "description": "For time fields: `day`, `week`, `month`, `quarter` or `year`.",
+            "description": "For time fields: `day`, `week`, `month`, `quarter` or `year`, and for\ntimestamps also `minute` or `hour`.",
             "type": [
               "string",
               "null"

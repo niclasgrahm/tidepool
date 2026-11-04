@@ -12,7 +12,7 @@ use std::path::Path;
 
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::format::NumberFormat;
-use tidepool_config::ossie::{self, MetricExtension, MetricKind, TimeGrain};
+use tidepool_config::ossie::{self, MetricExtension, MetricKind};
 use tidepool_config::source::YamlPath;
 use tidepool_expr::syntax;
 
@@ -20,7 +20,7 @@ use super::semantic::{Semantic, expression, extension};
 use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
-    FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, TableId, TimeOffset, Type,
+    FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, OffsetUnit, TableId, TimeOffset, Type,
 };
 
 pub(super) struct Metrics {
@@ -552,11 +552,11 @@ fn time_offset(
     let unit_at = offset.len().saturating_sub(1);
     let (amount, unit) = offset.split_at(unit_at);
     let unit = match unit {
-        "d" => Some(TimeGrain::Day),
-        "w" => Some(TimeGrain::Week),
-        "m" => Some(TimeGrain::Month),
-        "q" => Some(TimeGrain::Quarter),
-        "y" => Some(TimeGrain::Year),
+        "d" => Some(OffsetUnit::Day),
+        "w" => Some(OffsetUnit::Week),
+        "m" => Some(OffsetUnit::Month),
+        "q" => Some(OffsetUnit::Quarter),
+        "y" => Some(OffsetUnit::Year),
         _ => None,
     };
     let (Ok(amount), Some(unit)) = (amount.parse::<i32>(), unit) else {

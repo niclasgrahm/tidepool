@@ -93,6 +93,8 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
             Ok(Dim {
                 field: field(table, name)?,
                 grain: grain.map(|g| match g {
+                    "minute" => tidepool_config::ossie::TimeGrain::Minute,
+                    "hour" => tidepool_config::ossie::TimeGrain::Hour,
                     "day" => tidepool_config::ossie::TimeGrain::Day,
                     "week" => tidepool_config::ossie::TimeGrain::Week,
                     "month" => tidepool_config::ossie::TimeGrain::Month,

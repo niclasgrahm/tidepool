@@ -342,9 +342,22 @@ pub enum FilterDirection {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TimeGrain {
+    /// Timestamps only.
+    Minute,
+    /// Timestamps only.
+    Hour,
     Day,
     Week,
     Month,
     Quarter,
     Year,
+}
+
+impl TimeGrain {
+    /// Whether its periods are shorter than a day, so only a value with a
+    /// time of day has them, and they start at a time rather than on a date.
+    #[must_use]
+    pub fn is_sub_day(self) -> bool {
+        matches!(self, Self::Minute | Self::Hour)
+    }
 }

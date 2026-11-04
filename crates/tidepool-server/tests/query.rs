@@ -107,6 +107,59 @@ async fn filters_sort_limit_and_grains() {
 }
 
 #[tokio::test]
+async fn hour_and_minute_grains_start_at_a_time() {
+    let state = loaded().await;
+    let order = |id: &str, amount: &str, at: &str| {
+        json!({
+            "order_id": id, "customer_id": "c1", "product_id": "p1", "status": "paid",
+            "ordered_at": at, "quantity": 1, "amount": amount,
+        })
+    };
+    let reply = post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([
+            order("t1", "1.00", "2026-11-03T19:05:30Z"),
+            order("t2", "2.00", "2026-11-03T19:05:59Z"),
+            order("t3", "4.00", "2026-11-03T19:06:00Z"),
+            order("t4", "8.00", "2026-11-03T20:00:00Z"),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let by = |grain: &str| {
+        json!({
+            "metrics": ["revenue"],
+            "dimensions": [{"field": "orders.ordered_at", "grain": grain}],
+            "filters": [{"field": "orders.ordered_at", "from": "2026-11-01T00:00:00Z"}],
+            "sort": [{"column": format!("orders.ordered_at:{grain}")}],
+        })
+    };
+    let reply = post(&state, "/v1/query", &by("hour")).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let body = reply.json();
+    assert_eq!(body["columns"][0]["name"], "orders.ordered_at:hour");
+    assert_eq!(body["columns"][0]["type"], "timestamptz");
+    assert_eq!(
+        body["rows"],
+        json!([
+            ["2026-11-03T19:00:00Z", "7.00"],
+            ["2026-11-03T20:00:00Z", "8.00"],
+        ])
+    );
+    let reply = post(&state, "/v1/query", &by("minute")).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        reply.json()["rows"],
+        json!([
+            ["2026-11-03T19:05:00Z", "3.00"],
+            ["2026-11-03T19:06:00Z", "4.00"],
+            ["2026-11-03T20:00:00Z", "8.00"],
+        ])
+    );
+}
+
+#[tokio::test]
 async fn no_dimensions_is_one_row_even_with_nothing_selected() {
     let state = loaded().await;
     let reply = post(

@@ -294,8 +294,20 @@ pub enum IgnoreSelection {
 pub struct TimeOffset {
     /// Signed amount of `unit`s, e.g. -1 year.
     pub amount: i32,
-    pub unit: TimeGrain,
+    pub unit: OffsetUnit,
     pub field: FieldRef,
+}
+
+/// What a `time_offset` counts in: whole days or longer, since it moves a
+/// value by calendar days and months.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OffsetUnit {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

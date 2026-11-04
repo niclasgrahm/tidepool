@@ -9,4 +9,8 @@ What a field's Tidepool extension may say.
 
 ## `TimeGrain` {#field-extension-timegrain}
 
-Type: `day` · `week` · `month` · `quarter` · `year`.
+One of:
+
+- `day` · `week` · `month` · `quarter` · `year`
+- `minute`: Timestamps only.
+- `hour`: Timestamps only.

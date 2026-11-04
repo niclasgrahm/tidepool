@@ -14,8 +14,8 @@ use tidepool_expr::syntax::{self, Name};
 use tidepool_expr::temporal::{Part, Shift};
 use tidepool_expr::{AggCall, Expr, Scope, Type, check_aggregation, check_row};
 use tidepool_model::ir::{
-    FieldRef, FieldSource, Hierarchy, IgnoreSelection, MetricBody, MetricId, Model, TableId,
-    type_of,
+    FieldRef, FieldSource, Hierarchy, IgnoreSelection, MetricBody, MetricId, Model, OffsetUnit,
+    TableId, type_of,
 };
 
 use crate::query::{Condition, Query, QueryError, Selection};
@@ -113,6 +113,8 @@ pub(crate) struct Plan {
 
 pub(crate) fn part_of(grain: TimeGrain) -> Part {
     match grain {
+        TimeGrain::Minute => Part::Minute,
+        TimeGrain::Hour => Part::Hour,
         TimeGrain::Day => Part::Day,
         TimeGrain::Week => Part::Week,
         TimeGrain::Month => Part::Month,
@@ -504,11 +506,22 @@ pub(crate) fn plan(
                 .dataset(dim.field.table)
                 .and_then(|d| d.field(&dim.field.field))
                 .ok_or_else(|| error(format!("unknown field `{}`", label(model, &dim.field))))?;
-            Ok(if dim.grain.is_some() {
-                Type::Date
-            } else {
-                field.ty
-            })
+            match dim.grain {
+                // its periods start at a time: a value of the field's own type
+                Some(grain) if grain.is_sub_day() => {
+                    if field.ty.has_time_of_day() {
+                        Ok(field.ty)
+                    } else {
+                        Err(error(format!(
+                            "`{}` has no time of day, so it has no grain `{}`",
+                            label(model, &dim.field),
+                            format!("{grain:?}").to_lowercase()
+                        )))
+                    }
+                }
+                Some(_) => Ok(Type::Date),
+                None => Ok(field.ty),
+            }
         })
         .collect::<Result<Vec<_>, QueryError>>()?;
     for anchor in &mut anchors {
@@ -716,23 +729,23 @@ fn shift_on(model: &Model, field: &FieldRef) -> Result<ShiftOn, QueryError> {
 fn shift_of(offset: &tidepool_model::ir::TimeOffset) -> Shift {
     let amount = -offset.amount;
     match offset.unit {
-        TimeGrain::Day => Shift {
+        OffsetUnit::Day => Shift {
             months: 0,
             days: amount,
         },
-        TimeGrain::Week => Shift {
+        OffsetUnit::Week => Shift {
             months: 0,
             days: amount.saturating_mul(7),
         },
-        TimeGrain::Month => Shift {
+        OffsetUnit::Month => Shift {
             months: amount,
             days: 0,
         },
-        TimeGrain::Quarter => Shift {
+        OffsetUnit::Quarter => Shift {
             months: amount.saturating_mul(3),
             days: 0,
         },
-        TimeGrain::Year => Shift {
+        OffsetUnit::Year => Shift {
             months: amount.saturating_mul(12),
             days: 0,
         },

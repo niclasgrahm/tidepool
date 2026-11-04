@@ -199,12 +199,22 @@ fn timestamp_text(micros: i64, zoned: bool) -> String {
 /// What brushing a line chart's categories `first` to `last` selects, as
 /// `select_range` bounds (half-open): for a time field at a grain, whole
 /// periods, from the first one's start to the start of the period after the
-/// last; for a date, the days; for a timestamp, the values themselves, from
-/// the first to just after the last.
+/// last (hours and minutes start at a time, the others on a date); for a
+/// date, the days; for a timestamp, the values themselves, from the first to
+/// just after the last.
 #[must_use]
 pub fn brush_range(first: &str, last: &str, grain: Option<&str>) -> Option<(String, String)> {
     let midnight = |date: String| format!("{date}T00:00:00Z");
+    let span = |seconds: i64| {
+        let (at, zoned) = micros_of(last)?;
+        Some((
+            first.to_string(),
+            timestamp_text(at + seconds * 1_000_000, zoned),
+        ))
+    };
     match grain {
+        Some("hour") => span(3600),
+        Some("minute") => span(60),
         Some(grain) => Some((
             midnight(first.to_string()),
             midnight(next_period(last, grain)?),
@@ -244,9 +254,14 @@ pub fn range_label(from: Option<&Value>, to: Option<&Value>) -> String {
         let (at, zoned) = micros_of(v.as_str()?)?;
         (at.rem_euclid(1_000_000) == 1).then(|| timestamp_text(at - 1, zoned))
     };
-    let start = from.map(|v| day(v).map_or_else(|| display(v), civil));
-    let end =
-        to.map(|v| day(v).map_or_else(|| last(v).unwrap_or_else(|| display(v)), |d| civil(d - 1)));
+    // days only when both ends are: a range of hours may end at a midnight
+    let days = [from, to].into_iter().flatten().all(|v| day(v).is_some());
+    let start = from.map(|v| day(v).filter(|_| days).map_or_else(|| display(v), civil));
+    let end = to.map(|v| {
+        day(v)
+            .filter(|_| days)
+            .map_or_else(|| last(v).unwrap_or_else(|| display(v)), |d| civil(d - 1))
+    });
     match (start, end) {
         (Some(start), Some(end)) if start == end => start,
         (Some(start), Some(end)) => format!("{start} to {end}"),
@@ -930,6 +945,15 @@ mod tests {
             range("2026-01-05", "2026-02-02", Some("week")),
             both("2026-01-05T00:00:00Z", "2026-02-09T00:00:00Z")
         );
+        // hours and minutes: whole periods, as the timestamps they start at
+        assert_eq!(
+            range("2026-11-03T19:00:00Z", "2026-11-03T23:00:00Z", Some("hour")),
+            both("2026-11-03T19:00:00Z", "2026-11-04T00:00:00Z")
+        );
+        assert_eq!(
+            range("2026-11-03T19:05:00", "2026-11-03T19:05:00", Some("minute")),
+            both("2026-11-03T19:05:00", "2026-11-03T19:06:00")
+        );
         // a date: the days, as dates
         assert_eq!(
             range("2026-02-27", "2026-02-28", None),
@@ -992,6 +1016,14 @@ mod tests {
         assert_eq!(
             range_label(Some(&at("2026-09-22T10:30:00Z")), None),
             "from 2026-09-22T10:30:00Z"
+        );
+        // hours that end at a midnight read as times, both ends alike
+        assert_eq!(
+            range_label(
+                Some(&at("2026-10-31T05:00:00Z")),
+                Some(&at("2026-11-03T00:00:00Z"))
+            ),
+            "2026-10-31T05:00:00Z to 2026-11-03T00:00:00Z"
         );
         assert_eq!(range_label(Some(&json!(5)), Some(&json!(10))), "5 to 10");
     }

@@ -394,6 +394,12 @@ fn visual_dimensions(
                     "`{}` doesn't allow grain `{grain:?}`",
                     dimension.field()
                 ))
+            } else if grain.is_sub_day() && !field.ty.has_time_of_day() {
+                Some(format!(
+                    "`{}` has no time of day, so it has no grain `{}`",
+                    dimension.field(),
+                    format!("{grain:?}").to_lowercase()
+                ))
             } else {
                 None
             };

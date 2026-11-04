@@ -85,7 +85,8 @@ to the visuals that it changes.
     at: { x: 3, y: 6, w: 9, h: 4 }
 ```
 
-Time grains are `day`, `week`, `month`, `quarter` and `year`.
+Time grains are `day`, `week`, `month`, `quarter` and `year`. A timestamp
+also has `hour` and `minute`, and a date does not.
 
 ## number formats
 

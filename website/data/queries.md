@@ -33,7 +33,8 @@ names of metrics. A wrong name fails with `400` and a suggestion.
 
 - `{"field": "customers.region"}` groups by a field.
 - `{"field": "orders.ordered_at", "grain": "month"}` groups a time field by
-  `day`, `week`, `month`, `quarter` or `year`.
+  `day`, `week`, `month`, `quarter` or `year`. A timestamp can also group by
+  `hour` or `minute`.
 - `{"field": "categories.tree", "level": 1}` groups a
   [hierarchy](/project/hierarchies) by the ancestor at a depth. The roots are
   level 0.
