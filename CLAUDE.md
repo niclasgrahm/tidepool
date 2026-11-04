@@ -567,7 +567,9 @@ It is a workspace member, so `just ci` lints and tests it natively.
   `DUCKDB_DOWNLOAD_LIB`, so libduckdb-sys's build script downloads DuckDB's
   release of the version the crate is for into `target/`. Don't turn the
   crate's `bundled` feature back on: on CI it took 35 minutes per build and
-  filled the runner's disk, before a test had run.
+  filled the runner's disk, before a test had run. `rust-cache` deletes the
+  downloaded library but keeps the crate's build, so a CI job that links the
+  oracle runs `cargo clean -p libduckdb-sys` after restoring the cache.
 - CI is `.github/workflows/ci.yml`. `deep.yml` runs `just oracle 1000` and
   `just crash` nightly, and from the Actions tab.
 - Spikes live in `spikes/`, outside the workspace, and are kept for reference

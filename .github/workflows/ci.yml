@@ -28,6 +28,9 @@ jobs:
         with:
           cache-on-failure: true
       - uses: extractions/setup-just@v2
+      # rust-cache keeps libduckdb-sys's build but not the DuckDB library its
+      # build script downloaded. Run the script again, or linking fails.
+      - run: cargo clean -p libduckdb-sys
       - run: just ci
 
   # The release build: frontend built and embedded, one binary. Proves that the
