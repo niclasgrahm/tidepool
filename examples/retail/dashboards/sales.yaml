@@ -23,9 +23,12 @@ visuals:
     at: { x: 3, y: 0, w: 5, h: 4 }
   - id: trend
     type: line
-    dimensions: [{ field: orders.ordered_at, grain: day }]
+    # the finest grain that reads over the range on screen: brush a morning
+    # and it shows minutes or hours, go back and it shows days again
+    dimensions: [{ field: orders.ordered_at, grain: auto }]
     metrics: [revenue, order_count]
     on_brush: select_range
+    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between
     at: { x: 0, y: 4, w: 12, h: 4 }
   - id: top_products
     type: table

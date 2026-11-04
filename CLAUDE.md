@@ -396,7 +396,12 @@ hold windows relative to now (`Chosen::windows`, "Last 7 days"): they are
 resolved into ranges with `AppState::clock` (tests stop it with
 `set_clock`) whenever a query runs, so the engine never sees one, and the
 loop's one-second tick refreshes sessions whose windows the clock moved
-(plan §5.5).
+(plan §5.5). **Time zoom** (`zoom.rs`, plan §5.8) goes the same way: a grain
+that's `auto` or pinned (`inner.grains`, next to sorts, not in history) is
+resolved in `live::zoomed` from the range (the selection, else
+`zoom::Extents`) and a budget from `at.w`, never the browser, so the engine
+only gets fixed grains and sessions share answers. Each visual frame's `zoom`
+says the grain, the open steps and the axis.
 
 ### The config pipeline (`tidepool-server::config`)
 
@@ -535,6 +540,11 @@ are applied to a `Board`. Rules the dashboard follows:
   bars chooses several; across a line, a range), and the keyboard does the
   same (arrows, Shift to extend, Enter; `aria-activedescendant` names the
   place). Text is measured with a canvas (`plot::measure`).
+- **A grained axis is a time axis.** `board::filled` adds a row for every
+  bucket of the frame's range, so an empty one is a break (`scale::Times`
+  places them by time); the frame's grain, never the file's, is what brushes,
+  exports and table headers go by (`board::at_frame_grain`). `auto` is not a
+  grain a query can ask for.
 - Logic without a DOM goes in `board.rs`, `charts.rs`, `scale.rs`, `route.rs`,
   `calendar.rs` (the date range picker's days, months, typed bounds and
   half-open ranges; `datepick.rs` draws it, no native date inputs),

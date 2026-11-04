@@ -108,6 +108,12 @@ impl Live {
         }));
     }
 
+    /// Pin `visual`'s time grain for this session, or go back to the
+    /// dashboard's.
+    pub fn pin_grain(self, visual: &str, grain: Option<&str>) {
+        self.send(&json!({"type": "grain", "visual": visual, "grain": grain}));
+    }
+
     pub fn toggle_pause(self) {
         let paused = !self.paused.get_untracked();
         self.paused.set(paused);

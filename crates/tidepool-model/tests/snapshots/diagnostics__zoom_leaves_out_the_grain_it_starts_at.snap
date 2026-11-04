@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `trend`: `zoom` leaves out `quarter`, the grain it starts at
+  --> dashboards/sales.yaml:31:5
+   |
+31 |     zoom: [minute, hour, day, week, month]   # what a viewer may zoom between
+   |     ^^^^
+   = help: add `quarter` to the list
+
+1 error, 0 warnings

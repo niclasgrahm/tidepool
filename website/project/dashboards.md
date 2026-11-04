@@ -32,9 +32,10 @@ visuals:
     at: { x: 3, y: 0, w: 5, h: 4 }
   - id: trend
     type: line
-    dimensions: [{ field: orders.ordered_at, grain: day }]
+    dimensions: [{ field: orders.ordered_at, grain: auto }]   # the finest grain that fits the range
     metrics: [revenue, order_count]      # a second metric gets its own axis
     on_brush: select_range               # a drag selects the dates
+    zoom: [minute, hour, day, week, month]   # the grains a viewer can choose
     at: { x: 0, y: 4, w: 12, h: 4 }
   - id: top_products
     type: table                          # sort by any column; a click on a row selects
@@ -134,6 +135,71 @@ the download button. The visual then fills the grid, and the other visuals
 are hidden. The filters and the selection bar stay, and the selection
 applies as before: you can select in the large visual too. Click the button
 again, or push Esc, to put the visual back on the grid.
+
+## time zoom
+
+A visual with one time dimension at a grain has two kinds of zoom:
+
+- The **grain** is the width of a bucket: per hour, per day. It changes only
+  this visual, and only for this viewer. Back and forward do not change it.
+- The **range** is the time that shows. It is a selection on the time field, as
+  from a drag, a click on a bucket or the date range. All visuals change with
+  it.
+
+With `grain: auto`, the first follows from the second. Drag over a week on a
+monthly trend and the trend shows days. Go back and it shows months again.
+
+```yaml
+# fragment
+  - id: trend
+    type: line
+    dimensions: [{ field: orders.ordered_at, grain: auto }]
+    metrics: [revenue]
+    zoom: [hour, day, week, month]   # or `zoom: false`
+    at: { x: 0, y: 4, w: 12, h: 4 }
+```
+
+**The range.** The range is the selection on the field. If the field has no
+selection, the range is from its first value to its last value. A selection
+without an end stops at the last value. A relative window, such as "Last 7
+days", moves with the clock.
+
+**The steps.** The steps are the grains in `zoom`. Without `zoom`, they are all
+the grains that the field has: the list in its `grain` extension, or all grains.
+A date has no `hour` and no `minute`. `zoom: false` shows no steps. An `auto`
+grain then chooses from all the grains of the field.
+
+**Open steps.** A step is open when it gives between 2 buckets and the budget of
+the visual over the range. The budget is 40 buckets for each column of the
+grid that the visual is wide: 480 for `w: 12`. The size of the browser window has
+no effect, so all viewers of the same selection get the same grain. They also
+get the same answers from the server, which keeps its work small.
+
+**What `auto` chooses.** `auto` chooses the finest open step. If no step is
+open, it chooses the coarsest step that gives more than one bucket. If there is
+no such step, it chooses the finest step.
+
+**A fixed grain.** `grain: day` stays at `day` until a viewer chooses a step. It
+stays at `day` also when `day` is not open.
+
+**The control.** The header of the visual shows the steps. The step that shows
+is pressed. A dotted line under a step means `auto` chose it. A step that is not
+open is grey. A click on a step keeps that grain for this viewer, on this visual,
+until the viewer clicks the step again. If the range changes so that the
+kept step is not open, the visual shows the nearest open step. The kept step
+comes back when it is open again. On a chart that has the focus, `+` goes to
+the next finer open step and `−` goes to the next coarser one.
+
+**The time axis.** A line or a bar at a grain shows every bucket of the range.
+A bucket that has no rows is a break in the line, or a space where a bar would
+be. The buckets are in their positions in time, so a month is as wide as its
+days. Buckets later than now do not show, unless they have rows. The
+bucket that holds the server's current time is not complete: its line segment is
+dashed and its bar is lighter. Buckets are in UTC.
+
+A click or a drag on a line or a bar at a grain selects whole buckets, as a range
+of time. So does a click on a table row, when the first dimension of the table
+has a grain.
 
 ## the editor
 

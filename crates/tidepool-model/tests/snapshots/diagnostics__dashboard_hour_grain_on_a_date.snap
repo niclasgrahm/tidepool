@@ -2,7 +2,7 @@
 source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
-error: visual `by_hour`: `orders.ordered_at` has no time of day, so it has no grain `hour`
+error: visual `over_time`: `orders.ordered_at` has no time of day, so it has no grain `hour`
   --> dashboards/sales_recent.yaml:21:53
    |
 21 |     dimensions: [{ field: orders.ordered_at, grain: hour }]

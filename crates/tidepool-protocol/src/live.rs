@@ -93,6 +93,14 @@ pub enum ClientMessage {
         #[serde(default)]
         desc: bool,
     },
+    /// Pin a visual's time grain for this session, or go back to the
+    /// dashboard's with no `grain`. It changes no other visual and isn't a
+    /// step in the selection's history (plan §5.8).
+    Grain {
+        visual: String,
+        #[serde(default)]
+        grain: Option<String>,
+    },
     /// Stop live updates for this session; the last frame stays.
     Pause,
     Resume,
@@ -295,6 +303,10 @@ pub struct VisualInfo {
     /// else the metric's. Metrics without one aren't listed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub formats: BTreeMap<String, String>,
+    /// The grains a viewer may zoom it between, finest first; empty when
+    /// it can't be zoomed. Which of them are open is in each frame.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zoom: Vec<String>,
     pub at: GridAt,
 }
 
@@ -337,6 +349,35 @@ pub struct VisualFrame {
     /// A KPI's comparison value, when its metric can be computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compare: Option<Value>,
+    /// Its time axis, when it has one grained time dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<ZoomFrame>,
+}
+
+/// A visual's time axis as of a frame (plan §5.8).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZoomFrame {
+    /// The grain the answer is at.
+    pub grain: String,
+    /// Whether that grain was chosen from the range (the dashboard says
+    /// `auto`, and nothing is pinned).
+    pub auto: bool,
+    /// The grain pinned in this session, which isn't `grain` while it's
+    /// closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<String>,
+    /// The steps that give a readable number of buckets over the range,
+    /// finest first.
+    pub open: Vec<String>,
+    /// The first bucket on the axis, as the result's first column has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Value>,
+    /// The bucket after the last one on the axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<Value>,
+    /// The bucket that holds the server's now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<Value>,
 }
 
 /// A filter list's window: Qlik's states, per value. A tree filter's
@@ -429,6 +470,25 @@ mod tests {
         assert_eq!(
             window(RelativeUnit::Week, 2, 3),
             "2 weeks ending 3 weeks ago"
+        );
+    }
+
+    #[test]
+    fn a_grain_pin_reads_from_json_with_or_without_a_grain() {
+        let parsed = |text| serde_json::from_str::<ClientMessage>(text).ok();
+        assert_eq!(
+            parsed(r#"{"type": "grain", "visual": "trend", "grain": "hour"}"#),
+            Some(ClientMessage::Grain {
+                visual: "trend".into(),
+                grain: Some("hour".into()),
+            })
+        );
+        assert_eq!(
+            parsed(r#"{"type": "grain", "visual": "trend"}"#),
+            Some(ClientMessage::Grain {
+                visual: "trend".into(),
+                grain: None,
+            })
         );
     }
 

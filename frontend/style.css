@@ -529,6 +529,16 @@ input:focus-visible, select:focus-visible {
 .visual-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; min-width: 0; }
 .visual-head h2 { margin: 0; font: 600 13px/1.3 var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .visual-head .tag { flex: none; }
+/* a visual's time grains: the one on screen pressed, those that don't fit the
+   range greyed out, the one chosen from the range underlined */
+.steps { flex: none; display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.steps .step { height: 22px; padding: 0 6px; border: 0; border-radius: 0; background: none; color: var(--ink-soft); font: 500 11px/1 var(--text, inherit); cursor: pointer; white-space: nowrap; }
+.steps .step + .step { border-left: 1px solid var(--line); }
+.steps .step:hover:not(:disabled) { background: var(--tide-soft); color: var(--ink); }
+.steps .step:disabled { color: var(--gray-8); cursor: default; }
+.steps .step[aria-pressed="true"] { background: var(--tide-soft); color: var(--tide); }
+.steps .step.auto { text-decoration: underline dotted; text-underline-offset: 2px; }
+.steps .step.pinned { font-weight: 700; }
 .export, .maximize { width: 24px !important; height: 24px !important; opacity: 0.7; }
 .visual:hover .export, .export:focus-visible,
 .visual:hover .maximize, .maximize:focus-visible, .visual.maximized .maximize { opacity: 1; }
@@ -557,8 +567,11 @@ input:focus-visible, select:focus-visible {
 .plot .bar { fill: var(--tide-fill); }
 .plot .bar.m1 { fill: var(--gray-8); }
 .plot .bar.selected { fill: var(--anemone); }
+/* a period that isn't over yet: its low value isn't a drop */
+.plot .bar.current { fill-opacity: 0.45; }
 .plot .area { fill: var(--tide-fill); fill-opacity: 0.12; }
 .plot .line { fill: none; stroke: var(--tide-fill); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.plot .line.now { stroke-dasharray: 3 3; stroke-linecap: butt; }
 .plot .line.m1 { stroke: var(--gray-9); }
 .plot .dot { fill: var(--surface); stroke: var(--tide-fill); stroke-width: 1.5; }
 .plot .dot.m1 { stroke: var(--gray-9); }

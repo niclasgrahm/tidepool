@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
-use common::{ready_state, request, retail, retail_with, send, state};
+use common::{ready_state, request, retail, retail_edited, retail_with, send, state};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tidepool_server::AppState;
+use tidepool_server::{AppState, Tokens};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -69,6 +69,12 @@ async fn server_for(state: Arc<AppState>) -> (Arc<AppState>, String) {
         ]),
     )
     .await;
+    let url = listen(&state).await;
+    (state, url)
+}
+
+/// Serve a state on a free port, whatever it holds: the address of its socket.
+async fn listen(state: &Arc<AppState>) -> String {
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(err) => panic!("binding: {err}"),
@@ -77,11 +83,11 @@ async fn server_for(state: Arc<AppState>) -> (Arc<AppState>, String) {
         Ok(address) => address,
         Err(err) => panic!("the bound address: {err}"),
     };
-    let app = tidepool_server::router(Arc::clone(&state));
+    let app = tidepool_server::router(Arc::clone(state));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (state, format!("ws://{address}/v1/ws"))
+    format!("ws://{address}/v1/ws")
 }
 
 async fn connect(url: &str) -> Socket {
@@ -97,10 +103,15 @@ async fn say(socket: &mut Socket, message: Value) {
     }
 }
 
+/// How long a test waits for a message. A deadline over the whole wait: status
+/// ticks arrive every second, so a timeout per message would never fire.
+const PATIENCE: Duration = Duration::from_secs(10);
+
 /// The next message of type `kind`, skipping others (status ticks).
 async fn next(socket: &mut Socket, kind: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
-        let message = match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+        let message = match tokio::time::timeout_at(deadline, socket.next()).await {
             Ok(Some(Ok(message))) => message,
             other => panic!("waiting for `{kind}`: {other:?}"),
         };
@@ -983,8 +994,9 @@ async fn a_filter_visual_is_a_list_and_a_table_without_metrics_shows_what_there_
 /// The type of every message up to the next `done`, skipping status ticks.
 async fn until_done(socket: &mut Socket) -> Vec<String> {
     let mut kinds = Vec::new();
+    let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
-        let message = match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+        let message = match tokio::time::timeout_at(deadline, socket.next()).await {
             Ok(Some(Ok(message))) => message,
             other => panic!("waiting for `done` after {kinds:?}: {other:?}"),
         };
@@ -1220,4 +1232,601 @@ async fn a_rows_visual_shows_new_rows_as_they_arrive() {
     assert_eq!(latest[0][4], "newest", "{frame}");
     assert_eq!(latest[0][1], "Bo");
     assert_eq!(latest.as_array().map(Vec::len), Some(3));
+}
+
+/// Orders at these times, each worth 1.00.
+async fn orders_at(state: &Arc<AppState>, times: &[&str]) {
+    let rows: Vec<Value> = times
+        .iter()
+        .enumerate()
+        .map(|(i, time)| {
+            json!({
+                "order_id": format!("t{i}"), "customer_id": "c1", "product_id": "p1",
+                "status": "paid", "ordered_at": time, "quantity": 1, "amount": "1.00",
+            })
+        })
+        .collect();
+    post(
+        state,
+        "/v1/tables/orders/rows?wait=visible",
+        &Value::Array(rows),
+    )
+    .await;
+}
+
+/// The next frame that has visual `id` in it.
+async fn frame_of(socket: &mut Socket, id: &str) -> Value {
+    let wait = async {
+        loop {
+            let frame = next(socket, "frame").await;
+            if frame["visuals"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|v| v["id"] == id))
+            {
+                return frame;
+            }
+        }
+    };
+    match tokio::time::timeout(PATIENCE, wait).await {
+        Ok(frame) => frame,
+        Err(err) => panic!("no frame with visual {id}: {err}"),
+    }
+}
+
+/// What a frame says about visual `id`'s time axis.
+fn zoom(frame: &Value, id: &str) -> Value {
+    visual(frame, id)["zoom"].clone()
+}
+
+#[tokio::test]
+async fn an_auto_grain_refines_with_a_brush_and_back_coarsens_it() {
+    let (state, url) = server().await;
+    // four months of orders (with the two from 1 February)
+    orders_at(&state, &["2026-06-01T12:00:00Z"]).await;
+    state.set_clock(Some(at("2026-11-01T00:00:00Z")));
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let opened = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&opened, "trend");
+    assert_eq!(axis["grain"], "day", "2,900 hours are too many: {axis}");
+    assert_eq!(axis["auto"], true);
+    assert_eq!(axis["open"], json!(["day", "week", "month"]));
+    assert_eq!(axis["from"], "2026-02-01");
+    assert_eq!(axis["to"], "2026-06-02", "as far as the values go");
+    assert_eq!(
+        visual(&opened, "trend")["result"]["columns"][0]["name"],
+        "orders.ordered_at:day"
+    );
+    assert_eq!(visual(&opened, "by_region")["zoom"], Value::Null);
+
+    // the complaint: eleven hours shouldn't be two points of a daily trend
+    say(
+        &mut socket,
+        json!({"type": "select_range", "field": "orders.ordered_at",
+               "from": "2026-02-01T05:00:00Z", "to": "2026-02-01T16:00:00Z"}),
+    )
+    .await;
+    let brushed = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&brushed, "trend");
+    assert_eq!(axis["grain"], "hour", "{axis}");
+    assert_eq!(axis["auto"], true);
+    assert_eq!(axis["open"], json!(["hour"]), "660 minutes are too many");
+    assert_eq!(axis["from"], "2026-02-01T05:00:00Z");
+    assert_eq!(axis["to"], "2026-02-01T16:00:00Z");
+    assert_eq!(
+        rows(&brushed, "trend"),
+        json!([["2026-02-01T10:00:00Z", "15.00", 2]])
+    );
+
+    // back: the whole range, and days again
+    say(&mut socket, json!({"type": "back"})).await;
+    let back = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&back, "trend")["grain"], "day");
+    assert_eq!(
+        rows(&back, "trend"),
+        json!([["2026-02-01", "15.00", 2], ["2026-06-01", "1.00", 1]])
+    );
+
+    // an open end reaches to where the values do
+    say(
+        &mut socket,
+        json!({"type": "select_range", "field": "orders.ordered_at",
+               "from": "2026-05-31T00:00:00Z"}),
+    )
+    .await;
+    let open_ended = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&open_ended, "trend")["grain"], "hour");
+    assert_eq!(zoom(&open_ended, "trend")["from"], "2026-05-31T00:00:00Z");
+    assert_eq!(zoom(&open_ended, "trend")["to"], "2026-06-01T13:00:00Z");
+}
+
+#[tokio::test]
+async fn a_window_resolves_with_the_clock_and_stops_at_now() {
+    let (state, url) = server().await;
+    state.set_clock(Some(at("2026-02-03T14:30:00Z")));
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales_recent"}),
+    )
+    .await;
+    // the dashboard opens on the last seven days: hours, up to this one
+    let opened = frame_of(&mut socket, "over_time").await;
+    let axis = zoom(&opened, "over_time");
+    assert_eq!(axis["grain"], "hour", "{axis}");
+    assert_eq!(axis["from"], "2026-01-28T00:00:00Z");
+    assert_eq!(axis["to"], "2026-02-03T15:00:00Z");
+    assert_eq!(axis["current"], "2026-02-03T14:00:00Z");
+    assert!(
+        axis["open"]
+            .as_array()
+            .is_some_and(|o| o.contains(&json!("hour")) && !o.contains(&json!("minute"))),
+        "{axis}"
+    );
+
+    // a window of hours: minutes
+    say(
+        &mut socket,
+        json!({"type": "select_relative", "field": "orders.ordered_at",
+               "window": {"unit": "hour", "last": 2}}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "over_time").await;
+    assert_eq!(zoom(&frame, "over_time")["grain"], "minute");
+
+    // no selection: the extent is one instant, and nothing is open
+    say(&mut socket, json!({"type": "clear"})).await;
+    let frame = frame_of(&mut socket, "over_time").await;
+    let axis = zoom(&frame, "over_time");
+    assert_eq!(axis["grain"], "minute", "{axis}");
+    assert_eq!(axis["open"], json!([]));
+}
+
+#[tokio::test]
+async fn the_bucket_that_holds_now_moves_without_new_data() {
+    let (state, url) = server().await;
+    state.set_clock(Some(at("2026-02-03T10:00:00Z")));
+    orders_at(&state, &["2026-02-02T10:00:00Z"]).await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&frame, "trend")["current"], "2026-02-03T10:00:00Z");
+    state.set_clock(Some(at("2026-02-03T11:05:00Z")));
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&frame, "trend")["current"], "2026-02-03T11:00:00Z");
+}
+
+#[tokio::test]
+async fn a_pin_is_this_visuals_alone_and_no_step_in_history() {
+    let (state, url) = server().await;
+    orders_at(&state, &["2026-06-01T12:00:00Z"]).await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    assert!(until_done(&mut socket).await.ends_with(&["frame".into()]));
+
+    // only the pinned visual changes, and no selection message says so
+    say(
+        &mut socket,
+        json!({"type": "grain", "visual": "trend", "grain": "month"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(
+        frame["visuals"].as_array().map(Vec::len),
+        Some(1),
+        "the other visuals are as they were: {frame}"
+    );
+    assert_eq!(frame["filters"], json!([]));
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "month");
+    assert_eq!(axis["auto"], false);
+    assert_eq!(axis["pinned"], "month");
+    assert_eq!(axis["from"], "2026-02-01");
+    assert_eq!(axis["to"], "2026-07-01");
+    assert_eq!(
+        visual(&frame, "trend")["result"]["columns"][0]["name"],
+        "orders.ordered_at:month"
+    );
+    assert_eq!(until_done(&mut socket).await, Vec::<String>::new());
+
+    // nothing to go back to: a grain isn't a selection
+    say(&mut socket, json!({"type": "back"})).await;
+    assert_eq!(until_done(&mut socket).await, Vec::<String>::new());
+
+    // a narrower range leaves the pin where it was, as long as it's open
+    say(
+        &mut socket,
+        json!({"type": "select_range", "field": "orders.ordered_at",
+               "from": "2026-02-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&frame, "trend")["grain"], "month");
+    say(&mut socket, json!({"type": "back"})).await;
+    let _ = frame_of(&mut socket, "trend").await;
+
+    // no grain goes back to the dashboard's
+    say(&mut socket, json!({"type": "grain", "visual": "trend"})).await;
+    let frame = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "day");
+    assert_eq!(axis["auto"], true);
+    assert_eq!(axis["pinned"], Value::Null);
+
+    // sorted by its time column, a sort follows the grain
+    say(
+        &mut socket,
+        json!({"type": "sort", "visual": "trend", "column": "orders.ordered_at:day", "desc": true}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(rows(&frame, "trend")[0][0], "2026-06-01");
+    say(
+        &mut socket,
+        json!({"type": "grain", "visual": "trend", "grain": "month"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(
+        rows(&frame, "trend")[0][0],
+        "2026-06-01",
+        "still newest first, and no error: {frame}"
+    );
+    assert_eq!(rows(&frame, "trend")[1][0], "2026-02-01");
+}
+
+#[tokio::test]
+async fn a_pin_outside_the_open_steps_falls_back_and_stays_pinned() {
+    let (state, url) = server().await;
+    orders_at(&state, &["2026-06-01T12:00:00Z"]).await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let _ = frame_of(&mut socket, "trend").await;
+
+    // minutes over four months: too many, and hours too, so days
+    say(
+        &mut socket,
+        json!({"type": "grain", "visual": "trend", "grain": "minute"}),
+    )
+    .await;
+    // the answer is the same: the frame only says what's pinned
+    let frame = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "day", "{axis}");
+    assert_eq!(axis["auto"], false);
+    assert_eq!(axis["pinned"], "minute");
+    assert_eq!(axis["open"], json!(["day", "week", "month"]));
+
+    // an hour's brush opens the pin's step: there it is
+    say(
+        &mut socket,
+        json!({"type": "select_range", "field": "orders.ordered_at",
+               "from": "2026-02-01T10:00:00Z", "to": "2026-02-01T11:00:00Z"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&frame, "trend")["grain"], "minute");
+
+    // and back it falls back again
+    say(&mut socket, json!({"type": "back"})).await;
+    let frame = frame_of(&mut socket, "trend").await;
+    assert_eq!(zoom(&frame, "trend")["grain"], "day");
+    assert_eq!(zoom(&frame, "trend")["pinned"], "minute");
+}
+
+#[tokio::test]
+async fn sessions_share_a_grain_and_keep_their_pins_to_themselves() {
+    let (state, url) = server().await;
+    orders_at(&state, &["2026-06-01T12:00:00Z"]).await;
+    let open = |id: &'static str| json!({"type": "open_dashboard", "id": id});
+    let mut one = connect(&url).await;
+    let mut two = connect(&url).await;
+    say(&mut one, open("sales")).await;
+    say(&mut two, open("sales")).await;
+    let (first, second) = (
+        frame_of(&mut one, "trend").await,
+        frame_of(&mut two, "trend").await,
+    );
+    assert_eq!(zoom(&first, "trend"), zoom(&second, "trend"));
+    assert_eq!(rows(&first, "trend"), rows(&second, "trend"));
+
+    // a selection elsewhere changes neither the range nor the grain
+    say(
+        &mut two,
+        json!({"type": "select", "field": "customers.region", "values": ["north"]}),
+    )
+    .await;
+    let selected = frame_of(&mut two, "trend").await;
+    assert_eq!(zoom(&selected, "trend"), zoom(&first, "trend"));
+
+    // the same range is the same grain in another session
+    let brush = json!({"type": "select_range", "field": "orders.ordered_at",
+                       "from": "2026-02-01T05:00:00Z", "to": "2026-02-01T16:00:00Z"});
+    say(&mut one, brush.clone()).await;
+    let in_one = frame_of(&mut one, "trend").await;
+    say(&mut two, json!({"type": "clear"})).await;
+    let _ = frame_of(&mut two, "trend").await;
+    say(&mut two, brush).await;
+    let in_two = frame_of(&mut two, "trend").await;
+    assert_eq!(zoom(&in_one, "trend"), zoom(&in_two, "trend"));
+    assert_eq!(rows(&in_one, "trend"), rows(&in_two, "trend"));
+
+    // a pin stays in the session that made it: the other goes on as it was,
+    // new data and all
+    say(
+        &mut one,
+        json!({"type": "grain", "visual": "trend", "grain": "minute"}),
+    )
+    .await;
+    let pinned = frame_of(&mut one, "trend").await;
+    assert_eq!(zoom(&pinned, "trend")["pinned"], "minute");
+    orders_at(&state, &["2026-02-01T11:00:00Z"]).await;
+    let other = frame_of(&mut two, "trend").await;
+    assert_eq!(zoom(&other, "trend")["grain"], "hour");
+    assert_eq!(zoom(&other, "trend")["pinned"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_fixed_grain_stays_and_zoom_false_refuses_a_pin() {
+    let (state, url) = server().await;
+    orders_at(&state, &["2026-06-01T12:00:00Z"]).await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let model = next(&mut socket, "model").await;
+    let info = |dashboard: &str, id: &str| -> Value {
+        model["dashboards"]
+            .as_array()
+            .and_then(|d| d.iter().find(|d| d["id"] == dashboard))
+            .and_then(|d| d["visuals"].as_array())
+            .and_then(|v| v.iter().find(|v| v["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("no visual {id} in {dashboard}"))
+    };
+    assert_eq!(
+        info("sales", "trend")["zoom"],
+        json!(["minute", "hour", "day", "week", "month"]),
+        "the dashboard's list"
+    );
+    assert_eq!(info("sales", "trend")["dimensions"][0]["grain"], "auto");
+    assert_eq!(
+        info("sales_recent", "over_time")["zoom"],
+        json!(["minute", "hour", "day", "week", "month", "quarter", "year"]),
+        "every grain its field has"
+    );
+    assert_eq!(info("sales_recent", "by_week")["zoom"], Value::Null);
+    assert_eq!(info("sales", "by_region")["zoom"], Value::Null);
+
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales_recent"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "by_week").await;
+    let axis = zoom(&frame, "by_week");
+    assert_eq!(axis["grain"], "week");
+    assert_eq!(axis["auto"], false);
+    assert_eq!(axis["open"], json!([]), "nothing to offer");
+
+    for (message, wants) in [
+        (
+            json!({"type": "grain", "visual": "by_week", "grain": "day"}),
+            "can't be zoomed",
+        ),
+        (
+            json!({"type": "grain", "visual": "who_buys_what", "grain": "day"}),
+            "can't be zoomed",
+        ),
+        (
+            json!({"type": "grain", "visual": "nope", "grain": "day"}),
+            "no visual `nope`",
+        ),
+        (
+            json!({"type": "grain", "visual": "over_time", "grain": "fortnight"}),
+            "unknown grain",
+        ),
+    ] {
+        say(&mut socket, message).await;
+        let error = next(&mut socket, "error").await;
+        assert!(
+            error["message"].as_str().is_some_and(|m| m.contains(wants)),
+            "{error}, wanted {wants}"
+        );
+    }
+
+    // a step of the field that the visual's list leaves out
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let _ = frame_of(&mut socket, "trend").await;
+    say(
+        &mut socket,
+        json!({"type": "grain", "visual": "trend", "grain": "year"}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("doesn't zoom to `year`") && m.contains("minute, hour")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn without_a_dashboard_there_is_nothing_to_pin() {
+    let (_state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "grain", "visual": "trend", "grain": "day"}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no dashboard is open")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_table_has_a_grain_and_no_axis() {
+    let mut socket = connect(&listen(&ready_state()).await).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "minute", "{axis}");
+    assert_eq!(axis["open"], json!([]));
+    assert_eq!(axis["from"], Value::Null);
+    assert_eq!(axis["to"], Value::Null);
+    assert_eq!(rows(&frame, "trend"), json!([]));
+}
+
+#[tokio::test]
+async fn the_extent_is_of_live_values() {
+    // orders with a key, so the newest can be replaced and the extent shrink;
+    // read through a dictionary, or from plain values
+    for encoding in ["", ", encoding: plain"] {
+        let model = retail_edited(&[
+            (
+                "tables/orders.yaml",
+                "mode: append\nevent_time: ordered_at\nretention: 730d\n",
+                "mode: upsert\nprimary_key: [order_id]\n",
+            ),
+            (
+                "tables/orders.yaml",
+                "order_id:    { type: string, encoding: plain }",
+                "order_id:    { type: string }",
+            ),
+            (
+                "tables/orders.yaml",
+                "ordered_at:  { type: timestamptz }",
+                &format!("ordered_at:  {{ type: timestamptz{encoding} }}"),
+            ),
+        ]);
+        let (running, url) = server_for(state(model, Tokens::default(), None)).await;
+        orders_at(&running, &["2026-02-01T12:00:00Z", "2026-02-02T12:00:00Z"]).await;
+        let mut socket = connect(&url).await;
+        say(
+            &mut socket,
+            json!({"type": "open_dashboard", "id": "sales"}),
+        )
+        .await;
+        let frame = frame_of(&mut socket, "trend").await;
+        assert_eq!(zoom(&frame, "trend")["to"], "2026-02-02T13:00:00Z");
+
+        // a row added past the end moves it
+        orders_at(
+            &running,
+            &[
+                "2026-02-01T12:00:00Z",
+                "2026-02-02T12:00:00Z",
+                "2026-07-01T12:00:00Z",
+            ],
+        )
+        .await;
+        let frame = frame_of(&mut socket, "trend").await;
+        assert_eq!(zoom(&frame, "trend")["grain"], "day");
+        assert_eq!(zoom(&frame, "trend")["to"], "2026-07-02");
+
+        // and the same row moved back takes it with it
+        orders_at(
+            &running,
+            &[
+                "2026-02-01T12:00:00Z",
+                "2026-02-02T12:00:00Z",
+                "2026-02-01T13:00:00Z",
+            ],
+        )
+        .await;
+        let frame = frame_of(&mut socket, "trend").await;
+        assert_eq!(zoom(&frame, "trend")["grain"], "hour", "{encoding}");
+        assert_eq!(zoom(&frame, "trend")["to"], "2026-02-02T13:00:00Z");
+    }
+}
+
+#[tokio::test]
+async fn a_date_field_and_a_derived_field_have_extents_too() {
+    // dates: days are the finest there is
+    let dates = retail_edited(&[
+        (
+            "tables/orders.yaml",
+            "ordered_at:  { type: timestamptz }",
+            "ordered_at:  { type: date }",
+        ),
+        (
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            "",
+        ),
+    ]);
+    let running = state(dates, Tokens::default(), None);
+    orders_at(&running, &["2026-02-01", "2026-02-10"]).await;
+    let mut socket = connect(&listen(&running).await).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "day", "{axis}");
+    assert_eq!(axis["from"], "2026-02-01");
+    assert_eq!(axis["to"], "2026-02-11");
+    assert_eq!(axis["open"], json!(["day", "week"]), "no hours");
+
+    // a time field worked out from a column: the engine says how far it goes
+    let derived = retail_edited(&[
+        (
+            "model.ossie.yaml",
+            "      - name: status\n",
+            "      - name: placed\n        expression: { dialects: [{ dialect: ANSI_SQL, expression: \"DATE_TRUNC('day', ordered_at)\" }] }\n        dimension: { is_time: true }\n      - name: status\n",
+        ),
+        (
+            "dashboards/sales.yaml",
+            "    dimensions: [{ field: orders.ordered_at, grain: auto }]",
+            "    dimensions: [{ field: orders.placed, grain: auto }]",
+        ),
+        (
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            "",
+        ),
+    ]);
+    let (running, url) = server_for(state(derived, Tokens::default(), None)).await;
+    orders_at(&running, &["2026-02-10T12:00:00Z"]).await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = frame_of(&mut socket, "trend").await;
+    let axis = zoom(&frame, "trend");
+    assert_eq!(axis["grain"], "day", "{axis}");
+    assert_eq!(axis["from"], "2026-02-01");
+    assert_eq!(axis["to"], "2026-02-11");
 }

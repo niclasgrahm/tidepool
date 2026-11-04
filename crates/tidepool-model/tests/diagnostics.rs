@@ -514,11 +514,18 @@ case!(
 );
 case!(
     dashboard_brush_on_non_time_axis,
-    [Replace(
-        "dashboards/sales.yaml",
-        "dimensions: [{ field: orders.ordered_at, grain: day }]",
-        "dimensions: [orders.status]"
-    )]
+    [
+        Replace(
+            "dashboards/sales.yaml",
+            "dimensions: [{ field: orders.ordered_at, grain: auto }]",
+            "dimensions: [orders.status]"
+        ),
+        Replace(
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            ""
+        ),
+    ]
 );
 case!(
     dashboard_sort_by_unshown_metric,
@@ -554,11 +561,19 @@ case!(
 );
 case!(
     dashboard_hour_grain_on_a_date,
-    [Replace(
-        "tables/orders.yaml",
-        "ordered_at:  { type: timestamptz }",
-        "ordered_at:  { type: date }"
-    )]
+    [
+        Replace(
+            "tables/orders.yaml",
+            "ordered_at:  { type: timestamptz }",
+            "ordered_at:  { type: date }"
+        ),
+        Replace(
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            ""
+        ),
+        Replace("dashboards/sales_recent.yaml", "grain: auto", "grain: hour"),
+    ]
 );
 case!(
     field_hour_grain_on_a_date,
@@ -571,10 +586,93 @@ case!(
         Replace(
             "model.ossie.yaml",
             "datatype: DateTimeTz\n        dimension: { is_time: true }\n",
-            "dimension: { is_time: true }\n        custom_extensions:\n          - vendor_name: TIDEPOOL\n            data: '{\"grain\": [\"hour\", \"day\"]}'\n"
+            "dimension: { is_time: true }\n        custom_extensions:\n          - vendor_name: TIDEPOOL\n            data: '{\"grain\": [\"hour\", \"day\", \"week\"]}'\n"
         ),
-        Replace("dashboards/sales_recent.yaml", "grain: hour", "grain: day"),
+        Replace(
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            ""
+        ),
     ]
+);
+case!(
+    zoom_without_a_grained_dimension,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    on_click: select\n",
+        "    on_click: select\n    zoom: [day, month]\n"
+    )]
+);
+case!(
+    zoom_false_on_a_kpi,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    compare: revenue_prev_year\n",
+        "    compare: revenue_prev_year\n    zoom: false\n"
+    )]
+);
+case!(
+    zoom_step_the_field_does_not_allow,
+    [Replace(
+        "model.ossie.yaml",
+        "datatype: DateTimeTz\n        dimension: { is_time: true }\n",
+        "dimension: { is_time: true }\n        custom_extensions:\n          - vendor_name: TIDEPOOL\n            data: '{\"grain\": [\"hour\", \"day\", \"week\", \"month\"]}'\n"
+    ),]
+);
+case!(
+    zoom_hour_on_a_date,
+    [
+        Replace(
+            "tables/orders.yaml",
+            "ordered_at:  { type: timestamptz }",
+            "ordered_at:  { type: date }"
+        ),
+        Replace(
+            "dashboards/sales.yaml",
+            "zoom: [minute, hour, day, week, month]",
+            "zoom: [hour, day, week, month]"
+        ),
+    ]
+);
+case!(
+    zoom_lists_nothing,
+    [Replace(
+        "dashboards/sales.yaml",
+        "zoom: [minute, hour, day, week, month]",
+        "zoom: []"
+    )]
+);
+case!(
+    zoom_leaves_out_the_grain_it_starts_at,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [{ field: orders.ordered_at, grain: auto }]",
+        "    dimensions: [{ field: orders.ordered_at, grain: quarter }]"
+    )]
+);
+case!(
+    auto_on_a_field_that_is_not_time,
+    [
+        Replace(
+            "dashboards/sales.yaml",
+            "    dimensions: [{ field: orders.ordered_at, grain: auto }]",
+            "    dimensions: [{ field: customers.region, grain: auto }]"
+        ),
+        Replace("dashboards/sales.yaml", "    on_brush: select_range\n", ""),
+        Replace(
+            "dashboards/sales.yaml",
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            ""
+        ),
+    ]
+);
+case!(
+    auto_with_two_grained_dimensions,
+    [Replace(
+        "dashboards/sales_recent.yaml",
+        "    dimensions: [customers.region, products.category]",
+        "    dimensions: [{ field: orders.ordered_at, grain: auto }, { field: orders.ordered_at, grain: day }]"
+    )]
 );
 case!(dashboards_without_a_model, [Remove("model.ossie.yaml")]);
 case!(
@@ -821,7 +919,7 @@ case!(
     dashboard_filter_with_a_grain,
     [Replace(
         "dashboards/sales.yaml",
-        "    type: line\n    dimensions: [{ field: orders.ordered_at, grain: day }]\n    metrics: [revenue, order_count]\n    on_brush: select_range\n",
+        "    type: line\n    # the finest grain that reads over the range on screen: brush a morning\n    # and it shows minutes or hours, go back and it shows days again\n    dimensions: [{ field: orders.ordered_at, grain: auto }]\n    metrics: [revenue, order_count]\n    on_brush: select_range\n    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
         "    type: filter\n    dimensions: [{ field: orders.ordered_at, grain: day }]\n"
     )]
 );
