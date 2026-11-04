@@ -4,6 +4,7 @@
 //!
 //! [`Board`]: crate::board::Board
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{Value, json};
 use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
@@ -40,6 +41,19 @@ pub fn Dashboard(slug: String) -> impl IntoView {
         live.dashboards
             .with(|all| all.iter().find(|d| d.id == slug).cloned())
     });
+    // the visual shown alone, as large as the grid; the rail and the
+    // selection bar stay, and selections go on working
+    let maximized = RwSignal::new(None::<String>);
+    let escape = window_event_listener(ev::keydown, move |e| {
+        // a popover's Escape closes the popover only
+        if e.key() == "Escape"
+            && !e.default_prevented()
+            && maximized.with_untracked(Option::is_some)
+        {
+            maximized.set(None);
+        }
+    });
+    on_cleanup(move || escape.remove());
     view! {
         {move || match info.get() {
             None => view! { <p class="quiet page-note">"Loading the dashboard…"</p> }.into_any(),
@@ -58,12 +72,13 @@ pub fn Dashboard(slug: String) -> impl IntoView {
                     })}
                     <section
                         class="grid"
+                        class:alone=move || maximized.with(Option::is_some)
                         style=format!(
                             "grid-template-columns: repeat({}, minmax(0, 1fr)); grid-auto-rows: {}px;",
                             dashboard.columns, dashboard.row_height
                         )
                     >
-                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v row_height=dashboard.row_height /> }).collect_view()}
+                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v row_height=dashboard.row_height maximized=maximized /> }).collect_view()}
                     </section>
                 </div>
             }
@@ -442,11 +457,18 @@ fn FilterTree(
     }
 }
 
+/// A visual on the grid. `maximized` names the visual shown alone, if
+/// any: this one is then the whole grid, or hidden. It stays the same
+/// element either way, so a chart keeps its state and only resizes.
 #[component]
-fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
+fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>) -> AnyView {
     let live = expect_context::<Live>();
     let id = info.id.clone();
     let frame = Memo::new(move |_| live.board.with(|b| b.visuals.get(&id).cloned()));
+    let alone = {
+        let id = info.id.clone();
+        move || maximized.with(|m| m.as_deref() == Some(id.as_str()))
+    };
     let place = format!(
         "grid-column: {} / span {}; grid-row: {} / span {};",
         info.at.x + 1,
@@ -508,8 +530,8 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
             line_chart(live, &info, rows, title.clone())
         };
         return view! {
-            <article class=class style=place data-visual=info.id.clone()>
-                {visual_head(live, &info, &title)}
+            <article class=class class:maximized=alone style=place data-visual=info.id.clone()>
+                {visual_head(live, &info, &title, maximized)}
                 {note}
                 {content}
             </article>
@@ -517,9 +539,9 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
         .into_any();
     }
     let id = info.id.clone();
-    let head = visual_head(live, &info, &title);
+    let head = visual_head(live, &info, &title, maximized);
     view! {
-        <article class=class style=place data-visual=id>
+        <article class=class class:maximized=alone style=place data-visual=id>
             {head}
             {move || match frame.get() {
                 None => view! { <p class="quiet">"Waiting for data"</p> }.into_any(),
@@ -536,8 +558,13 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
     .into_any()
 }
 
-/// A visual's header: its title, how it's set up, its export.
-fn visual_head(live: Live, info: &VisualInfo, title: &str) -> impl IntoView + use<> {
+/// A visual's header: its title, how it's set up, its export, maximize.
+fn visual_head(
+    live: Live,
+    info: &VisualInfo,
+    title: &str,
+    maximized: RwSignal<Option<String>>,
+) -> impl IntoView + use<> {
     let tags = visual_tags(info);
     view! {
         <header class="visual-head">
@@ -545,7 +572,34 @@ fn visual_head(live: Live, info: &VisualInfo, title: &str) -> impl IntoView + us
             {tags.into_iter().map(|t| view! { <code class="tag">{t}</code> }).collect_view()}
             <span class="grow"></span>
             {export_button(live, info)}
+            {maximize_button(&info.id, maximized)}
         </header>
+    }
+}
+
+/// Show the visual alone, as large as the grid, or put it back (Escape
+/// does too).
+fn maximize_button(id: &str, maximized: RwSignal<Option<String>>) -> impl IntoView + use<> {
+    let id = id.to_string();
+    let alone = {
+        let id = id.clone();
+        Memo::new(move |_| maximized.with(|m| m.as_ref() == Some(&id)))
+    };
+    let toggle = move |_| maximized.set((!alone.get_untracked()).then(|| id.clone()));
+    view! {
+        <button
+            class="maximize icon-button"
+            aria-pressed=move || alone.get().to_string()
+            title=move || if alone.get() { "Restore (Esc)" } else { "Maximize" }
+            on:click=toggle
+        >
+            {move || if alone.get() {
+                view! { <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M10 2v4h4M14 10h-4v4M2 10h4v4" /></svg> }.into_any()
+            } else {
+                view! { <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" /></svg> }.into_any()
+            }}
+            <span class="sr">{move || if alone.get() { "Restore" } else { "Maximize" }}</span>
+        </button>
     }
 }
 

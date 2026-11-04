@@ -529,8 +529,19 @@ input:focus-visible, select:focus-visible {
 .visual-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; min-width: 0; }
 .visual-head h2 { margin: 0; font: 600 13px/1.3 var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .visual-head .tag { flex: none; }
-.export { width: 24px !important; height: 24px !important; opacity: 0.7; }
-.visual:hover .export, .export:focus-visible { opacity: 1; }
+.export, .maximize { width: 24px !important; height: 24px !important; opacity: 0.7; }
+.visual:hover .export, .export:focus-visible,
+.visual:hover .maximize, .maximize:focus-visible, .visual.maximized .maximize { opacity: 1; }
+/* one visual maximized: it is the grid, as tall as the page; the others
+   stay in the DOM (and live), hidden. A rail taller than the window makes
+   the page taller: the grid then stays the window's height (less the top
+   and context bars, 85px) and in view as the rail scrolls */
+.grid.alone {
+  display: flex; flex-direction: column; align-self: stretch;
+  position: sticky; top: 8px; max-height: calc(100vh - 85px - 16px);
+}
+.grid.alone > .visual:not(.maximized) { display: none; }
+.grid.alone > .visual.maximized { flex: 1; min-height: 360px; }
 .chart { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* charts (plot.rs): SVG coloured from the palette, so they follow the theme */
@@ -576,6 +587,7 @@ input:focus-visible, select:focus-visible {
 /* KPIs: sized by the card, not the window, so a number never breaks */
 .visual.kpi { container-type: inline-size; }
 .kpi-value { margin: auto 0 0; font: 600 clamp(16px, 10cqi, 32px)/1.1 var(--display); letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.visual.kpi.maximized .kpi-value { margin: auto 0; font-size: clamp(32px, 10cqi, 120px); }
 .kpi-delta { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 11px; color: var(--ink-soft); }
 .kpi-delta .delta { padding: 0 4px; border-radius: 3px; background: var(--green-3); color: var(--green-11); font: 500 11px var(--mono); }
 .kpi-delta .delta.down { background: var(--red-3); color: var(--red-11); }

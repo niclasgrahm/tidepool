@@ -489,6 +489,99 @@ fn click_a_bar_watch_it_update_go_back() {
     browser.wait_for(&format!("{KPI_SHOWN} === '1.2k'"), "the KPI to read 1.2k");
 }
 
+/// The width of the first bar chart's plot.
+const BAR_WIDTH: &str = "document.querySelector('.visual.bar .plot').getBoundingClientRect().width";
+
+#[test]
+fn maximize_a_visual_and_the_selection_stays() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    assert!(
+        workspace().join("frontend/dist/index.html").exists(),
+        "no frontend/dist: run `just frontend` first"
+    );
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    browser.wait_for(
+        &format!("{BARS}.length === 2"),
+        "two bars in revenue by region",
+    );
+    let small = browser.eval(BAR_WIDTH).as_f64().unwrap_or(0.0);
+
+    // a selection made on the grid
+    browser.click_element(&bar_labelled("north"));
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north')"),
+        "a chip for region north",
+    );
+
+    // maximized: the bar chart alone and larger, the selection still shown
+    // in the bar, the chip and the rail
+    browser.click_element("document.querySelector('.visual.bar .maximize')");
+    browser.wait_for(
+        "document.querySelector('.visual.bar.maximized') \
+         && document.querySelector('.visual.kpi').offsetParent === null",
+        "the bar chart alone on the grid",
+    );
+    browser.wait_for(
+        &format!("{BAR_WIDTH} > {small} * 1.5"),
+        "the maximized chart to be wider",
+    );
+    browser.wait_for(
+        &format!("{}.classList.contains('selected')", bar_labelled("north")),
+        "north still selected in the maximized chart",
+    );
+    browser.wait_for(&format!("{CHIPS}.includes('north')"), "the chip to stay");
+    browser.wait_for(
+        "[...document.querySelectorAll('.rail .filter .value.selected')].some(b => b.textContent.startsWith('north'))",
+        "north still selected in the rail",
+    );
+
+    // the rail still selects (a list click adds), and the maximized chart
+    // follows
+    browser.click_element(
+        "[...document.querySelectorAll('.rail .filter .value')].find(b => b.textContent.startsWith('south'))",
+    );
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north, south')"),
+        "the chip to say north and south",
+    );
+    browser.wait_for(
+        &format!(
+            "document.querySelector('.visual.bar.maximized') && {}?.classList.contains('selected')",
+            bar_labelled("south")
+        ),
+        "south selected in the maximized chart",
+    );
+
+    // Escape puts it back, among the others, under the new selection
+    browser.press("Escape", 27, false);
+    browser.wait_for(
+        "!document.querySelector('.visual.maximized') \
+         && document.querySelector('.visual.kpi').offsetParent !== null",
+        "every visual back on the grid",
+    );
+    browser.wait_for(
+        &format!("{KPI} === '130.00'"),
+        "the KPI to show both regions' 130.00",
+    );
+    browser.wait_for(
+        &format!("Math.abs({BAR_WIDTH} - {small}) < 2"),
+        "the bar chart back to its size",
+    );
+}
+
 /// The rows of the first `rows` visual, as their text.
 const ROWS: &str =
     "[...document.querySelectorAll('.visual.rows tbody tr')].map(r => r.textContent)";

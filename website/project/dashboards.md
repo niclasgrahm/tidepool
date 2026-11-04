@@ -128,6 +128,12 @@ the data of the visual under the selection, as CSV. The header of a visual
 also shows how it is set up: its time grain, and `on_click` or `on_brush`
 when a click or a drag selects.
 
+To see a visual larger, click its maximize button (four corners), next to
+the download button. The visual then fills the grid, and the other visuals
+are hidden. The filters and the selection bar stay, and the selection
+applies as before: you can select in the large visual too. Click the button
+again, or push Esc, to put the visual back on the grid.
+
 ## the editor
 
 You can also make and change a dashboard on the web UI. The editor writes
