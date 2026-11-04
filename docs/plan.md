@@ -236,7 +236,7 @@ custom_extensions:
 | metric | `ignore_selection: [field…]` | evaluate as if these fields had no selection (`"*"` = all) |
 | metric | `time_offset`, `time_field` | evaluate with the time selection shifted (M8) |
 | metric | `format` | how the value reads (display only): a style (`int`, `decimal`, `percent`, `currency:XXX`), `compact` (167.8M) and `decimals:N`, as words in any order: `currency:EUR compact`. A visual can say it again per metric (§3.5) |
-| field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`; `hour` and `minute` proposed for timestamps, §5.8) |
+| field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`, and for timestamps `hour` and `minute`, §5.8) |
 | dataset | `hierarchy` | `{name, parent, label?, kind?}`: a parent–child tree over the dataset's rows, as a field of its own (§5.6) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
 | model | `filter_direction` | `one_to_many` (default) or `both`: selections also flow from the many side to the one side (§5.4) |
@@ -746,7 +746,7 @@ filters), and the search runs only on what they leave.
 ### 5.8 Time zoom
 
 **Status: proposed 2026-11-03.** D17 is the decision; this is the design.
-Nothing here is built.
+Sub-day grains are built (2026-11-04); the rest isn't.
 
 A visual that groups by a time field (revenue per hour) can be zoomed out
 (per day, per month) and in again. Two things are called zooming, and they
@@ -786,16 +786,17 @@ steps are open changes with the range, and every frame says so.
 Visuals with a `time_window` metric (§6.8) offer no grain coarser than
 the window until its spike has settled how the two combine.
 
-**Sub-day grains.** `TimeGrain` gets `hour` and `minute` (the relative
-windows of §5.5 have these units already, and `temporal::Part` already
-truncates to them), for timestamp fields only. A sub-day grain's buckets
-are timestamps, not dates (`Type::Timestamp` in the planner,
-`Scalar::Timestamp` out of `fast.rs`). On a plain `i64` column the fast
-path truncates by integer division, with no day memo; on a dictionary
-column it's a derived dictionary, as for the day grains. Clicks and
-brushes still select whole buckets as half-open ranges
-(`board::next_period` gets hours and minutes). `time_offset` units gain
-`h` and `min` with them.
+**Sub-day grains** (done 2026-11-04). `TimeGrain` has `hour` and `minute`,
+for timestamp fields only; the compiler refuses them on a date, in a
+visual and in a field's `grain` list, and the planner refuses them in
+`POST /v1/query`. A sub-day grain's buckets are timestamps of the field's
+own type, not dates (`plan::dim_types`, `dim_value` in `fast.rs`). The fast
+path truncates by integer division, with no day memo, a dictionary column
+through each code's value as the day grains do. Brushes still select whole
+buckets as half-open ranges (`board::brush_range`). `time_offset` stays
+in days or longer (`ir::OffsetUnit`): its `Shift` moves a value by calendar
+days and months, and an offset of hours would need a third unit in both
+paths and a date check, which nothing has asked for yet.
 
 **The `auto` grain.** A dimension may say `grain: auto` (the dashboard
 editor writes it for new time dimensions; `grain: day` and the other
@@ -855,14 +856,17 @@ things zooming makes visible, which the time axis needs first:
 (with bookmarks, §12); dashboard time zones (§14, question 3), which zoom
 makes more pressing: at `day` the buckets are UTC days.
 
-**Tests:** golden diagnostics (`hour` on a date field, `zoom` on a visual
-without a grained dimension, a `zoom` step the field doesn't allow);
+**Tests:** for sub-day grains, golden diagnostics (`hour` on a date, in a
+visual and in a field's list), `tidepool-engine/tests/grains.rs` (every
+path, plain and dictionary columns, before 1970, a date refused), the
+oracle (`hour` and `minute` on timestamps, DuckDB's `date_trunc` without
+the `DATE` cast; a planted bug truncating them to days fails all three
+suites). Still to come: golden diagnostics for `zoom` (a visual without a
+grained dimension, a step the field doesn't allow);
 plain tests of `auto`'s choice and the open steps (budgets, ranges,
 windows, an empty table); `tests/live.rs` (a pin, a brush that refines an
 `auto` grain, `back` that coarsens it, two sessions sharing a grain, a pin
-that falls back); the oracle generates `hour` and `minute` on timestamp
-fields (DuckDB's `date_trunc` without the `DATE` cast), with a planted
-bug that truncates sub-day grains to days; `charts.rs` tests for the time
+that falls back); `charts.rs` tests for the time
 scale and filled gaps; `just e2e` zooms a trend out and in.
 
 ## 6. Query execution
@@ -1457,7 +1461,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
 19. The measure vocabulary (§6.8, D16): `total`, `set`, more aggregates, `per`/`then`, `time_window`, sets from sets
 20. Text search as a selection and the `rows` visual, for logs (§5.7), with an example of Postgres logs (`examples/pglogs`)
-21. Time zoom (§5.8, D17): `hour` and `minute` grains, an `auto` grain from the range, a viewer's grain per visual, a time scale with gaps for grained axes
+21. Time zoom (§5.8, D17): `hour` and `minute` grains (done 2026-11-04), an `auto` grain from the range, a viewer's grain per visual, a time scale with gaps for grained axes
 
 ---
 

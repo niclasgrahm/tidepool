@@ -392,7 +392,7 @@ A field to group by.
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `field` | string | **required** | `dataset.field`. |
-| `grain` | string |  | For time fields: `day`, `week`, `month`, `quarter` or `year`. |
+| `grain` | string |  | For time fields: `day`, `week`, `month`, `quarter` or `year`, and for timestamps also `minute` or `hour`. |
 | `level` | integer |  | For hierarchy fields: group by each node's ancestor at this depth (0 is the roots); nodes not that deep group as null. |
 
 

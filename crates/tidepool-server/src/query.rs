@@ -85,13 +85,15 @@ pub(crate) fn field(model: &Model, name: &str) -> Result<(FieldRef, Type), Strin
 
 fn grain(name: &str) -> Result<TimeGrain, String> {
     match name {
+        "minute" => Ok(TimeGrain::Minute),
+        "hour" => Ok(TimeGrain::Hour),
         "day" => Ok(TimeGrain::Day),
         "week" => Ok(TimeGrain::Week),
         "month" => Ok(TimeGrain::Month),
         "quarter" => Ok(TimeGrain::Quarter),
         "year" => Ok(TimeGrain::Year),
         other => Err(format!(
-            "unknown grain `{other}`: use day, week, month, quarter or year"
+            "unknown grain `{other}`: use minute, hour, day, week, month, quarter or year"
         )),
     }
 }

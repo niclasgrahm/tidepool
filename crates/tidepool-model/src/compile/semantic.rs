@@ -493,6 +493,13 @@ fn declared_field(
             Diagnostic::error(format!("{what} has grains but isn't a time field"))
                 .at(file, ext_path),
         );
+    } else if !ty.has_time_of_day() && ext.grain.iter().flatten().any(|g| g.is_sub_day()) {
+        cx.push(
+            Diagnostic::error(format!(
+                "{what} has no time of day, so it can't have grains shorter than a day"
+            ))
+            .at(file, ext_path),
+        );
     }
     Some(Field {
         name: field.name.clone(),

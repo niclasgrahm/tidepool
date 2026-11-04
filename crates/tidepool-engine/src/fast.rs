@@ -32,7 +32,9 @@ use roaring::{RoaringBitmap, RoaringTreemap};
 use tidepool_config::types::ColumnType;
 use tidepool_expr::eval::{Row, eval};
 use tidepool_expr::ir::{AggFunc, Expr};
-use tidepool_expr::temporal::{Part, Shift, date_from_days, days_from_date, trunc_date};
+use tidepool_expr::temporal::{
+    Part, Shift, date_from_days, days_from_date, trunc_date, trunc_micros,
+};
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{Model, TableId};
 use tidepool_store::column::ColumnData;
@@ -571,7 +573,6 @@ fn decode_into(column: &ColumnData, rows: Range<usize>, out: &mut Values) {
 /// the last day's answer is kept. A value past the calendar's range (and a
 /// NULL's placeholder) stays as it is.
 fn move_in_time(shift: Shift, ty: Type, values: &mut [i64], sel: Option<&[u32]>) {
-    const DAY: i64 = 86_400_000_000;
     let mut last: Option<(i64, i64)> = None;
     let mut day = |d: i64| -> i64 {
         match last {
@@ -1554,6 +1555,8 @@ struct Partial {
     states: Vec<State>,
 }
 
+const DAY: i64 = 86_400_000_000;
+
 /// Days truncated to a calendar part, memoized.
 fn truncate(part: Part, days: i64, memo: &mut hashbrown::HashMap<(Part, i64), i64>) -> i64 {
     *memo.entry((part, days)).or_insert_with(|| {
@@ -1562,6 +1565,16 @@ fn truncate(part: Part, days: i64, memo: &mut hashbrown::HashMap<(Part, i64), i6
             .and_then(date_from_days)
             .map_or(days, |d| i64::from(days_from_date(trunc_date(part, d))))
     })
+}
+
+/// The bucket of a timestamp: in days for a calendar part, in microseconds
+/// for a shorter one.
+fn bucket(part: Part, micros: i64, memo: &mut hashbrown::HashMap<(Part, i64), i64>) -> i64 {
+    if part.is_calendar() {
+        truncate(part, micros.div_euclid(DAY), memo)
+    } else {
+        trunc_micros(part, micros)
+    }
 }
 
 /// What a plan reads related and derived values through, per read.
@@ -2021,27 +2034,21 @@ impl Prepared<'_> {
         let mut key: Key = ([0; MAX_DIMS], 0);
         for (i, (read, part)) in self.dims.iter().enumerate() {
             let layout = &self.reads[*read].layout;
-            let days = |micros: i64| micros.div_euclid(86_400_000_000);
             let part_value = match (values[*read].cell(row), part) {
                 (Cell::Null, _) => None,
                 (Cell::Code(c), None) => Some(i64::from(c)),
                 // a dictionary-coded date or timestamp: truncate its value
                 (Cell::Code(c), Some(part)) => match self.reads[*read].code_value(c) {
                     Scalar::Date(d) => Some(truncate(*part, i64::from(d), memo)),
-                    Scalar::Timestamp(m) | Scalar::TimestampTz(m) => {
-                        Some(truncate(*part, days(m), memo))
-                    }
+                    Scalar::Timestamp(m) | Scalar::TimestampTz(m) => Some(bucket(*part, m, memo)),
                     _ => None,
                 },
                 (Cell::Int(v), None) => Some(v),
-                (Cell::Int(v), Some(part)) => {
-                    let d = if layout.column_type == ColumnType::Date {
-                        v
-                    } else {
-                        days(v)
-                    };
-                    Some(truncate(*part, d, memo))
-                }
+                (Cell::Int(v), Some(part)) => Some(if layout.column_type == ColumnType::Date {
+                    truncate(*part, v, memo)
+                } else {
+                    bucket(*part, v, memo)
+                }),
                 (Cell::Float(f), _) => Some(float_part(f)),
             };
             match part_value {
@@ -2095,7 +2102,11 @@ impl Prepared<'_> {
         let (read, grain) = &self.dims[i];
         let read = &self.reads[*read];
         match (grain, read.kind) {
-            (Some(_), _) => Scalar::Date(i32::try_from(part).unwrap_or(0)),
+            (Some(grain), _) if grain.is_calendar() => {
+                Scalar::Date(i32::try_from(part).unwrap_or(0))
+            }
+            (Some(_), _) if read.ty == Type::TimestampTz => Scalar::TimestampTz(part),
+            (Some(_), _) => Scalar::Timestamp(part),
             (None, Kind::Codes) => read.code_value(u32::try_from(part).unwrap_or(0)),
             (None, Kind::Ints) => scalar(Value::from_i64(read.layout.column_type, part)),
             (None, Kind::Floats) => Scalar::Float(f64::from_ne_bytes(part.to_ne_bytes())),
