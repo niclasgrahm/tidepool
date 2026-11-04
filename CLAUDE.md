@@ -24,6 +24,7 @@ just test            # cargo test --workspace --all-targets
 just lint            # cargo clippy --workspace --all-targets -- -D warnings
 just fmt             # cargo fmt --all
 just deny            # cargo deny check (licences, advisories, sources)
+just scan-secrets    # gitleaks over the whole git history
 just frontend        # build the UI into frontend/dist (trunk)
 just build           # just frontend, then a release binary with the UI embedded
 just test-embed      # tests of the embedded UI; needs `just build` first
