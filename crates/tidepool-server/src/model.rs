@@ -130,6 +130,7 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                         )
                         .to_lowercase()
                     }),
+                    format: m.format.clone(),
                     dashboards: model
                         .dashboards
                         .iter()

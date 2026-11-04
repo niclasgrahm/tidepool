@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `trend`: a filter lists a field's own values, so it has no grain
-  --> dashboards/sales.yaml:25:53
+  --> dashboards/sales.yaml:26:53
    |
-25 |     dimensions: [{ field: orders.ordered_at, grain: day }]
+26 |     dimensions: [{ field: orders.ordered_at, grain: day }]
    |                                                     ^^^
    = help: for a range of time, use a `date_range` filter beside the grid
 

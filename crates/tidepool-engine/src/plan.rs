@@ -573,6 +573,39 @@ pub(crate) fn values(
     })
 }
 
+/// A `rows` query on `anchor` (plan §5.7): a plan of the selection's
+/// conditions alone (what's scanned), the same with an access per field
+/// added (what's decoded for the rows kept), and those accesses.
+pub(crate) fn rows(
+    model: &Model,
+    anchor: TableId,
+    selection: &Selection,
+    fields: &[FieldRef],
+) -> Result<(AnchorPlan, AnchorPlan, Vec<usize>), QueryError> {
+    let query = Query {
+        selection: selection.clone(),
+        ..Query::default()
+    };
+    let scanned = anchor_plan(model, anchor, &query, &|_| false, None)?;
+    let mut builder = AnchorBuilder {
+        model,
+        plan: scanned.clone(),
+    };
+    let accesses = fields
+        .iter()
+        .map(|field| {
+            builder.access(field)?.ok_or_else(|| {
+                let table = model.dataset(anchor).map_or("?", |d| d.name.as_str());
+                error(format!(
+                    "rows of `{table}` can't show `{}`",
+                    label(model, field)
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((scanned, builder.plan, accesses))
+}
+
 /// Count the anchor's rows passing all its conditions, as [`ROWS`].
 fn count_rows(plan: &mut AnchorPlan) {
     let start = plan.aggs.len();
@@ -597,7 +630,7 @@ fn count_rows(plan: &mut AnchorPlan) {
 }
 
 /// Whether `from` reaches `to` along exactly one relationship path.
-fn reaches(model: &Model, from: TableId, to: TableId) -> bool {
+pub(crate) fn reaches(model: &Model, from: TableId, to: TableId) -> bool {
     matches!(path(model, from, to), Ok(Some(_)))
 }
 

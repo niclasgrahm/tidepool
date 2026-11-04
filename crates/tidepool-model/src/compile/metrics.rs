@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tidepool_config::diag::{Diagnostic, suggest};
+use tidepool_config::format::NumberFormat;
 use tidepool_config::ossie::{self, MetricExtension, MetricKind, TimeGrain};
 use tidepool_config::source::YamlPath;
 use tidepool_expr::syntax;
@@ -199,18 +200,14 @@ fn metric(
         (Some(offset), Some(field)) => time_offset(cx, &at, offset, field, &body, semantic),
     };
 
-    if let Some(format) = &ext.format {
-        let valid = matches!(format.as_str(), "int" | "decimal" | "percent")
-            || format.strip_prefix("currency:").is_some_and(|code| {
-                code.len() == 3 && code.chars().all(|c| c.is_ascii_uppercase())
-            });
-        if !valid {
-            cx.push(
-                Diagnostic::error(format!("{what}: unknown format `{format}`"))
-                    .at(file, ext_path)
-                    .help("formats are int, decimal, percent, or currency:XXX with an ISO code (currency:EUR)"),
-            );
-        }
+    if let Some(format) = &ext.format
+        && let Err(problem) = format.parse::<NumberFormat>()
+    {
+        cx.push(
+            Diagnostic::error(format!("{what}: format `{format}`: {problem}"))
+                .at(file, ext_path)
+                .help(tidepool_config::format::HELP),
+        );
     }
 
     Some(Metric {

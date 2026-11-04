@@ -4,4 +4,4 @@ allow-expect-in-tests = false
 
 # Product names that are not code, so `doc_markdown` shouldn't ask for backticks.
 # ".." keeps clippy's own defaults.
-doc-valid-idents = ["..", "DuckDB", "OpenAPI", "ECharts", "WebSocket", "Ossie"]
+doc-valid-idents = ["..", "DuckDB", "OpenAPI", "WebSocket", "Ossie"]

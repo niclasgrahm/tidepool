@@ -132,6 +132,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::GetTable => route_of(method, tables::get_table),
         Operation::PreviewTable => route_of(method, tables::preview_table),
         Operation::Query => route_of(method, query::query),
+        Operation::Rows => route_of(method, query::rows),
         Operation::Live => route_of(method, live::socket),
         Operation::GetModel => route_of(method, model::model),
         Operation::GetStatus => route_of(method, model::status),

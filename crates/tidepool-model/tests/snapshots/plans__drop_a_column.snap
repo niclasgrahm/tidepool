@@ -1,7 +1,8 @@
 ---
 source: crates/tidepool-model/tests/plans.rs
-expression: "plan_for(&\n[Replace(\"tables/orders.yaml\",\n\"  note:        { type: string, nullable: true, encoding: plain }\\n\", \"\")])"
+expression: "plan_for(&\n[Replace(\"tables/orders.yaml\",\n\"  note:        { type: string, nullable: true, encoding: plain }\\n\", \"\"),\nRemove(\"dashboards/shipping_notes.yaml\")])"
 ---
-1 change (0 safe, 0 rebuild, 1 destructive)
+2 changes (1 safe, 0 rebuild, 1 destructive)
 
-  - column       orders.note  destructive  (its data is deleted)
+  - column       orders.note     destructive  (its data is deleted)
+  - dashboard    shipping_notes  safe

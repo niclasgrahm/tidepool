@@ -34,8 +34,9 @@ const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "Tidepool is a live analytics server: tables of data, a semantic \
 model (datasets, relationships, metrics) and dashboards. Start with describe_model to see \
-what exists, query_metrics to compute metrics grouped by fields under filters, and \
-preview_table to look at rows. To change the model, get_config for the files and their \
+what exists, query_metrics to compute metrics grouped by fields under filters, \
+read_rows for the newest rows that pass filters (a `contains` filter searches text, as in \
+logs), and preview_table to look at rows. To change the model, get_config for the files and their \
 version, plan_change to see what an edit does, then apply_change: safe changes apply at \
 once, others wait for a person's approval.";
 
@@ -80,8 +81,9 @@ pub fn tools() -> Value {
             "title": "Query metrics",
             "description": "Metrics grouped by fields (`dataset.field`, time fields with a \
                             grain: day, week, month, quarter, year), under filters (`in` a \
-                            list, or `from`/`to` a half-open range), sorted and limited. The \
-                            body of POST /v1/query.",
+                            list, `from`/`to` a half-open range, or `contains` a text, for a \
+                            string field, ignoring the case of ASCII letters), sorted and \
+                            limited. The body of POST /v1/query.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -102,6 +104,7 @@ pub fn tools() -> Value {
                                 "field": { "type": "string" },
                                 "in": { "type": "array" },
                                 "from": {}, "to": {},
+                                "contains": { "type": "string" },
                             },
                             "required": ["field"],
                         },
@@ -117,6 +120,37 @@ pub fn tools() -> Value {
                     "limit": { "type": "integer", "minimum": 1 },
                 },
                 "required": ["metrics"],
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "read_rows",
+            "title": "Read the newest rows",
+            "description": "The newest rows of a table that pass filters, newest first: the \
+                            fields to show (`dataset.field`, of one table and the tables it \
+                            reaches), and filters as in query_metrics. A `contains` filter on \
+                            a log line's text finds the lines that mention something. The \
+                            body of POST /v1/rows.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "fields": { "type": "array", "items": { "type": "string" } },
+                    "filters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": { "type": "string" },
+                                "in": { "type": "array" },
+                                "from": {}, "to": {},
+                                "contains": { "type": "string" },
+                            },
+                            "required": ["field"],
+                        },
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+                },
+                "required": ["fields"],
             },
             "annotations": { "readOnlyHint": true },
         },
@@ -291,6 +325,7 @@ async fn call(
             ok(api(state, caller, Method::GET, &path, None).await)
         }
         "query_metrics" => ok(api(state, caller, Method::POST, "/v1/query", Some(args)).await),
+        "read_rows" => ok(api(state, caller, Method::POST, "/v1/rows", Some(args)).await),
         "get_config" => ok(api(state, caller, Method::GET, "/v1/config", None).await),
         "plan_change" => {
             let base = match args["base_version"].as_u64() {

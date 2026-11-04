@@ -28,7 +28,7 @@ fn validate_accepts_the_example_and_summarises_it() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(
         text(&output.stdout),
-        "ok: 4 tables, 3 relationships, 7 metrics, 2 dashboards\n"
+        "ok: 4 tables, 3 relationships, 7 metrics, 3 dashboards\n"
     );
 }
 
@@ -40,6 +40,17 @@ fn the_oee_example_over_indus_namespace_validates() {
     assert_eq!(
         text(&output.stdout),
         "ok: 3 tables, 2 relationships, 10 metrics, 1 dashboard\n"
+    );
+}
+
+#[test]
+fn the_postgres_logs_example_validates() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/pglogs/tidepool");
+    let output = tidepool(&["validate", "--config", &dir.to_string_lossy()]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "ok: 3 tables, 2 relationships, 4 metrics, 1 dashboard\n"
     );
 }
 

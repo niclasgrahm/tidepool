@@ -20,6 +20,7 @@ Omit the header when the server has no tokens.
 | `describe_model` | the tables, datasets, fields, relationships, metrics and dashboards | read |
 | `preview_table` | the newest rows of a table | read |
 | `query_metrics` | metrics grouped by fields, under filters | read |
+| `read_rows` | the newest rows of a table that pass filters. A `contains` filter finds text, for example in log lines. | read |
 | `get_config` | every config file, and the current version | admin |
 | `plan_change` | what a change does: problems, and each part with its class | admin |
 | `apply_change` | applies a change if the policy allows it, or puts it in the queue | admin |

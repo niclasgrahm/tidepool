@@ -20,12 +20,14 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D7 | Config as code, with live apply | Config files are the source of truth. Every change, whether from files, the UI, the API or an agent, goes through one validate → plan → apply pipeline and is written back to the files. |
 | D8 | Semantic layer in Apache Ossie | Written in the **0.2** shape (flat at the document root, as on Ossie's main branch); 0.1.1's wrapped `semantic_model:` shape is accepted and unwrapped. Expressions are read in `OSSIE_SQL_2026` (Ossie's SQL:2003 subset, its default dialect from 0.2), falling back to `ANSI_SQL`. Tidepool-specific semantics live in `custom_extensions` with `vendor_name: TIDEPOOL` and JSON `data`, as the spec defines. Internally everything compiles to our own Model IR. (Decided in M1, 2026-10-07; the earlier "pin 0.1.1" assumed a format 0.1.1 doesn't have.) |
 | D9 | Expressions are SQL | Row and aggregate expressions use SQL syntax (parsed with sqlparser-rs). Metric modifiers are structured YAML, not a new language. |
-| D10 | Frontend is **Leptos (client-side rendered, built with trunk)**, embedded in the binary | Decided by the M0 spike (2026-10-07, `spikes/leptos-charts/README.md`): the whole ECharts wrapper is 120 lines; searching 50k rows takes 4–5 ms; a selection click re-renders everything in 5–14 ms. One stack with Kayak, and the UI uses `tidepool-protocol` types directly. Client-side only rather than Kayak's SSR + hydrate: a logged-in dashboard app gains nothing from server rendering, and a static `dist/` keeps embedding trivial. |
+| D10 | Frontend is **Leptos (client-side rendered, built with trunk)**, embedded in the binary | Decided by the M0 spike (2026-10-07, `spikes/leptos-charts/README.md`): the whole ECharts wrapper is 120 lines; searching 50k rows takes 4–5 ms; a selection click re-renders everything in 5–14 ms. One stack with Kayak, and the UI uses `tidepool-protocol` types directly. Client-side only rather than Kayak's SSR + hydrate: a logged-in dashboard app gains nothing from server rendering, and a static `dist/` keeps embedding trivial. Charts are our own since 2026-11-01 (§10.1): SVG drawn by Leptos from DOM-free layouts, ECharts removed. |
 | D11 | Every update batch ("epoch") is consistent | Every result the server sends is tagged with an epoch. A client never shows a mix of results from different epochs on one screen. |
 | D12 | Kayak is the connector layer | Tidepool only ingests over HTTP, permanently. Kafka, MQTT, NATS, OPC UA, databases and so on are reached through Kayak pipelines with a `tidepool` output (§15). Tidepool never grows transforms, and Kayak never grows dashboards. |
 | D13 | Licence split, same as Kayak | `tidepool-protocol` and `tidepool-config` (the types any client needs) are **Apache-2.0**. Everything else (server, engine, frontend) is **AGPL-3.0-or-later**, with a commercial licence available. Every crate declares `license`, and a test enforces it. |
 | D14 | Reuse Kayak's conventions and solved problems | `just` for tasks, `serde_norway` for YAML, the `embed-assets` feature with rust-embed, one endpoint table that generates routes + auth roles + OpenAPI + docs, Kayak's auth stack (basic / session cookie / JWT with the iframe embedding handshake), `${NAME}` secrets, a bench crate, clippy pedantic with `unwrap_used`/`expect_used`, and a "definition of done" in CLAUDE.md. Copy first; extract a shared crate only if a third project needs it. |
 | D15 | Ingest is private by default; public ingest is a grant | The UI being public says nothing about where producers are. Listeners are split by surface (public / ingest / admin), placed from the endpoint table's `Access`. Ingest credentials are named and scoped to tables and operations, and a table becomes writable from the internet only through a credential marked `public`, with mandatory limits. Off loopback, an ingest or admin level without a token refuses to start. Changes to `auth`, `listen` and `agents` are their own change class, never auto-applied. (Decided 2026-10-17; §9.2.) |
+| D16 | Measures grow by structured modifiers, not a formula language | D9 extended to the measures DAX's `CALCULATE` and Qlik's set analysis are used for (shares of totals, fixed selections, level of detail, time windows, sets from sets). The core of a metric stays one SQL aggregate expression. Each new modifier is a key in its `TIDEPOOL` extension, with a plain-SQL translation the oracle checks, a stated place in one order of application, and a plan the engine already knows how to run. Inter-row functions go on visuals, not metrics. (Proposed 2026-11-02; §6.8.) |
+| D17 | Time zoom is a visual's grain, not a selection | How wide a visual's time buckets are is view state of that visual in one session, like its sort: no other visual changes and the selection's history doesn't record it. Narrowing the time shown is a selection on the time field, as before, so every visual answers for it. An `auto` grain is resolved from that range and the visual's width in grid columns (never the browser's), before the engine sees the query, so sessions keep sharing answers. (Proposed 2026-11-03; §5.8.) |
 
 ---
 
@@ -233,11 +235,13 @@ custom_extensions:
 | metric | `table` | anchor table for expressions that don't name one (`COUNT(*)`) |
 | metric | `ignore_selection: [field…]` | evaluate as if these fields had no selection (`"*"` = all) |
 | metric | `time_offset`, `time_field` | evaluate with the time selection shifted (M8) |
-| metric | `format` | display hint: `currency:EUR`, `percent`, `int`, … |
-| field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`) |
+| metric | `format` | how the value reads (display only): a style (`int`, `decimal`, `percent`, `currency:XXX`), `compact` (167.8M) and `decimals:N`, as words in any order: `currency:EUR compact`. A visual can say it again per metric (§3.5) |
+| field | `grain` | for time fields: the grains a visual may group by, as a list (`day`, `week`, `month`, `quarter`, `year`; `hour` and `minute` proposed for timestamps, §5.8) |
 | dataset | `hierarchy` | `{name, parent, label?, kind?}`: a parent–child tree over the dataset's rows, as a field of its own (§5.6) |
 | relationship | `role` | role name, for when two relationships connect the same pair of tables (e.g. order date vs ship date) |
 | model | `filter_direction` | `one_to_many` (default) or `both`: selections also flow from the many side to the one side (§5.4) |
+
+The next metric modifiers (`total`, `set`, `per`/`then`, `time_window`) are proposed in §6.8.
 
 Only `OSSIE_SQL_2026` and `ANSI_SQL` are read (in that order of preference). Other dialects in the file are kept but ignored, so a model can be shared with other Ossie tools. A YAML gotcha the validator explains: in a `{ … }` flow mapping a comma ends the value, so write `type: "decimal(14,2)"` quoted.
 
@@ -260,6 +264,7 @@ visuals:
     type: kpi
     metrics: [revenue]
     compare: revenue_prev_year
+    format: { revenue: compact }   # how its metrics read here, over each metric's own format
     at: { x: 0, y: 0, w: 3, h: 2 }
   - id: by_region
     type: bar
@@ -284,6 +289,10 @@ visuals:
 ```
 
 A visual's `metrics` may be left out: a `filter` visual has none (one dimension, its values as a list on the grid), and a `table` without metrics lists the combinations of its dimensions there are. KPIs, bars and lines need at least one metric.
+
+A visual's `format` maps metrics it shows (its `metrics` and `compare`) to formats, in the grammar of the metric `format` (§3.4; `tidepool_config::format`); the compiler checks both, and refuses a format for a metric the visual doesn't show. The live protocol sends each visual the format that applies per metric (`VisualInfo::formats`: the visual's, else the metric's), and the UI formats every value of that metric through it (KPI, table cells, tooltips, filter measures). Formats are display only: queries, CSV and the API answer the full value. They're for values that change every epoch: 167,791,795.92 moving in its last digits can't be read; 167.8M can.
+
+*Proposed (§5.8):* a time dimension's `grain` may be `auto`, and a visual may say `zoom: [grain…]` (the steps a viewer may zoom between) or `zoom: false`.
 
 ### 3.6 Machine-readable schemas
 
@@ -617,6 +626,245 @@ longer. Like Looker's "in the last 7 days", the current period counts, so
 - **Tested** by the oracle: a generated dimension sometimes points at an earlier row of itself (`up`), rewritten (moves), deleted (orphans), with subtree selections and level dimensions checked against DuckDB's recursive CTEs. Planted bugs it catches: a subtree without its own node, a tree cached by anything but the table's identity, a level off by one on the fast path, an incremental answer kept across a move. Cycle breaking is unit-tested (DuckDB can't express it).
 - **Limits.** Placement is current-state: past facts roll up to where a node is now. Under one-directional filtering fact selections don't narrow the tree (D5); `both` does. A hierarchy field as a visual dimension groups by key.
 
+### 5.7 Text search, and rows as they arrive
+
+**Status: done 2026-11-03, after v0.1.** For logs and other text: a
+table of log lines (`message` stored `encoding: plain`, plan §3.3) is
+searched live from the dashboard, and the search is a selection like any
+other, so every visual answers for the matching rows. Type `timeout` and
+the per-level bars, the per-service counts and the rate line show the
+lines that contain it; click a service and the matches narrow. That is
+what a log store's grep can't do. Loki narrows by labels, then greps; here
+the labels are dictionary columns (service, level, pod: cheap
+filters), and the search runs only on what they leave.
+
+- **The condition.** `Condition::Contains(Needle)`: the value contains the
+  text, ignoring the case of ASCII letters (`A`–`Z` match `a`–`z`; other
+  characters must match exactly). One phrase, no operators: `lock
+  timeout` is that phrase. An empty text selects nothing (it's removed).
+  NULL never contains anything. It applies to string fields (columns of
+  either encoding, and derived string fields). On the wire:
+  `search { field, text }` in the live protocol (empty text clears it),
+  `{"field", "contains": "…"}` in `POST /v1/query` filters, and
+  `selection` reports it as `contains`. It goes into history, `back`
+  undoes it.
+- **On a dictionary column** it's evaluated once per value, like every
+  other condition (§5.2): searching `service` costs the dictionary, not
+  the rows.
+- **On a plain column** the fast path searches the text where it's
+  stored. A segment's strings are one byte arena with offsets
+  (`ColumnData::Str`), so a morsel's rows are one contiguous slice: it is
+  lowercased (ASCII only, a branch-free pass the compiler vectorizes) into
+  a scratch buffer and searched with `memchr::memmem` (SIMD), and each hit
+  is mapped to its row by walking the offsets. After a hit the search
+  jumps to the next row, so each row is found at most once, and a hit
+  that crosses into the next row is no hit. Needles without letters skip
+  the lowercasing. Measured on 157 MB of synthetic Postgres log lines, one
+  core of an M1 Max: ~16 GB/s with lowercasing and ~27 GB/s without,
+  against 1.5–9 GB/s for a case-insensitive `regex` and Aho-Corasick. So
+  100M lines of ~150 bytes are a ~1 s scan on one core, ~100 ms on ten.
+  When other conditions have already left few rows (fewer than one in
+  four), only those rows are searched, one at a time.
+- **Hits are cached per segment** (§6.5): a bitset per morsel, keyed by
+  the segment's identity (`Arc<SegmentData>`), the column and the needle,
+  filled the first time a scan reads it, like join columns. Segments are
+  immutable, so a live dashboard with a search open searches each new
+  chunk once and then never again, every other visual with the same
+  search reuses the bits, and a session toggling back is answered from
+  them. **Typing narrows:** a needle that contains an earlier needle (for
+  `time` then `timeo`) only searches the rows the earlier one matched in
+  a morsel, one at a time, when that morsel's bits are there and hold
+  fewer than one row in four (otherwise searching the morsel whole is
+  faster: measured, `d` → `de` row by row was 2.5× slower). Entries go
+  when their segment does, and past 64 MB the least recently used go.
+- **The general path** tests the same `Needle` on each decoded value.
+  Both paths, cached and uncached, are checked against DuckDB:
+  `contains(translate(x, 'A…Z', 'a…z'), translate(text, 'A…Z', 'a…z'))`
+  folds the same way (ASCII only, as `lower` would not).
+- **Rows, newest first: the `rows` visual.** `type: rows` with
+  `dimensions` (the columns to show) and `limit` (default 100, at most
+  1000) shows the newest rows of one table that pass the selection, most
+  recent arrival first (row id order: ingest order, which for a log tail
+  is what you want; it isn't sorted by a time column). The table is the
+  one the columns' tables are reached from, by the rule of a table
+  without metrics (`rows_anchor`). Columns may be fields of related
+  tables (a log line's service owner). The engine
+  (`Engine::rows`) runs the anchor's conditions the fast way (a plain
+  column can be searched but not otherwise read by the fast path), morsel
+  by morsel from the newest, in parallel waves of a few morsels per
+  thread, and stops when it has the limit. Only the rows it keeps are
+  decoded. With an `Engine` the answer is kept: the next epoch scans only
+  rows appended since, puts their hits in front and drops kept rows that
+  were deleted; it starts over when it's short of the limit after that,
+  or when a related table changed (the same check as for incremental
+  answers, §6.5). Over HTTP: `POST /v1/rows`.
+- **The search box: `widget: search`** is a filter on a string field: a
+  text box that sends `search` as you type (debounced, 150 ms). The UI
+  marks the matches in `rows` visuals.
+- **Measured** with `just bench-search` on the M1 Max (10 cores), 10M
+  synthetic Postgres lines (1.2 GB of text): a new needle is counted in
+  ~20 ms (~60 GB/s over the text; a needle without letters, which skips
+  lowercasing, ~11 ms); the same needle under another selection, its hits
+  cached, 2–4 ms; typing `deadlock` costs ~20 ms for each of the first
+  three keys and ~2 ms for each after (narrowing), 80 ms in all; the
+  newest 200 matching rows ~1 ms (a needle found nowhere is a scan of
+  everything, 24 ms); after 100k more lines, the kept views 0.3–0.7 ms.
+  By the same rate a new needle over 100M lines is ~200 ms: over the
+  fresh-selection target of §2.3, which wasn't written for text. The skip
+  indexes below are what would bring it down.
+- **Also built on the way:** the general path's key indexes (row by
+  primary-key code, for following relationships) are cached by the
+  table's identity, as the other caches are: a `rows` visual showing a
+  related column read one every epoch. `POST /v1/rows`, the MCP tool
+  `read_rows`, and `contains` filters in `POST /v1/query` and
+  `query_metrics`.
+- **The example** (`examples/pglogs`, `just pglogs`): Postgres logging
+  everything as JSON (statements with durations, connections, lock waits,
+  checkpoints, vacuum, its `DEBUG` lines), a Python shop app that makes
+  the usual mistakes on purpose (unique and check violations, syntax
+  errors, deadlocks, lock and statement timeouts, wrong passwords, a
+  missing database), and a standard-library shipper tailing the log into
+  Tidepool. The shipper sends the minute as its own dictionary column (the
+  trend's buckets), saves where it read each file to, and keys each batch
+  by where it starts, so restarts lose and repeat nothing (checked: line
+  counts equal across restarts of the shipper and of Tidepool). Kayak has
+  no file input, which is why the shipper is a script; a Kayak `file`
+  input would replace it.
+- **Out of scope here:** token or n-gram skip indexes per sealed segment
+  (ClickHouse's `tokenbf_v1`), so a search can skip segments that can't
+  match; several terms, `NOT`, regular expressions; sorting `rows` by a
+  column; a count of matching rows in the `rows` visual (a KPI over
+  `COUNT(*)` shows it).
+- **Tested** by the oracle (a plain-encoded `note` column on the fact,
+  `Contains` on it, on dictionary columns and on derived fields, with
+  needles cut from stored values, sometimes in other case or absent; the
+  rows of a `rows` query compared with DuckDB's as a set, and its order
+  and limit by unit tests), planted bugs (a hit crossing into the next row
+  counted, hits cached by the needle only, a narrowed search that keeps
+  rows the longer needle doesn't match), and `just bench-search`.
+
+### 5.8 Time zoom
+
+**Status: proposed 2026-11-03.** D17 is the decision; this is the design.
+Nothing here is built.
+
+A visual that groups by a time field (revenue per hour) can be zoomed out
+(per day, per month) and in again. Two things are called zooming, and they
+are kept apart:
+
+- **The grain** is how wide a bucket is. It is view state of one visual
+  in one session, like a sort: it changes no other visual and is not a
+  step in the selection's history.
+- **The range** is which time is shown. Narrowing it is a selection on the
+  time field (a brush, a click on a bucket, the date range picker, a
+  relative window), so every visual answers for it, as for any other
+  selection.
+
+With an `auto` grain the first follows from the second: brush a week on a
+monthly trend and it shows days; `back` and it shows months again.
+
+**Where it applies.** A visual can be zoomed when exactly one of its
+dimensions is a time field with a grain: `line`, `bar` and `table`
+(`kpi`, `filter` and `rows` have no grains already). The steps are the
+field's `grain` list (§3.4), or all grains when it has none. A date field
+has no `hour` or `minute`. A dashboard can narrow the steps per visual,
+or turn zoom off:
+
+```yaml
+# fragment
+  - id: trend
+    type: line
+    dimensions: [{ field: orders.ordered_at, grain: auto }]
+    zoom: [hour, day, week, month]   # or `zoom: false`
+```
+
+A step is offered only when it gives a readable number of buckets over
+the range on screen: between 2 and the visual's bucket budget (below). So
+`minute` isn't offered over a year, nor `year` over three weeks. Which
+steps are open changes with the range, and every frame says so.
+
+Visuals with a `time_window` metric (§6.8) offer no grain coarser than
+the window until its spike has settled how the two combine.
+
+**Sub-day grains.** `TimeGrain` gets `hour` and `minute` (the relative
+windows of §5.5 have these units already, and `temporal::Part` already
+truncates to them), for timestamp fields only. A sub-day grain's buckets
+are timestamps, not dates (`Type::Timestamp` in the planner,
+`Scalar::Timestamp` out of `fast.rs`). On a plain `i64` column the fast
+path truncates by integer division, with no day memo; on a dictionary
+column it's a derived dictionary, as for the day grains. Clicks and
+brushes still select whole buckets as half-open ranges
+(`board::next_period` gets hours and minutes). `time_offset` units gain
+`h` and `min` with them.
+
+**The `auto` grain.** A dimension may say `grain: auto` (the dashboard
+editor writes it for new time dimensions; `grain: day` and the other
+fixed grains stay as they are). It resolves to the finest open step,
+every time a query runs, from:
+
+- the range: what the session selects on the field, with windows resolved
+  (`AppState::clock`, as in §5.5); without a selection, the extent of the
+  field's live values (from the segments' zone maps, §4.4, once they
+  exist; until then a min/max over the column, cached by the table
+  snapshot's identity like the other caches);
+- the bucket budget: 40 buckets per grid column of the visual's width
+  (`at.w`, so 480 across a 12-column dashboard). The budget is from the
+  dashboard file, not the browser's size, so every session on a dashboard
+  gets the same grain for the same selection and they still share
+  answers (§6.6). Maximizing a visual (§10.2) is the browser's alone and
+  keeps the grain; a finer one is a pin away.
+
+Like a window, `auto` is resolved before the engine sees the query: the
+engine only ever gets a fixed grain. A grain that changes as data arrives
+(the extent grows past a step) is a new query and starts its incremental
+answer over; that happens rarely and only at a step.
+
+**The session.** `ClientMessage::Grain { visual, grain }` pins a grain
+for the visual in this session; `grain: None` goes back to the
+dashboard's (`auto` or fixed). The session keeps pins next to its sorts
+(`inner.grains`) and `visual_frame` puts them in the query, as it does a
+sort. A pin outside the open steps (the range moved) falls back to the
+nearest open step for that frame and stays pinned. Each visual's frame
+carries the grain its answer is at, whether it's `auto`, and the open
+steps.
+
+**The engine** doesn't change: another grain is another query. Sessions on
+the same grain share it through the `Engine`'s caches, and switching back
+within an epoch is an answer-cache hit. Rolling coarse buckets up from a
+cached finer answer (exact for `SUM`, `COUNT`, `MIN`, `MAX`, not for
+`COUNT(DISTINCT …)` or medians) is left out until a measurement asks for
+it: a rescan is milliseconds, and it would be a cache of its own.
+
+**The UI.** The tile's header gets the steps as a small segmented control
+(closed steps greyed out, `auto` marked), `+` and `−` on the focused
+chart, and later Ctrl+wheel (a plain wheel scrolls the page). Two
+things zooming makes visible, which the time axis needs first:
+
+- **Gaps.** The line chart's axis is categories (`scale::Points`) and a
+  bucket with no rows isn't a group, so at `hour` or `minute` an empty
+  bucket would be joined over silently. A grained axis becomes a time
+  scale: buckets are placed by time and the client fills the missing ones
+  from the grain and range (`next_period`), drawn as a break in the line
+  (or a missing bar).
+- **The current bucket.** At `month` on a live dashboard the last bucket
+  is this month so far and reads as a drop. The bucket that holds the
+  server's now is marked (a dashed last segment, a lighter bar).
+
+**Out of scope here:** a zoom of one visual's range that doesn't select
+(a viewport only that visual sees); pinned grains in bookmarks and URLs
+(with bookmarks, §12); dashboard time zones (§14, question 3), which zoom
+makes more pressing: at `day` the buckets are UTC days.
+
+**Tests:** golden diagnostics (`hour` on a date field, `zoom` on a visual
+without a grained dimension, a `zoom` step the field doesn't allow);
+plain tests of `auto`'s choice and the open steps (budgets, ranges,
+windows, an empty table); `tests/live.rs` (a pin, a brush that refines an
+`auto` grain, `back` that coarsens it, two sessions sharing a grain, a pin
+that falls back); the oracle generates `hour` and `minute` on timestamp
+fields (DuckDB's `date_trunc` without the `DATE` cast), with a planted
+bug that truncates sub-day grains to days; `charts.rs` tests for the time
+scale and filled gaps; `just e2e` zooms a trend out and in.
+
 ## 6. Query execution
 
 ### 6.1 Visual query (canonical form)
@@ -710,6 +958,63 @@ result(view, selection, epoch) =
 
 `POST /v1/query` takes `{metrics, dimensions, filters, sort, limit}` and returns JSON or Arrow. It uses the same engine without a subscription. It's used by agents, tests (the oracle), CSV export and scripts. It's built before the live path (M3).
 
+### 6.8 Measure vocabulary (after v0.1)
+
+**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Nothing here is built.
+
+**Where we are.** A metric is one SQL aggregate expression (`SUM`, `COUNT`, `COUNT(DISTINCT …)`, `MIN`, `MAX`, `AVG`, with `FILTER (WHERE …)`), or a `derived` expression over other metrics. Four modifiers change what it sees: `table`, `ignore_selection`, `time_offset` and the model's `filter_direction`. That covers the simple half of what DAX's `CALCULATE` and Qlik's set analysis are used for. These are the gaps users will meet first:
+
+| Gap | DAX | Qlik | Example |
+|---|---|---|---|
+| share of a total over the visual's own dimensions | `ALL(dim)` in `CALCULATE` | `TOTAL <dim>` | revenue share per region |
+| a fixed value that replaces the selection on a field | `CALCULATE(…, field = v)` | `{<field={v}>}` | paid revenue, whatever status is selected |
+| more aggregates | `MEDIAN`, `PERCENTILEX`, `STDEV`, `LASTNONBLANK` | `Median`, `Fractile`, `Stdev`, `FirstSortedValue` | median order value, the latest state of an asset |
+| aggregation in two steps (level of detail) | `AVERAGEX(VALUES(c), …)` | `Aggr()` | average revenue per customer; customers with revenue over 1,000 |
+| time windows other than a shift | `DATESYTD`, `DATESINPERIOD` | set analysis with `$(=…)` dates | year to date, the last 12 months |
+| sets from other sets | `CALCULATETABLE`, `TREATAS` | `P()`, `E()` | revenue on all products from customers who bought bikes |
+
+Apache Ossie doesn't limit any of this. Its metric is a name, an expression and `custom_extensions`, and our extension's `data` is ours to define. The limits are D9's (no formula language) and the engine's (every path exact, incremental where possible, checked by the oracle).
+
+**The rule for new modifiers (D16).** The core stays a SQL aggregate expression. Every way to change what a metric sees or how it rolls up is a key in the metric's `TIDEPOOL` extension, and it must:
+
+- have a translation to plain SQL that the oracle can generate (`combinations_sql` and its neighbours), so DuckDB checks it;
+- compose with the other modifiers in a stated order (below), with no special cases between pairs;
+- compile to anchor plans the engine already has (one per anchor table, selection and shape), joined on the group key as §6.4 does today. A modifier may start on the general path only (`prepare` returns `None`) and get fast-path support later;
+- get golden diagnostics for its mistakes, a metric in the retail example, a generator in the oracle, and a page on the doc site.
+
+**Order of application,** for each base metric in a visual: the selection (with `filter_direction`), then `ignore_selection`, then `set`, then `time_offset` or `time_window`, then `FILTER (WHERE …)`, then grouping (the visual's dimensions without `total`, plus `per`), then `then`. Derived metrics come last, as now.
+
+#### The modifiers, in order of work
+
+1. **`total: [field…]`** (or `"*"`). The metric is computed without these of the visual's dimensions, and its value is repeated across them. Selections still apply, as with Qlik's `TOTAL` (to get DAX's `ALL`, combine it with `ignore_selection`). A total field the visual doesn't group by does nothing. Share of total is then a derived metric: `revenue / revenue_total`. It is one more anchor plan with fewer dimensions, joined back on the dimensions it kept. Incremental like any other plan. Oracle: the same aggregate grouped by the kept dimensions, joined.
+
+2. **`set: {field: [values…]}`.** The metric sees these values on these fields *instead of* the session's selection on them. This is shorthand for `ignore_selection` plus a condition, but a condition on a dimension's field (`customers.region`), not only on the anchor's columns, as `FILTER` requires. A `set` field is never in `relevant` (§6.6), so changing it in the session costs nothing.
+
+3. **More aggregates.** `MEDIAN(x)`, `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP`, and `ARG_MAX(x, t)` / `ARG_MIN(x, t)` (the value of `x` on the row with the largest `t`: the latest reading, the closing balance). All exact. States: a code → count histogram for dictionary columns, a value list otherwise (§6.4's t-digest only behind an explicit `APPROX_` name, like `APPROX_COUNT_DISTINCT`). Deletes recompute, as for `MIN` and `MAX`. These take over item 4 of "After v0.1".
+
+4. **`per: [field…]` with `then`.** Aggregation in two steps. The expression is aggregated per combination of the visual's dimensions and the `per` fields (inner). Then `then`, a SQL aggregate over the inner value named `value`, aggregates those to the visual's dimensions (outer):
+
+   ```json
+   {"per": ["orders.customer_id"], "then": "AVG(value)"}
+   {"per": ["orders.customer_id"], "then": "COUNT(*) FILTER (WHERE value > 1000)"}
+   ```
+
+   With `total: "*"` as well, the inner groups are the `per` fields alone (Tableau's `FIXED`). `per` fields must be on the anchor or reachable from it through many → one paths, like every other read. The inner state is kept per epoch like any grouped answer, and the outer one is recomputed from it, which costs the number of inner groups, not rows. A `per` field with very many values (one row each) is the expensive case. `tidepool plan` reports its cardinality, and the compiler warns over a limit. Oracle: a `GROUP BY` subquery inside a `GROUP BY`.
+
+5. **`time_window`** with `time_field`: `ytd`, `qtd`, `mtd`, `wtd`, or `last:<n><unit>` (`last:12mo`, `last:7d`). Without a time dimension in the visual, the window ends where the time selection ends (or now, §5.5). With one, each group gets its own window, ending where the group ends (a running year to date per month, a rolling 12 months per month). The per-group case is a range join of groups against groups. It's exact for every aggregate when each window is computed from the rows, and cheap for sums and counts when it's computed from finer groups. Start with the exact version on the general path. Needs a short design spike before it's built: the interaction with a `grain` coarser than the window (which time zoom, §5.8, makes a viewer's choice), and with `time_offset` on the same metric.
+
+6. **Sets from sets.** A condition that is the possible values of a field under another selection: `{"in": {"field": "orders.customer_id", "under": {"products.category": ["bikes"]}, "keep_selection": true}}` (shape not final). It's Qlik's `P()`. The engine already computes such sets: `assoc.rs` turns the passing rows of one side into a `Condition::Set` on another. So this is mostly syntax, planning and the oracle. `E()` is the complement. Design after items 1–4 are in, when we know how they read in practice.
+
+Smaller items to fold in on the way: `via: <relationship>` to choose a relationship by its `role` per metric (DAX's `USERELATIONSHIP`), and `time_offset` with `time_window` on the same metric.
+
+**Not planned:**
+
+- **A formula language** (DAX, Qlik expressions). Its power comes with an evaluation model (context transition, implicit iteration) that is hard to learn, hard to plan and can't be checked against SQL. If the JSON gets heavy, a short surface syntax that compiles to the same keys is a separate, later decision.
+- **Inter-row functions** (rank, running total, difference to the previous row; Qlik's `Above`, DAX's `RANKX`). They work on a visual's result rows, not on data, so they belong on the visual (a `rank` or `running` option in the dashboard file), computed after `sort`. Plan them with the visuals.
+- **Alternate states** (two selections side by side). That's a session and protocol feature. It belongs with bookmarks (§12).
+
+**Portability.** Another Ossie tool reads `revenue_prev_year` as plain `SUM(orders.amount)`, and gets a different number without an error. The more of a metric's meaning moves into the extension, the more this is true. See §14.
+
 ---
 
 ## 7. Client protocol (WebSocket `/v1/ws`)
@@ -727,6 +1032,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `select_relative { field, window: { unit, last, ago? } }` | a period relative to now ("Last 7 days", §5.5) |
 | `clear { field? }` / `back` / `forward` | selection management |
 | `filter_window { filter_id, offset, limit, search?, sort? }` | page/search a filter list |
+| `grain { visual, grain? }` | pin a visual's time grain for this session, or go back to the dashboard's (proposed, §5.8) |
 | `pause` / `resume` | freeze live updates for this session (the server keeps the last frame) |
 
 **Server → client:**
@@ -936,14 +1242,14 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
 
 - **Stack:**
   - Leptos 0.8, client-side rendering, built by trunk (D10)
-  - Apache ECharts through a small wrapper component (`EChart`, see `spikes/leptos-charts/src/echarts.rs`): an option signal in, click and x-brush callbacks out, `ResizeObserver` sizing. ECharts is vendored with its licence (like Kayak's Scalar).
+  - charts of our own, in Rust (decided 2026-11-01, replacing the ECharts wrapper the M0 spike chose): `scale.rs` and `charts.rs` lay a chart out for its size (nice ticks, bands, label fitting, which bar a position means, the frames between two states) without a DOM, and `plot.rs` draws that as SVG coloured by `style.css`. Why: the UI ships no JavaScript library (1.1 MB of ECharts was a quarter of the download; the UI is 667 KB with brotli instead of 914 KB), charts look like the rest of the page and follow its theme, every mark is a DOM element the e2e can find, and selection works the same way from the pointer and the keyboard. What we gave up: every new chart type is ours to build.
   - a virtualised list component for filter lists (spike: `vlist.rs`)
   - a small dashboard grid (CSS grid from the YAML layout), and the dashboard editor on the same grid: written from scratch with pointer events and pointer capture (no grid library); the geometry (`layout.rs`) and the visual rules (`design.rs`) are DOM-free and unit-tested (decided 2026-10-13)
-  - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor, through the same kind of thin wrapper as ECharts
+  - Monaco + monaco-yaml (with the generated JSON Schemas) for the config editor, through a thin wrapper (as built: a highlighted `<pre>` behind a textarea, `highlight.rs`)
   - frames are JSON (decided in M4: small, and serde on both sides); Arrow if frame size ever says so
 - **State:**
   - signals hold `{model, selection, frames by epoch}`; a frame is applied to all of them at once (D11)
-  - charts are updated through their option signals, so ECharts merges the new data and animates the change itself
+  - charts are fed a data memo; the layout for the new data is reached over 300 ms from wherever the drawing is (bars matched by category, points by period), and drawn at once on a resize or under `prefers-reduced-motion`
 - **Build:**
   - `just frontend` = `trunk build --release` in `frontend/` → `frontend/dist` (hashed files under `assets/`, which the server caches as immutable)
   - `just build` = `just frontend`, then `cargo build --release -p tidepool --features embed-assets`
@@ -959,7 +1265,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
 - Visuals:
   - KPI tile (value, comparison metric, delta %)
   - bar (vertical/horizontal)
-  - line/area with a time axis and grain
+  - line/area with a time axis and grain; zoomed between grains (proposed, §5.8)
   - table (sortable, uses the server-side sort). Without metrics (2026-10-13): the distinct combinations of its dimensions, counted on one anchor (of the tables reaching every dimension, the one reaching fewest, ties by name); a group with no rows under the selection isn't one. Covered by the oracle (`SELECT DISTINCT` over the same anchor).
   - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
@@ -972,6 +1278,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
   - a pause toggle (frozen at the current frame, with a "N updates waiting" badge)
   - a brief highlight on values that changed
 - Error tiles per visual (e.g. a metric was removed by a config change).
+- **Maximize** (2026-11-03): a button in each visual's header (not on `filter` visuals) shows it alone, as large as the grid; Esc or the button puts it back. The rail and the selection bar stay, so the selection is still shown and still made there or in the visual. It's page state, not in the route: the other visuals stay mounted and live, hidden, so nothing is re-opened or re-asked of the server, and a chart only resizes.
 
 **Model browser**
 - Tables: columns, types, encodings, row counts, ingest rate, preview of the latest rows.
@@ -1133,7 +1440,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
 2. ~~Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns~~ (done 2026-10-17)
 3. Late binding of dimension attributes (no fact rescans on dimension upserts)
-4. Percentiles/median, approximate distinct
+4. Percentiles/median, approximate distinct (now part of 19, §6.8)
 5. Segment compaction and dictionary compaction
 6. Row-level deltas in frames for large tables
 7. Bookmarks and shareable selection URLs
@@ -1148,6 +1455,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 16. ~~Hierarchical (parent–child, ragged) dimensions with tree filters, and measures on filters~~ (done: §5.6); replace ingest (§4.5) and indud's namespace through Kayak (§15.5)
 17. GitOps: the config from a branch of a remote repository, plan checks on pull requests, UI changes pushed as commits. Design in [gitops.md](gitops.md)
 18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
+19. The measure vocabulary (§6.8, D16): `total`, `set`, more aggregates, `per`/`then`, `time_window`, sets from sets
+20. Text search as a selection and the `rows` visual, for logs (§5.7), with an example of Postgres logs (`examples/pglogs`)
+21. Time zoom (§5.8, D17): `hour` and `minute` grains, an `auto` grain from the range, a viewer's grain per visual, a time scale with gaps for grained axes
 
 ---
 
@@ -1172,12 +1482,13 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 
 1. ~~License~~: decided, D13.
 2. **Viewer identity:** Kayak's auth stack (D14) gives us named users via Basic/JWT. Should sessions and selection history be tied to the user (resume on another device) or only to the browser in v0.1?
-3. **Time zones:** dashboard-level time zone for grains (`day` in which zone)? Proposal: a `timezone` setting in `tidepool.yaml`, overridable per dashboard.
+3. **Time zones:** dashboard-level time zone for grains (`day` in which zone)? Proposal: a `timezone` setting in `tidepool.yaml`, overridable per dashboard. Time zoom (§5.8) makes it more pressing: zooming out from hours shows UTC days.
 4. **Late-arriving data with `event_time` far in the past:** accept always (affects zone maps only), or reject outside a window?
 5. **Ossie upgrade:** we write the 0.2 shape already (D8). When 0.2 is released, check whether it adds any of our extension concepts (derived metrics, filters, time grains) natively, and read those too.
 6. **Who approves a `security` change?** (§9.2) Approval is an admin endpoint, and agents use the admin token too, so an agent could approve its own proposal. Options: approval only from a browser session (a human at the UI), or a separate approver token.
 7. **Stronger producer identity for edge sites** (§9.2): mTLS or HMAC-signed requests (a timestamp against replays) for Kayaks pushing across the internet. Kayak's `tidepool` output would have to speak it too. After the bearer-token version is in.
-8. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
+8. **Metrics other Ossie tools misread** (§6.8): a metric whose meaning depends on its `TIDEPOOL` extension still carries a plain `ANSI_SQL` expression, which other tools compute without the extension. Options: accept it and say so in `describe_model` and the docs; read a `TIDEPOOL` dialect first and keep `ANSI_SQL` only for metrics that mean the same without the extension; or have `validate` warn. Related: extension `data` is a JSON string because Ossie says so, which is heavy to write by hand. Should we also accept a YAML mapping there and write it back as a string?
+9. **Name check:** does `tidepool` collide on crates.io/npm or with trademarks in our space? (Rename cost is lowest now.)
 
 ---
 

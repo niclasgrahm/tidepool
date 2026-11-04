@@ -268,7 +268,12 @@ impl Browser {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("timed out waiting for {what} (last: {last})");
+        // what the page showed, so a timeout says why
+        let page = self.eval(
+            "(() => `${location.href} · ${document.styleSheets.length} sheets · ` + \
+             (document.body?.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 400))()",
+        );
+        panic!("timed out waiting for {what} (last: {last}); the page: {page}");
     }
 
     /// A real mouse click at page coordinates, as a person makes one.
@@ -295,6 +300,23 @@ impl Browser {
         self.call("Input.dispatchMouseEvent", &event("mouseReleased", to, 0));
     }
 
+    /// The middle of `selector`'s element once it has stopped moving: a
+    /// chart tweens from its last layout for a moment after new data, and a
+    /// position read mid-way lands on the wrong mark.
+    fn settled(&mut self, selector: &str) -> (f64, f64) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last = self.middle(selector);
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let now = self.middle(selector);
+            if now == last {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "{selector} never stopped moving");
+            last = now;
+        }
+    }
+
     /// The middle of the element `selector` finds, once it's there.
     fn middle(&mut self, selector: &str) -> (f64, f64) {
         let at = self.wait_for(
@@ -307,6 +329,19 @@ impl Browser {
         match (at[0].as_f64(), at[1].as_f64()) {
             (Some(x), Some(y)) => (x, y),
             _ => panic!("no position for {selector}: {at}"),
+        }
+    }
+
+    /// A key pressed and released, as a keyboard sends it.
+    fn press(&mut self, key: &str, code: u32, shift: bool) {
+        let modifiers = if shift { 8 } else { 0 };
+        let text = if key == "Enter" { "\r" } else { "" };
+        for kind in ["keyDown", "keyUp"] {
+            self.call(
+                "Input.dispatchKeyEvent",
+                &json!({ "type": kind, "key": key, "code": key, "windowsVirtualKeyCode": code,
+                         "modifiers": modifiers, "text": if kind == "keyDown" { text } else { "" } }),
+            );
         }
     }
 
@@ -327,7 +362,23 @@ impl Browser {
     }
 }
 
-const KPI: &str = "document.querySelector('.visual.kpi .kpi-value')?.textContent";
+/// The KPI's whole value: its `title` when a format shortens what it shows
+/// (the example's sales KPI is `compact`), else its text.
+const KPI: &str =
+    "(e => e && (e.title || e.textContent))(document.querySelector('.visual.kpi .kpi-value'))";
+/// What the KPI shows, as formatted.
+const KPI_SHOWN: &str = "document.querySelector('.visual.kpi .kpi-value')?.textContent";
+/// The bars of the first bar chart, in category order (one metric).
+const BARS: &str = "[...document.querySelectorAll('.visual.bar .plot .bar')]";
+
+/// The bar whose category label reads `label`.
+fn bar_labelled(label: &str) -> String {
+    format!(
+        "(() => {{ const svg = document.querySelector('.visual.bar .plot'); \
+         const i = [...svg.querySelectorAll('.labels text')].findIndex(t => t.textContent === '{label}'); \
+         return i < 0 ? null : svg.querySelectorAll('.bar')[i]; }})()"
+    )
+}
 const CHIPS: &str = "[...document.querySelectorAll('.chip')].map(c => c.textContent).join(' | ')";
 
 #[test]
@@ -386,23 +437,13 @@ fn click_a_bar_watch_it_update_go_back() {
         &format!("{KPI} === '180.00'"),
         "the revenue KPI to show 180.00",
     );
-    let bars = "(() => { const el = document.querySelector('.visual.bar .chart > div'); \
-                const c = el && echarts.getInstanceByDom(el); \
-                return c ? c.getOption().series[0].data.length : 0; })()";
-    browser.wait_for(&format!("{bars} === 2"), "two bars in revenue by region");
-
-    // click the north bar: half way up it
-    let at = browser.eval(
-        "(() => { const el = document.querySelector('.visual.bar .chart > div'); \
-         const c = echarts.getInstanceByDom(el); const o = c.getOption(); \
-         const i = o.xAxis[0].data.indexOf('north'); const v = o.series[0].data[i].value; \
-         const [x, y] = c.convertToPixel({ gridIndex: 0 }, [i, v / 2]); \
-         const r = el.getBoundingClientRect(); return [r.x + x, r.y + y]; })()",
+    browser.wait_for(
+        &format!("{BARS}.length === 2"),
+        "two bars in revenue by region",
     );
-    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else {
-        panic!("no position for the north bar: {at}");
-    };
-    browser.click(x, y);
+
+    // click the north bar, found by its label
+    browser.click_element(&bar_labelled("north"));
 
     // the selection is applied: a chip, the filter list, the KPI
     browser.wait_for(
@@ -444,6 +485,323 @@ fn click_a_bar_watch_it_update_go_back() {
         &format!("{KPI} === '1,205.00'"),
         "the KPI to show all 1,205.00",
     );
+    // the example formats it compact: short on the tile, whole on hover
+    browser.wait_for(&format!("{KPI_SHOWN} === '1.2k'"), "the KPI to read 1.2k");
+}
+
+/// The width of the first bar chart's plot.
+const BAR_WIDTH: &str = "document.querySelector('.visual.bar .plot').getBoundingClientRect().width";
+
+#[test]
+fn maximize_a_visual_and_the_selection_stays() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    assert!(
+        workspace().join("frontend/dist/index.html").exists(),
+        "no frontend/dist: run `just frontend` first"
+    );
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    browser.wait_for(
+        &format!("{BARS}.length === 2"),
+        "two bars in revenue by region",
+    );
+    let small = browser.eval(BAR_WIDTH).as_f64().unwrap_or(0.0);
+
+    // a selection made on the grid
+    browser.click_element(&bar_labelled("north"));
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north')"),
+        "a chip for region north",
+    );
+
+    // maximized: the bar chart alone and larger, the selection still shown
+    // in the bar, the chip and the rail
+    browser.click_element("document.querySelector('.visual.bar .maximize')");
+    browser.wait_for(
+        "document.querySelector('.visual.bar.maximized') \
+         && document.querySelector('.visual.kpi').offsetParent === null",
+        "the bar chart alone on the grid",
+    );
+    browser.wait_for(
+        &format!("{BAR_WIDTH} > {small} * 1.5"),
+        "the maximized chart to be wider",
+    );
+    browser.wait_for(
+        &format!("{}.classList.contains('selected')", bar_labelled("north")),
+        "north still selected in the maximized chart",
+    );
+    browser.wait_for(&format!("{CHIPS}.includes('north')"), "the chip to stay");
+    browser.wait_for(
+        "[...document.querySelectorAll('.rail .filter .value.selected')].some(b => b.textContent.startsWith('north'))",
+        "north still selected in the rail",
+    );
+
+    // the rail still selects (a list click adds), and the maximized chart
+    // follows
+    browser.click_element(
+        "[...document.querySelectorAll('.rail .filter .value')].find(b => b.textContent.startsWith('south'))",
+    );
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north, south')"),
+        "the chip to say north and south",
+    );
+    browser.wait_for(
+        &format!(
+            "document.querySelector('.visual.bar.maximized') && {}?.classList.contains('selected')",
+            bar_labelled("south")
+        ),
+        "south selected in the maximized chart",
+    );
+
+    // Escape puts it back, among the others, under the new selection
+    browser.press("Escape", 27, false);
+    browser.wait_for(
+        "!document.querySelector('.visual.maximized') \
+         && document.querySelector('.visual.kpi').offsetParent !== null",
+        "every visual back on the grid",
+    );
+    browser.wait_for(
+        &format!("{KPI} === '130.00'"),
+        "the KPI to show both regions' 130.00",
+    );
+    browser.wait_for(
+        &format!("Math.abs({BAR_WIDTH} - {small}) < 2"),
+        "the bar chart back to its size",
+    );
+}
+
+/// The rows of the first `rows` visual, as their text.
+const ROWS: &str =
+    "[...document.querySelectorAll('.visual.rows tbody tr')].map(r => r.textContent)";
+
+#[test]
+fn search_as_you_type_and_the_rows_follow() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([
+            {"customer_id": "c-north", "name": "Nora", "region": "north", "segment": null},
+            {"customer_id": "c-south", "name": "Sami", "region": "south", "segment": null},
+        ]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, customer: &str, note: Value| {
+        json!({
+            "order_id": id, "customer_id": customer, "product_id": "p1", "status": "paid",
+            "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": "1.00", "note": note,
+        })
+    };
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "c-north", json!("Leave at the DOOR")),
+            order("o2", "c-south", json!("gift wrap")),
+            order("o3", "c-south", json!("door code 4417")),
+            order("o4", "c-north", Value::Null),
+        ]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/shipping_notes") }),
+    );
+    browser.wait_for(&format!("{ROWS}.length === 4"), "four orders in the rows");
+    browser.wait_for(
+        &format!("{ROWS}[0].includes('Nora')"),
+        "the newest order first",
+    );
+
+    // typed: once typing pauses, a chip, the KPI and the rows follow
+    browser.click_element("document.querySelector('[data-field=\"orders.note\"] input')");
+    browser.call("Input.insertText", &json!({ "text": "door" }));
+    browser.wait_for(
+        &format!("{CHIPS}.includes('“door”')"),
+        "a chip for the search",
+    );
+    browser.wait_for(
+        &format!("{KPI} === '2'"),
+        "two orders with door in the note",
+    );
+    browser.wait_for(&format!("{ROWS}.length === 2"), "the two rows");
+    let marked = browser
+        .eval("[...document.querySelectorAll('.visual.rows mark')].map(m => m.textContent).join()");
+    assert_eq!(
+        marked,
+        json!("door,DOOR"),
+        "the matches marked as typed, in any case"
+    );
+
+    // a click on a bar narrows the search
+    browser.click_element(&bar_labelled("south"));
+    browser.wait_for(&format!("{ROWS}.length === 1"), "south's one door");
+
+    // back twice: the click, then the whole search, and the box empties
+    let back =
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')";
+    browser.click_element(back);
+    browser.wait_for(
+        &format!("!{CHIPS}.includes('south') && {CHIPS}.includes('“door”')"),
+        "the click gone, the search kept",
+    );
+    browser.click_element(back);
+    browser.wait_for(&format!("{CHIPS} === ''"), "the search gone at once");
+    browser.wait_for(
+        "document.querySelector('[data-field=\"orders.note\"] input').value === ''",
+        "the search box empty",
+    );
+    browser.wait_for(&format!("{ROWS}.length === 4"), "every order again");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one scenario, start to end
+fn brush_the_trend_drag_across_bars_and_choose_with_keys() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    assert!(
+        workspace().join("frontend/dist/index.html").exists(),
+        "no frontend/dist: run `just frontend` first"
+    );
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([
+            {"customer_id": "c-east", "name": "Eda", "region": "east", "segment": null},
+            {"customer_id": "c-north", "name": "Nora", "region": "north", "segment": null},
+            {"customer_id": "c-south", "name": "Sami", "region": "south", "segment": null},
+        ]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, customer: &str, day: &str, amount: &str| {
+        json!({
+            "order_id": id, "customer_id": customer, "product_id": "p1", "status": "paid",
+            "ordered_at": format!("2026-10-{day}T12:00:00Z"), "quantity": 1, "amount": amount, "note": null,
+        })
+    };
+    // three days; revenue by region sorts north (400), east (20), south (2)
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "c-north", "01", "100.00"),
+            order("o2", "c-east", "02", "20.00"),
+            order("o3", "c-north", "03", "300.00"),
+            order("o4", "c-south", "03", "2.00"),
+        ]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    browser.wait_for(&format!("{KPI} === '422.00'"), "every order");
+
+    // drag across the first two days of the trend: their range is chosen
+    let dots = "[...document.querySelectorAll('.visual.line .plot .dot.m0')]";
+    browser.wait_for(&format!("{dots}.length === 3"), "a dot per day");
+    // a drag happens on screen: the trend is below the fold in a small window
+    browser.eval("document.querySelector('.visual.line').scrollIntoView({block: 'center'})");
+    let first = browser.settled(&format!("{dots}[0]"));
+    let second = browser.settled(&format!("{dots}[1]"));
+    browser.drag(first, second);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('2026-10-01 to 2026-10-02')"),
+        "a chip for October 1 and 2",
+    );
+    browser.wait_for(&format!("{KPI} === '120.00'"), "the first two days' orders");
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')",
+    );
+    browser.wait_for(&format!("{KPI} === '422.00'"), "every order again");
+
+    // drag from the first bar to the second: both regions are chosen
+    browser.wait_for(&format!("{BARS}.length === 3"), "a bar per region");
+    browser.eval("document.querySelector('.visual.bar').scrollIntoView({block: 'center'})");
+    let north = browser.settled(&bar_labelled("north"));
+    let east = browser.settled(&bar_labelled("east"));
+    browser.drag(north, east);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north') && {CHIPS}.includes('east')"),
+        "a chip for north and east",
+    );
+    browser.wait_for(&format!("{KPI} === '420.00'"), "north's and east's orders");
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')",
+    );
+    browser.wait_for(&format!("{KPI} === '422.00'"), "every order again");
+
+    // the keyboard: into the bar chart, two bars along, Enter
+    browser.eval("document.querySelector('.visual.bar .plot').focus()");
+    browser.press("ArrowRight", 39, false);
+    browser.press("ArrowRight", 39, false);
+    browser.wait_for(
+        "document.querySelector('.visual.bar .tip')?.textContent.startsWith('east')",
+        "the tooltip on the second bar",
+    );
+    let described = browser.eval(
+        "(() => { const s = document.querySelector('.visual.bar .plot'); \
+         return document.getElementById(s.getAttribute('aria-activedescendant'))?.getAttribute('aria-label'); })()",
+    );
+    assert_eq!(
+        described,
+        json!("east: revenue 20.00"),
+        "the active bar, in words"
+    );
+    browser.press("Enter", 13, false);
+    browser.wait_for(&format!("{CHIPS}.includes('east')"), "a chip for east");
+    browser.wait_for(&format!("{KPI} === '20.00'"), "east's order");
+
+    // and in the trend: Shift+arrows stretch a range from the first day
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')",
+    );
+    browser.wait_for(&format!("{KPI} === '422.00'"), "every order again");
+    browser.eval("document.querySelector('.visual.line .plot').focus()");
+    browser.press("ArrowRight", 39, false);
+    browser.press("ArrowRight", 39, true);
+    browser.press("ArrowRight", 39, true);
+    browser.press("Enter", 13, false);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('2026-10-01 to 2026-10-03')"),
+        "a chip for all three days",
+    );
+    browser.wait_for(&format!("{KPI} === '422.00'"), "the three days' orders");
 }
 
 #[test]
@@ -540,16 +898,14 @@ fn days_ago(days: i64) -> String {
     tidepool_store::value::format_timestamp(now - days * 86_400_000_000, true)
 }
 
-/// Pick `label` in a date range's period list (what choosing an option does:
-/// the value set, then `change`).
+/// Pick `label` among a date range's relative periods: open the picker,
+/// click the window.
 fn choose_period(browser: &mut Browser, label: &str) {
-    let picked = browser.eval(&format!(
-        "(() => {{ const s = document.querySelector('.range select'); \
-         const o = [...s.options].find(o => o.textContent === '{label}'); \
-         if (!o) return false; s.value = o.value; \
-         s.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()"
+    browser.click_element("document.querySelector('.picker-trigger')");
+    browser.click_element(&format!(
+        "[...document.querySelectorAll('.picker-preset')]\
+         .find(b => b.firstElementChild?.textContent === '{label}')"
     ));
-    assert_eq!(picked, json!(true), "no period `{label}` to choose");
 }
 
 #[test]
@@ -604,11 +960,8 @@ fn a_dashboard_opens_on_its_relative_period_and_changes_it() {
         "a chip for the default window",
     );
     browser.wait_for(&format!("{KPI} === '10.00'"), "only this week's order");
-    let shown = browser.eval(
-        "(() => { const s = document.querySelector('.range select'); \
-         return s.options[s.selectedIndex].textContent; })()",
-    );
-    assert_eq!(shown, json!("Last 7 days"), "the period list shows it");
+    let shown = browser.eval("document.querySelector('.picker-trigger .picker-label').textContent");
+    assert_eq!(shown, json!("Last 7 days"), "the picker shows it");
 
     choose_period(&mut browser, "Last 30 days");
     browser.wait_for(
@@ -620,6 +973,29 @@ fn a_dashboard_opens_on_its_relative_period_and_changes_it() {
     choose_period(&mut browser, "All time");
     browser.wait_for(&format!("{CHIPS} === ''"), "no chip for all time");
     browser.wait_for(&format!("{KPI} === '70.00'"), "every order");
+
+    // on the calendar: today, clicked twice, is that one day
+    let today =
+        "document.querySelector(`.picker-day[data-day='${Math.floor(Date.now() / 864e5)}']`)";
+    browser.click_element("document.querySelector('.picker-trigger')");
+    browser.click_element(today);
+    browser.click_element(today);
+    browser.wait_for(
+        "!document.querySelector('.picker-pop')",
+        "the picker to close",
+    );
+    browser.wait_for(&format!("{KPI} === '10.00'"), "only today's order");
+
+    // typed: from 25 days back until today, Enter
+    browser.click_element("document.querySelector('.picker-trigger')");
+    let (from, until) = (&days_ago(25)[..10], &days_ago(0)[..10]);
+    browser.eval(&format!(
+        "(() => {{ const [from, until] = document.querySelectorAll('.picker-input:not(.picker-time)'); \
+         const set = (e, v) => {{ e.value = v; e.dispatchEvent(new Event('input', {{ bubbles: true }})); }}; \
+         set(from, '{from}'); set(until, '{until}'); \
+         until.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }})); }})()"
+    ));
+    browser.wait_for(&format!("{KPI} === '30.00'"), "the typed range's orders");
 }
 
 #[test]
@@ -845,7 +1221,7 @@ fn a_dashboard_made_in_the_editor_goes_live() {
     );
     browser.wait_for("location.hash === '#/d/team_view'", "the new dashboard");
     browser.wait_for(
-        "document.querySelector('.visual.bar .chart canvas') !== null",
+        "document.querySelector('.visual.bar .plot .bar') !== null",
         "its bar chart",
     );
     let written = std::fs::read_to_string(config.path().join("dashboards/team_view.yaml"))

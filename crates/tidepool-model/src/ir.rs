@@ -367,6 +367,9 @@ pub struct Visual {
     pub limit: Option<u32>,
     pub on_click: bool,
     pub on_brush: bool,
+    /// How metrics read in this visual, over their own `format`; checked.
+    #[serde(default)]
+    pub formats: Vec<(MetricId, String)>,
     pub at: tidepool_config::dashboard::GridPosition,
 }
 

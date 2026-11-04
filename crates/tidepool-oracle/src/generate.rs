@@ -59,6 +59,9 @@ pub enum Gen {
     /// the tree has no cycles), NULL for a root, or sometimes nowhere.
     Up,
     Choice(Vec<&'static str>),
+    /// A few words of log text, in mixed case: a plain-encoded column to
+    /// search (plan §5.7).
+    Text,
     Int(i64, i64),
     /// Cents, i.e. a decimal with this many places.
     Decimal(i64, i64, u8),
@@ -206,6 +209,14 @@ impl Schema {
     pub fn values_of(&self, table: &str, field: &str) -> Option<Gen> {
         if self.is_tree(table, field) {
             return Some(Gen::Key("k".into(), 0));
+        }
+        // a derived field's values aren't generated: only searched
+        if self
+            .derived
+            .iter()
+            .any(|d| d.table == table && d.name == field)
+        {
+            return Some(Gen::Text);
         }
         self.table(table)
             .and_then(|t| t.column(field))
@@ -413,6 +424,13 @@ pub fn schema(rng: &mut Rng) -> Schema {
             "TIMESTAMP",
             rng.chance(30),
             Gen::Timestamp(1_750_000_000, 1_760_000_000),
+        ),
+        column(
+            "note",
+            "string, encoding: plain",
+            "VARCHAR",
+            true,
+            Gen::Text,
         ),
     ]);
     tables.push(Table {
@@ -903,6 +921,24 @@ fn value(rng: &mut Rng, schema: &Schema, column: &Column, index: usize) -> Json 
             }
         }
         Gen::Choice(choices) => json!(rng.pick(choices)),
+        Gen::Text => {
+            const WORDS: [&str; 12] = [
+                "Lock",
+                "timeout",
+                "ERROR",
+                "error:",
+                "duplicate",
+                "key",
+                "pid=42",
+                "",
+                "x",
+                "Connection",
+                "reset",
+                "é",
+            ];
+            let words: Vec<&str> = (0..rng.below(6)).map(|_| *rng.pick(&WORDS)).collect();
+            json!(words.join(if rng.chance(20) { "" } else { " " }))
+        }
         Gen::Int(lo, hi) => json!(rng.range(*lo, *hi)),
         Gen::Decimal(lo, hi, scale) => {
             let v = rng.range(*lo, *hi);
@@ -1004,9 +1040,18 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
                 && let Some(live) = keyed.get_mut(&table.name)
                 && !live.is_empty()
             {
+                // half of them among the newest rows: what a `rows` view
+                // shows, kept and then deleted under it
+                let pick = |rng: &mut Rng, len: usize| {
+                    if rng.chance(50) {
+                        len - 1 - rng.below(len.min(8))
+                    } else {
+                        rng.below(len)
+                    }
+                };
                 let rewritten: Vec<Map<String, Json>> = (0..=rng.below(8))
                     .map(|_| {
-                        let at = rng.below(live.len());
+                        let at = pick(rng, live.len());
                         let mut fresh = row(rng, table, 0);
                         fresh.insert("key".into(), json!(live[at].0));
                         live[at].1.clone_from(&fresh);
@@ -1020,7 +1065,7 @@ pub fn data(rng: &mut Rng, schema: &Schema) -> Data {
                 let mut gone: Vec<Json> = Vec::new();
                 for _ in 0..rng.below(4) {
                     if !live.is_empty() {
-                        let at = rng.below(live.len());
+                        let at = pick(rng, live.len());
                         gone.push(json!({ "key": live.remove(at).0 }));
                     }
                 }
@@ -1105,6 +1150,8 @@ pub struct Query {
 pub enum Cond {
     In(Vec<Json>),
     Range(Json, Json),
+    /// Contains the text, ignoring the case of ASCII letters.
+    Contains(String),
     /// The `last` whole `unit`s ending `ago` units before the one `now`
     /// (microseconds, UTC) is in: a relative window, as a dashboard keeps
     /// one.
@@ -1225,39 +1272,10 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
         {
             continue;
         }
-        let ranged = matches!(
-            column.values,
-            Gen::Int(..) | Gen::Decimal(..) | Gen::Date(..) | Gen::Timestamp(..)
-        );
-        let temporal = matches!(column.values, Gen::Date(..) | Gen::Timestamp(..));
-        let cond = if temporal && rng.chance(30) {
-            let near = rng.pick(&values).clone();
-            relative(rng, &column.values, &near)
-        } else if ranged && rng.chance(40) {
-            let (mut a, mut b) = (rng.pick(&values).clone(), rng.pick(&values).clone());
-            // sometimes bounds between two stored values: one digit finer
-            // than the column keeps
-            if matches!(column.values, Gen::Decimal(..)) && rng.chance(50) {
-                for bound in [&mut a, &mut b] {
-                    if let Json::String(text) = bound {
-                        text.push('5');
-                    }
-                }
-            }
-            Cond::Range(a, b)
-        } else {
-            let mut picked: Vec<Json> = (0..=rng.below(3))
-                .map(|_| rng.pick(&values).clone())
-                .collect();
-            if rng.chance(10)
-                && matches!(column.values, Gen::Choice(_) | Gen::Key(..) | Gen::Ref(_))
-            {
-                picked.push(json!("nothing"));
-            }
-            Cond::In(picked)
-        };
+        let cond = condition(rng, &column, &values);
         selection.push((table.name.clone(), column.name.clone(), cond));
     }
+    selection.extend(derived_search(rng, schema));
     if let Some(subtrees) = subtrees(rng, schema, data) {
         selection.push(subtrees);
     }
@@ -1265,6 +1283,109 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
         metrics,
         dims,
         selection,
+    }
+}
+
+/// A condition on `column`, its values taken from `values` (stored ones).
+fn condition(rng: &mut Rng, column: &Column, values: &[Json]) -> Cond {
+    let ranged = matches!(
+        column.values,
+        Gen::Int(..) | Gen::Decimal(..) | Gen::Date(..) | Gen::Timestamp(..)
+    );
+    let temporal = matches!(column.values, Gen::Date(..) | Gen::Timestamp(..));
+    let text = matches!(
+        column.values,
+        Gen::Text | Gen::Choice(_) | Gen::Key(..) | Gen::Ref(_)
+    );
+    if text
+        && rng.chance(if matches!(column.values, Gen::Text) {
+            80
+        } else {
+            25
+        })
+    {
+        Cond::Contains(needle(rng, values))
+    } else if temporal && rng.chance(30) {
+        let near = rng.pick(values).clone();
+        relative(rng, &column.values, &near)
+    } else if ranged && rng.chance(40) {
+        let (mut a, mut b) = (rng.pick(values).clone(), rng.pick(values).clone());
+        // sometimes bounds between two stored values: one digit finer
+        // than the column keeps
+        if matches!(column.values, Gen::Decimal(..)) && rng.chance(50) {
+            for bound in [&mut a, &mut b] {
+                if let Json::String(text) = bound {
+                    text.push('5');
+                }
+            }
+        }
+        Cond::Range(a, b)
+    } else {
+        let mut picked: Vec<Json> = (0..=rng.below(3))
+            .map(|_| rng.pick(values).clone())
+            .collect();
+        if rng.chance(10) && matches!(column.values, Gen::Choice(_) | Gen::Key(..) | Gen::Ref(_)) {
+            picked.push(json!("nothing"));
+        }
+        Cond::In(picked)
+    }
+}
+
+/// Sometimes a search of a derived string field, evaluated per dictionary
+/// value.
+fn derived_search(rng: &mut Rng, schema: &Schema) -> Option<(String, String, Cond)> {
+    if !rng.chance(15) {
+        return None;
+    }
+    let text: Vec<&DerivedField> = schema
+        .derived
+        .iter()
+        .filter(|d| ["upper_name", "named", "status_or_none"].contains(&d.name.as_str()))
+        .collect();
+    if text.is_empty() {
+        return None;
+    }
+    let field = *rng.pick(&text);
+    let needle = *rng.pick(&["n", "NN", "o", "none", "ANN", "b", "body"]);
+    Some((
+        field.table.clone(),
+        field.name.clone(),
+        Cond::Contains(needle.into()),
+    ))
+}
+
+/// A needle cut from a stored value: sometimes in other case, sometimes
+/// not there at all, now and then empty.
+fn needle(rng: &mut Rng, values: &[Json]) -> String {
+    if rng.chance(10) {
+        return if rng.chance(50) {
+            String::new()
+        } else {
+            "zq".into()
+        };
+    }
+    let text = |v: &Json| {
+        v.as_str()
+            .unwrap_or_default()
+            .chars()
+            .collect::<Vec<char>>()
+    };
+    // the end of one value and the start of another: found only where a
+    // row really holds both, never across two neighbouring rows
+    if rng.chance(25) {
+        let (a, b) = (text(rng.pick(values)), text(rng.pick(values)));
+        let tail = a.len().saturating_sub(1 + rng.below(3));
+        let head = (1 + rng.below(3)).min(b.len());
+        return a[tail..].iter().chain(&b[..head]).collect();
+    }
+    let chars = text(rng.pick(values));
+    let from = rng.below(chars.len().max(1));
+    let to = (from + 1 + rng.below(6)).min(chars.len());
+    let cut: String = chars.get(from..to).unwrap_or_default().iter().collect();
+    match rng.below(4) {
+        0 => cut.to_ascii_uppercase(),
+        1 => cut.to_ascii_lowercase(),
+        _ => cut,
     }
 }
 

@@ -1,0 +1,9 @@
+# Postgres' severities in order, with the level people filter by. Written
+# whole by the shipper when it starts.
+name: severities
+mode: upsert
+primary_key: [severity]
+columns:
+  severity: { type: string }
+  rank:     { type: int32 }       # DEBUG is 0, PANIC 7
+  level:    { type: string }      # debug, info, warning, error, fatal

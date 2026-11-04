@@ -296,6 +296,14 @@ case!(
 // --- metrics -------------------------------------------------------------------
 
 case!(
+    metric_format_unknown_word,
+    [Replace(
+        "model.ossie.yaml",
+        "data: '{\"table\": \"orders\"}'",
+        "data: '{\"table\": \"orders\", \"format\": \"int compakt\"}'"
+    )]
+);
+case!(
     metric_without_aggregate,
     [Replace(
         "model.ossie.yaml",
@@ -449,6 +457,22 @@ case!(
 
 // --- dashboards ------------------------------------------------------------------
 
+case!(
+    dashboard_format_for_a_metric_not_shown,
+    [Replace(
+        "dashboards/sales.yaml",
+        "format: { revenue: compact }",
+        "format: { revenu: compact }"
+    )]
+);
+case!(
+    dashboard_format_unknown_word,
+    [Replace(
+        "dashboards/sales.yaml",
+        "format: { revenue: compact }",
+        "format: { revenue: compact millions }"
+    )]
+);
 case!(
     dashboard_unknown_metric,
     [Replace(
@@ -916,5 +940,56 @@ case!(
         "tables/customers.yaml",
         "  customer_id: { type: string }",
         "  customer_id: { type: string, filled: credential }"
+    )]
+);
+
+// --- text search and rows (plan §5.7) ----------------------------------------
+
+case!(
+    search_on_a_number,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "  - field: orders.status\n",
+        "  - field: orders.quantity\n    widget: search\n"
+    )]
+);
+case!(
+    rows_with_metrics,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "    limit: 50\n",
+        "    metrics: [order_count]\n    limit: 50\n"
+    )]
+);
+case!(
+    rows_without_columns,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "    dimensions: [orders.ordered_at, customers.name, orders.status, orders.amount, orders.note]\n",
+        ""
+    )]
+);
+case!(
+    rows_over_the_limit,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "    limit: 50\n",
+        "    limit: 5000\n"
+    )]
+);
+case!(
+    rows_with_a_grain,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "[orders.ordered_at, customers.name,",
+        "[{ field: orders.ordered_at, grain: day }, customers.name,"
+    )]
+);
+case!(
+    rows_with_a_sort,
+    [Replace(
+        "dashboards/shipping_notes.yaml",
+        "    limit: 50\n",
+        "    sort: { by: orders.amount, desc: true }\n    limit: 50\n"
     )]
 );

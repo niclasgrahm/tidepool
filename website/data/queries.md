@@ -50,10 +50,30 @@ With no dimensions, the answer is exactly one row, as in SQL.
   relative to the clock of the server: today and the six days before it.
   `ago: 1` ends the window one period earlier. See
   [relative time windows](/project/selections#relative-time-windows).
+- `{"field": …, "contains": "timeout"}` keeps the rows whose value of a
+  string field contains the text. The case of the letters A to Z does not
+  matter. See [search](/project/selections#search).
 
 Filters go the way selections go on a dashboard. A metric is filtered by the
 fields that its anchor reaches through many-to-one relationships. With
 `filter_direction: both`, also the other way.
+
+## rows
+
+`POST /v1/rows` gives the rows themselves: the newest rows of a table that
+pass the filters, the newest first. `fields` are the columns. The filters
+are the filters of a query.
+
+```json
+{
+  "fields": ["orders.ordered_at", "customers.name", "orders.note"],
+  "filters": [{"field": "orders.note", "contains": "door"}],
+  "limit": 20
+}
+```
+
+The answer has the shape of a query answer, with one column for each field.
+`limit` is 100 by default, and 1000 at most. Add `?format=csv` to get CSV.
 
 ## the answer
 

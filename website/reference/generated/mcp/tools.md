@@ -24,15 +24,28 @@ The newest rows of a table.
 
 **Query metrics** · read only
 
-Metrics grouped by fields (`dataset.field`, time fields with a grain: day, week, month, quarter, year), under filters (`in` a list, or `from`/`to` a half-open range), sorted and limited. The body of POST /v1/query.
+Metrics grouped by fields (`dataset.field`, time fields with a grain: day, week, month, quarter, year), under filters (`in` a list, `from`/`to` a half-open range, or `contains` a text, for a string field, ignoring the case of ASCII letters), sorted and limited. The body of POST /v1/query.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `dimensions` | list of object with `field`, `grain` |  |  |
-| `filters` | list of object with `field`, `from`, `in`, `to` |  |  |
+| `filters` | list of object with `contains`, `field`, `from`, `in`, `to` |  |  |
 | `limit` | integer |  |  |
 | `metrics` | list of string | **required** |  |
 | `sort` | list of object with `column`, `desc` |  |  |
+
+
+## `read_rows` {#tool-read-rows}
+
+**Read the newest rows** · read only
+
+The newest rows of a table that pass filters, newest first: the fields to show (`dataset.field`, of one table and the tables it reaches), and filters as in query_metrics. A `contains` filter on a log line's text finds the lines that mention something. The body of POST /v1/rows.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `fields` | list of string | **required** |  |
+| `filters` | list of object with `contains`, `field`, `from`, `in`, `to` |  |  |
+| `limit` | integer | `100` |  |
 
 
 ## `get_config` {#tool-get-config}

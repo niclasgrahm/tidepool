@@ -14,6 +14,10 @@
 //!   morsel-sized chunks filled the first time a scan reads them. Reading a
 //!   related field then costs one sequential byte (or two) per row, instead
 //!   of a key decode and a random lookup.
+//! - **Text hits** (plan §5.7): which rows of a plain string column of one
+//!   segment contain a needle, a bitset per morsel filled the first time a
+//!   scan reads it. A needle that contains an earlier one searches only the
+//!   rows that one found.
 //! - **Results**, per epoch: a selection toggled back is answered at once.
 
 use std::collections::{HashMap, VecDeque};
@@ -24,6 +28,7 @@ use tidepool_store::dict::DictSnapshot;
 use tidepool_store::store::{ColumnLayout, DictId, SegmentData, TableSnapshot};
 
 use crate::derived::DerivedDict;
+use crate::text::Needle;
 
 use crate::fast::{Incremental, MORSEL, Map};
 use crate::query::ResultSet;
@@ -76,6 +81,52 @@ impl JoinColumn {
     }
 }
 
+/// The rows of one segment's string column containing a needle: a bitset
+/// per morsel (bit `r` for the morsel's row `r`), filled on first read.
+pub(crate) struct TextHits {
+    pub needle: Arc<Needle>,
+    chunks: Box<[OnceLock<Box<[u64]>>]>,
+    /// Hits of a needle this one contains, when it was cached: in a morsel
+    /// it has, only its hits need searching.
+    pub wider: Option<Arc<TextHits>>,
+}
+
+impl TextHits {
+    fn new(rows: usize, needle: Arc<Needle>, wider: Option<Arc<TextHits>>) -> Self {
+        Self {
+            needle,
+            chunks: (0..rows.div_ceil(MORSEL))
+                .map(|_| OnceLock::new())
+                .collect(),
+            wider,
+        }
+    }
+
+    /// The bits of the morsel from `start` (a multiple of [`MORSEL`]),
+    /// built by `build` the first time.
+    pub(crate) fn chunk(&self, start: usize, build: impl FnOnce() -> Box<[u64]>) -> Option<&[u64]> {
+        self.chunks
+            .get(start / MORSEL)
+            .map(|c| &**c.get_or_init(build))
+    }
+
+    /// The bits of the morsel from `start`, if they were built.
+    pub(crate) fn built(&self, start: usize) -> Option<&[u64]> {
+        self.chunks
+            .get(start / MORSEL)
+            .and_then(OnceLock::get)
+            .map(|b| &**b)
+    }
+
+    fn bytes(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter_map(OnceLock::get)
+            .map(|b| b.len() * 8)
+            .sum()
+    }
+}
+
 /// Identifies a relationship map: the tables along the path (by identity),
 /// the foreign-key column of each hop, and the target column.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -104,12 +155,25 @@ struct JoinEntry {
     column: Arc<JoinColumn>,
 }
 
+/// A text hits entry's key: (segment, column, folded needle).
+type TextKey = (usize, usize, Vec<u8>);
+
+struct TextEntry {
+    segment: Weak<SegmentData>,
+    hits: Arc<TextHits>,
+    tick: u64,
+}
+
 #[derive(Default)]
 struct Inner {
+    /// Text hits by (segment, column, folded needle).
+    texts: HashMap<TextKey, TextEntry>,
     maps: HashMap<MapKey, MapEntry>,
     joins: HashMap<(usize, usize), JoinEntry>,
     /// Hierarchies' trees, by their table's identity.
     hierarchies: HashMap<usize, HierarchyEntry>,
+    /// The general path's key indexes, by their table's identity.
+    key_indexes: HashMap<usize, (Weak<TableSnapshot>, Arc<crate::exec::KeyIndex>)>,
     /// Derived dictionaries per (base dictionary, expression). Codes never
     /// change, so an entry stays valid; it is extended as its base grows.
     /// Keyed by the dictionary's generation too: a model change can build
@@ -118,6 +182,8 @@ struct Inner {
     /// Anchor answers kept to be brought up to date, by plan, with the
     /// tick they were last used at.
     anchors: HashMap<String, (u64, Incremental)>,
+    /// `rows` answers kept the same way.
+    rows: HashMap<String, (u64, crate::rows::Kept)>,
     tick: u64,
     /// (epoch, query) → answer, oldest first; only the newest epoch's.
     results: VecDeque<((u64, String), ResultSet)>,
@@ -139,6 +205,9 @@ const ANCHORS: usize = 256;
 
 /// Results kept per epoch.
 const RESULTS: usize = 256;
+
+/// Bytes of text hits kept, at most: 64 MB is a search over 512M rows.
+const TEXT_BYTES: usize = 64 << 20;
 
 fn address<T: ?Sized>(arc: &Arc<T>) -> usize {
     Arc::as_ptr(arc).cast::<()>() as usize
@@ -224,6 +293,25 @@ impl Caches {
         Some(tree)
     }
 
+    /// The key index of `table`, built by `build` unless the table is
+    /// unchanged since it last was.
+    pub(crate) fn key_index(
+        &self,
+        table: &Arc<TableSnapshot>,
+        build: impl FnOnce() -> crate::exec::KeyIndex,
+    ) -> Arc<crate::exec::KeyIndex> {
+        if let Some((known, index)) = self.lock().key_indexes.get(&address(table))
+            && known.upgrade().is_some_and(|t| Arc::ptr_eq(&t, table))
+        {
+            return Arc::clone(index);
+        }
+        let index = Arc::new(build());
+        self.lock()
+            .key_indexes
+            .insert(address(table), (Arc::downgrade(table), Arc::clone(&index)));
+        index
+    }
+
     /// The derived dictionary of `expr` over `dict`, covering every code.
     pub(crate) fn derived(
         &self,
@@ -281,6 +369,57 @@ impl Caches {
         column
     }
 
+    /// The hits of `needle` in column `column` of `segment`, empty until
+    /// scanned; with the hits of the longest cached needle it contains.
+    pub(crate) fn text(
+        &self,
+        segment: &Arc<SegmentData>,
+        column: usize,
+        needle: &Arc<Needle>,
+    ) -> Arc<TextHits> {
+        let at = address(segment);
+        let key = (at, column, needle.folded().to_vec());
+        let mut inner = self.lock();
+        inner.tick += 1;
+        let tick = inner.tick;
+        if let Some(entry) = inner.texts.get_mut(&key)
+            && entry
+                .segment
+                .upgrade()
+                .is_some_and(|s| Arc::ptr_eq(&s, segment))
+        {
+            entry.tick = tick;
+            return Arc::clone(&entry.hits);
+        }
+        let wider = inner
+            .texts
+            .iter()
+            .filter(|((s, c, _), e)| {
+                *s == at
+                    && *c == column
+                    && e.segment
+                        .upgrade()
+                        .is_some_and(|s| Arc::ptr_eq(&s, segment))
+                    && needle.narrows(&e.hits.needle)
+            })
+            .max_by_key(|(_, e)| e.hits.needle.folded().len())
+            .map(|(_, e)| Arc::clone(&e.hits));
+        let hits = Arc::new(TextHits::new(
+            segment.rows as usize,
+            Arc::clone(needle),
+            wider,
+        ));
+        inner.texts.insert(
+            key,
+            TextEntry {
+                segment: Arc::downgrade(segment),
+                hits: Arc::clone(&hits),
+                tick,
+            },
+        );
+        hits
+    }
+
     /// Drop entries whose sources are gone, and join columns past budget.
     pub(crate) fn sweep(&self) {
         let mut inner = self.lock();
@@ -291,6 +430,27 @@ impl Caches {
             .joins
             .retain(|_, e| e.segment.strong_count() > 0 && e.map.strong_count() > 0);
         inner.hierarchies.retain(|_, e| e.table.strong_count() > 0);
+        inner.key_indexes.retain(|_, (t, _)| t.strong_count() > 0);
+        inner.texts.retain(|_, e| e.segment.strong_count() > 0);
+        // the least recently used hits past their budget (a narrower
+        // needle's `wider` keeps what it uses alive meanwhile)
+        let mut held: usize = inner.texts.values().map(|e| e.hits.bytes()).sum();
+        if held > TEXT_BYTES {
+            let mut ticks: Vec<(u64, TextKey)> = inner
+                .texts
+                .iter()
+                .map(|(k, e)| (e.tick, k.clone()))
+                .collect();
+            ticks.sort_unstable();
+            for (_, key) in ticks {
+                if held <= TEXT_BYTES {
+                    break;
+                }
+                if let Some(entry) = inner.texts.remove(&key) {
+                    held = held.saturating_sub(entry.hits.bytes());
+                }
+            }
+        }
         let bytes: usize = inner.joins.values().map(|e| e.column.bytes()).sum();
         if bytes > self.join_budget {
             inner.joins.clear();
@@ -358,6 +518,36 @@ impl Caches {
         }
     }
 
+    /// The kept answer of a `rows` query, taken out while it's brought up
+    /// to date.
+    pub(crate) fn take_rows(&self, key: &str) -> Option<crate::rows::Kept> {
+        self.lock().rows.remove(key).map(|(_, kept)| kept)
+    }
+
+    /// Keep a `rows` answer; the least recently used go past [`ANCHORS`].
+    pub(crate) fn keep_rows(&self, key: String, kept: crate::rows::Kept) {
+        let mut inner = self.lock();
+        inner.tick += 1;
+        let tick = inner.tick;
+        if inner
+            .rows
+            .get(&key)
+            .is_some_and(|(_, k)| k.epoch() > kept.epoch())
+        {
+            return;
+        }
+        inner.rows.insert(key, (tick, kept));
+        if inner.rows.len() > ANCHORS
+            && let Some(oldest) = inner
+                .rows
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+        {
+            inner.rows.remove(&oldest);
+        }
+    }
+
     /// A message computed earlier in `epoch`.
     pub(crate) fn message(&self, epoch: u64, key: &str) -> Option<Arc<crate::query::ValueSet>> {
         let inner = self.lock();
@@ -388,6 +578,7 @@ impl Caches {
                 .values()
                 .map(|(_, k)| k.bytes())
                 .sum::<usize>()
+            + inner.texts.values().map(|e| e.hits.bytes()).sum::<usize>()
     }
 
     /// Bytes held by join columns, for status pages and tests.

@@ -175,29 +175,57 @@ scenario!(
         "status:      { type: string, encoding: plain }"
     )]
 );
+// the notes dashboard goes with the column it searches
 scenario!(
     drop_a_column,
-    [Replace(
-        "tables/orders.yaml",
-        "  note:        { type: string, nullable: true, encoding: plain }\n",
-        ""
-    )]
+    [
+        Replace(
+            "tables/orders.yaml",
+            "  note:        { type: string, nullable: true, encoding: plain }\n",
+            ""
+        ),
+        Remove("dashboards/shipping_notes.yaml"),
+    ]
 );
 scenario!(
     rename_a_column,
-    [Replace(
-        "tables/orders.yaml",
-        "  note:        { type: string, nullable: true, encoding: plain }",
-        "  comment:     { type: string, nullable: true, encoding: plain, renamed_from: note }"
-    )]
+    [
+        Replace(
+            "tables/orders.yaml",
+            "  note:        { type: string, nullable: true, encoding: plain }",
+            "  comment:     { type: string, nullable: true, encoding: plain, renamed_from: note }"
+        ),
+        Replace(
+            "dashboards/shipping_notes.yaml",
+            "field: orders.note",
+            "field: orders.comment"
+        ),
+        Replace(
+            "dashboards/shipping_notes.yaml",
+            ", orders.note]",
+            ", orders.comment]"
+        ),
+    ]
 );
 scenario!(
     rename_a_column_without_saying_so,
-    [Replace(
-        "tables/orders.yaml",
-        "  note:        { type: string, nullable: true, encoding: plain }",
-        "  comment:     { type: string, nullable: true, encoding: plain }"
-    )]
+    [
+        Replace(
+            "tables/orders.yaml",
+            "  note:        { type: string, nullable: true, encoding: plain }",
+            "  comment:     { type: string, nullable: true, encoding: plain }"
+        ),
+        Replace(
+            "dashboards/shipping_notes.yaml",
+            "field: orders.note",
+            "field: orders.comment"
+        ),
+        Replace(
+            "dashboards/shipping_notes.yaml",
+            ", orders.note]",
+            ", orders.comment]"
+        ),
+    ]
 );
 const STORES: &str = "name: stores\nmode: upsert\nprimary_key: [store_id]\ncolumns:\n  store_id: { type: string }\n  region:   { type: string }\n";
 scenario!(

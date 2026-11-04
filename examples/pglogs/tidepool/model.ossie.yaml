@@ -1,0 +1,46 @@
+version: "0.2.0"
+name: pglogs
+datasets:
+  - name: logs
+    source: logs
+    fields:
+      - name: logged_at
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: logged_at }] }
+        datatype: DateTimeTz
+        dimension: { is_time: true }
+  - name: severities
+    source: severities
+  - name: sqlstates
+    source: sqlstates
+relationships:
+  - name: log_severity
+    from: logs
+    to: severities
+    from_columns: [severity]
+    to_columns: [severity]
+  - name: log_sqlstate
+    from: logs
+    to: sqlstates
+    from_columns: [sqlstate]
+    to_columns: [code]
+metrics:
+  - name: lines
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "logs", "format": "compact"}'
+  - name: problems
+    description: Errors and worse
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*) FILTER (WHERE severities.level IN ('error', 'fatal'))" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"table": "logs"}'
+  - name: problem_share
+    description: Problems per line
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "problems / lines" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent decimals:1"}'
+  - name: backends
+    description: Server processes that logged
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT logs.pid)" }] }

@@ -54,7 +54,6 @@ RUN groupadd --gid 10001 tidepool \
 COPY --from=builder /out/tidepool /usr/local/bin/tidepool
 # the AGPL asks for its text to travel with the binary
 COPY LICENSE licensing.md /usr/share/tidepool/
-COPY frontend/vendor/echarts-LICENSE.txt /usr/share/tidepool/
 
 # The default project: the retail example, writable so changes made in the
 # UI can be written back. Mount your own over /project.

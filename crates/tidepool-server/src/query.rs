@@ -1,4 +1,4 @@
-//! `POST /v1/query`: the engine over HTTP. Documented in the endpoint table,
+//! `POST /v1/query` and `POST /v1/rows`: the engine over HTTP. Documented in the endpoint table,
 //! like every handler.
 //!
 //! Requests name things the way the semantic layer does (`dataset.field`,
@@ -15,13 +15,17 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value as Json_;
 use tidepool_config::diag::suggest;
 use tidepool_config::ossie::TimeGrain;
-use tidepool_engine::{Condition, Dim, Order, Query, Relative, ResultSet, Role, Selection};
+use tidepool_engine::{
+    Condition, Dim, MAX_ROWS, Needle, Order, Query, Relative, ResultSet, Role, RowsQuery, Selection,
+};
 use tidepool_expr::temporal::{Part, parse_date, parse_timestamp, parse_timestamptz};
 use tidepool_expr::{Scalar, Type};
 use tidepool_model::ir::{FieldRef, Model};
 use tidepool_protocol::api_docs::ApiError;
 use tidepool_protocol::live::{RelativeUnit, RelativeWindow};
-use tidepool_protocol::{QueryColumn, QueryDimension, QueryFilter, QueryRequest, QueryResult};
+use tidepool_protocol::{
+    QueryColumn, QueryDimension, QueryFilter, QueryRequest, QueryResult, RowsRequest,
+};
 use tidepool_store::value::{format_date, format_decimal, format_timestamp};
 
 use crate::AppState;
@@ -108,6 +112,8 @@ fn decimal(text: &str) -> Option<Scalar> {
     Some(Scalar::Decimal(value, u8::try_from(fraction.len()).ok()?))
 }
 
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
 /// A JSON value as a value of type `ty`.
 pub(crate) fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
     if value.is_null() {
@@ -124,7 +130,19 @@ pub(crate) fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
         Type::Float => text.parse().ok().map(Scalar::Float),
         Type::Decimal(_) => decimal(&text),
         Type::String => value.as_str().map(|s| Scalar::String(s.to_string())),
-        Type::Date => value.as_str().and_then(parse_date).map(Scalar::Date),
+        // a date, or midnight UTC of one: what a brush across days at a
+        // grain sends, whatever the field's type
+        Type::Date => value
+            .as_str()
+            .and_then(|text| {
+                parse_date(text).or_else(|| {
+                    let micros = parse_timestamptz(text)?;
+                    (micros.rem_euclid(MICROS_PER_DAY) == 0)
+                        .then(|| i32::try_from(micros.div_euclid(MICROS_PER_DAY)).ok())
+                        .flatten()
+                })
+            })
+            .map(Scalar::Date),
         Type::Timestamp => value
             .as_str()
             .and_then(parse_timestamp)
@@ -176,6 +194,19 @@ fn condition(filter: &QueryFilter, ty: Type, now: i64) -> Result<Condition, Stri
         scalar(v, ty)
             .ok_or_else(|| format!("`{v}` isn't a value of `{}` ({})", filter.field, ty.a()))
     };
+    if let Some(text) = &filter.contains {
+        if filter.values.is_some()
+            || filter.from.is_some()
+            || filter.to.is_some()
+            || filter.relative.is_some()
+        {
+            return Err(format!(
+                "the filter on `{}` has `contains` and another condition: one per field",
+                filter.field
+            ));
+        }
+        return contains(&filter.field, text, ty);
+    }
     match (&filter.values, &filter.from, &filter.to, filter.relative) {
         (Some(values), None, None, None) => Ok(Condition::In(
             values.iter().map(convert).collect::<Result<_, _>>()?,
@@ -186,10 +217,21 @@ fn condition(filter: &QueryFilter, ty: Type, now: i64) -> Result<Condition, Stri
         }),
         (None, None, None, Some(window)) => window_condition(&filter.field, window, ty, now),
         _ => Err(format!(
-            "the filter on `{}` needs one of `in`, `from` and/or `to`, or `relative`",
+            "the filter on `{}` needs one of `in`, `from` and/or `to`, `relative` or `contains`",
             filter.field
         )),
     }
+}
+
+/// A search of string field `name` for `text` (plan §5.7).
+pub(crate) fn contains(name: &str, text: &str, ty: Type) -> Result<Condition, String> {
+    if ty != Type::String {
+        return Err(format!(
+            "`{name}` is {}, not a string, so it can't be searched",
+            ty.a()
+        ));
+    }
+    Ok(Condition::Contains(Arc::new(Needle::new(text))))
 }
 
 fn dimension_name(dim: &QueryDimension) -> String {
@@ -197,6 +239,23 @@ fn dimension_name(dim: &QueryDimension) -> String {
         Some(grain) => format!("{}:{grain}", dim.field),
         None => dim.field.clone(),
     }
+}
+
+/// The engine's selection for a request's filters, with windows relative
+/// to `now`.
+fn selection(model: &Model, filters: &[QueryFilter], now: i64) -> Result<Selection, String> {
+    let mut selection = Selection::default();
+    for filter in filters {
+        let (at, ty) = field(model, &filter.field)?;
+        if selection
+            .0
+            .insert(at, condition(filter, ty, now)?)
+            .is_some()
+        {
+            return Err(format!("`{}` is filtered twice", filter.field));
+        }
+    }
+    Ok(selection)
 }
 
 /// The engine's query for a request, with windows relative to `now`
@@ -234,17 +293,7 @@ pub(crate) fn resolve(model: &Model, request: &QueryRequest, now: i64) -> Result
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut selection = Selection::default();
-    for filter in &request.filters {
-        let (at, ty) = field(model, &filter.field)?;
-        if selection
-            .0
-            .insert(at, condition(filter, ty, now)?)
-            .is_some()
-        {
-            return Err(format!("`{}` is filtered twice", filter.field));
-        }
-    }
+    let selection = selection(model, &request.filters, now)?;
     let names: Vec<String> = request
         .dimensions
         .iter()
@@ -430,10 +479,119 @@ pub async fn query(
     }
 }
 
+/// The engine's `rows` query for a request.
+pub(crate) fn resolve_rows(
+    model: &Model,
+    request: &RowsRequest,
+    now: i64,
+) -> Result<RowsQuery, String> {
+    if request.fields.is_empty() {
+        return Err("`fields` is empty: name the fields to show of each row".into());
+    }
+    if let Some(limit) = request.limit
+        && limit > MAX_ROWS
+    {
+        return Err(format!("`limit` is {limit}: {MAX_ROWS} rows at most"));
+    }
+    Ok(RowsQuery {
+        fields: request
+            .fields
+            .iter()
+            .map(|name| field(model, name).map(|(at, _)| at))
+            .collect::<Result<_, _>>()?,
+        selection: selection(model, &request.filters, now)?,
+        limit: request.limit.unwrap_or(DEFAULT_ROWS),
+    })
+}
+
+/// Rows a `rows` request or visual shows when it doesn't say.
+pub(crate) const DEFAULT_ROWS: usize = 100;
+
+/// Rows as a result: one column per field, named as the request names it.
+pub(crate) fn rows_result(fields: &[String], answer: &ResultSet, epoch: u64) -> QueryResult {
+    QueryResult {
+        columns: answer
+            .columns
+            .iter()
+            .zip(fields)
+            .map(|(column, name)| QueryColumn {
+                name: name.clone(),
+                ty: type_name(column.ty),
+                role: "dimension".into(),
+            })
+            .collect(),
+        rows: answer
+            .rows
+            .iter()
+            .map(|row| row.iter().map(json).collect())
+            .collect(),
+        epoch,
+    }
+}
+
+/// The newest rows. See `Operation::Rows` in the endpoint table.
+pub async fn rows(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(format): axum::extract::Query<Format>,
+    Json(request): Json<RowsRequest>,
+) -> Response {
+    let as_csv = match format.format.as_deref() {
+        None | Some("json") => false,
+        Some("csv") => true,
+        Some(other) => return bad_request(format!("unknown format `{other}`: json or csv")),
+    };
+    let snapshot = state.writer.snapshot();
+    let query = match resolve_rows(&snapshot.model, &request, state.clock.now()) {
+        Ok(query) => query,
+        Err(message) => return bad_request(message),
+    };
+    let epoch = snapshot.epoch;
+    let engine = Arc::clone(&state.engine);
+    let started = std::time::Instant::now();
+    let answer = tokio::task::spawn_blocking(move || engine.rows(&snapshot, &query)).await;
+    state.counters.queries.record(started.elapsed());
+    match answer {
+        Ok(Ok(answer)) if as_csv => (
+            [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+            csv(&rows_result(&request.fields, &answer, epoch)),
+        )
+            .into_response(),
+        Ok(Ok(answer)) => Json(rows_result(&request.fields, &answer, epoch)).into_response(),
+        Ok(Err(error)) => {
+            state
+                .counters
+                .query_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            bad_request(error.to_string())
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "reading the rows failed".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tidepool_protocol::QueryColumn;
+
+    #[test]
+    fn a_date_is_a_date_or_its_midnight() {
+        let date = |text: &str| scalar(&Json_::String(text.into()), Type::Date);
+        let day = parse_date("2026-09-22").map(Scalar::Date);
+        assert!(day.is_some());
+        assert_eq!(date("2026-09-22"), day);
+        assert_eq!(date("2026-09-22T00:00:00Z"), day);
+        assert_eq!(date("2026-09-22T00:00:00"), day);
+        // any other time isn't a date
+        assert_eq!(date("2026-09-22T10:30:00Z"), None);
+        assert_eq!(date("2026-09-22T00:00:00+02:00"), None);
+        assert_eq!(date("soon"), None);
+    }
 
     #[test]
     fn csv_quotes_what_needs_it_and_leaves_nulls_empty() {

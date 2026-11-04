@@ -4,7 +4,7 @@ What a metric's Tidepool extension may say.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
-| `format` | string |  | Display hint: `int`, `decimal`, `percent`, or `currency:XXX`. |
+| `format` | string |  | How the value shows: a style (`int`, `decimal`, `percent` or `currency:XXX`), `compact` and `decimals:N`, in any order: `currency:EUR compact`. A visual can set a different format. |
 | `ignore_selection` | list of string |  | Evaluate as if these fields (`dataset.field`, or `*` for all) had no selection. |
 | `kind` | [`MetricKind`](#metric-extension-metrickind) |  | `derived`: the expression is over other metrics, evaluated after aggregation (e.g. `revenue / order_count`). |
 | `table` | string |  | The dataset rows are counted on, for expressions that don't name one (`COUNT(*)`). |

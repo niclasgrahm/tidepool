@@ -14,9 +14,12 @@
 //! - **groups** get dense ids when every dimension is a dictionary code and
 //!   the combinations are few, and a small hash map otherwise.
 //!
+//! - **text searches** on plain string columns run over the segment's byte
+//!   arena a morsel at a time (`crate::text`), their hits cached per segment.
+//!
 //! [`prepare`] decides whether a plan qualifies; anything it can't do (derived
-//! fields, computed arguments, `SUM(DISTINCT …)`, plain-string columns) falls
-//! back to the general path. The oracle runs with the fast path both on and
+//! fields, computed arguments, `SUM(DISTINCT …)`, plain-string columns read
+//! for anything but a search) falls back to the general path. The oracle runs with the fast path both on and
 //! off, so both stay checked against DuckDB.
 
 use std::collections::{HashMap, HashSet};
@@ -37,11 +40,12 @@ use tidepool_store::dict::{DictSnapshot, DictValue};
 use tidepool_store::store::{ColumnLayout, SegmentView, Snapshot, TableSnapshot};
 use tidepool_store::value::{Storage, Value};
 
-use crate::cache::{Caches, JoinColumn, Narrow};
+use crate::cache::{Caches, JoinColumn, Narrow, TextHits};
 use crate::derived::DerivedDict;
 use crate::exec::scalar;
 use crate::plan::{AnchorPlan, Target};
 use crate::query::Condition;
+use crate::text::Needle;
 
 const MAX_DIMS: usize = 4;
 /// Largest number of group combinations given dense ids.
@@ -52,6 +56,8 @@ enum Kind {
     Codes,
     Ints,
     Floats,
+    /// A plain string column: only searched (`Test::Text`), never decoded.
+    Text,
 }
 
 /// How to read one access per anchor row.
@@ -98,6 +104,7 @@ fn kind_of(layout: &ColumnLayout) -> Option<Kind> {
         (true, _) => Some(Kind::Codes),
         (false, Storage::I64) => Some(Kind::Ints),
         (false, Storage::F64) => Some(Kind::Floats),
+        (false, Storage::Str) => Some(Kind::Text),
         _ => None,
     }
 }
@@ -122,6 +129,12 @@ enum Test {
     IntIn(HashSet<i64>),
     IntRange(Option<i64>, Option<i64>),
     Floats(Condition),
+    /// A search of a plain string column, with its hits per anchor segment
+    /// when the engine caches them.
+    Text {
+        needle: Arc<Needle>,
+        hits: Option<Vec<Arc<TextHits>>>,
+    },
 }
 
 struct Agg {
@@ -242,6 +255,10 @@ pub(crate) fn prepare<'s>(
         let target = snapshot.table(target_table)?;
         let layout = target.layouts.get(target_column)?.clone();
         let kind = kind_of(&layout)?;
+        // text is searched where it's stored: the anchor's own column
+        if kind == Kind::Text && (!access.path.is_empty() || expr.is_some()) {
+            return None;
+        }
         let dict = layout.dict.and_then(|d| snapshot.dicts.get(&d));
         let derived = match (expr, &access.target) {
             (None, Target::Ancestor { depth, .. }) => {
@@ -348,12 +365,31 @@ pub(crate) fn prepare<'s>(
         });
     }
 
-    let conditions = plan
+    let mut conditions = plan
         .conditions
         .iter()
         .map(|(access, condition)| {
             let read = &reads[*access];
             let test = match read.kind {
+                Kind::Text => {
+                    let Condition::Contains(needle) = condition else {
+                        return None;
+                    };
+                    let hits = caches.and_then(|caches| {
+                        let anchor = snapshot.table(plan.table)?;
+                        Some(
+                            anchor
+                                .segments
+                                .iter()
+                                .map(|s| caches.text(&s.data, read.column, needle))
+                                .collect(),
+                        )
+                    });
+                    Test::Text {
+                        needle: Arc::clone(needle),
+                        hits,
+                    }
+                }
                 Kind::Codes => Test::Codes(
                     (0..code_space(read))
                         .map(|c| condition.matches(&read.code_value(u32::try_from(c).unwrap_or(0))))
@@ -380,6 +416,7 @@ pub(crate) fn prepare<'s>(
                             .map(|(raw, _)| raw)
                             .collect(),
                     ),
+                    Condition::Contains(_) => return None,
                     Condition::Range { from, to } => {
                         let bound = |b: &Option<Scalar>| match b {
                             None => Some(None),
@@ -395,6 +432,9 @@ pub(crate) fn prepare<'s>(
             Some((*access, test))
         })
         .collect::<Option<Vec<_>>>()?;
+    // searches last: they cost the most per row, so the cheaper tests
+    // leave them fewer rows
+    conditions.sort_by_key(|(_, test)| matches!(test, Test::Text { .. }));
 
     let mut aggs = Vec::new();
     for agg in &plan.aggs {
@@ -411,6 +451,9 @@ pub(crate) fn prepare<'s>(
         };
         // what each function can do the fast way
         let arg_kind = arg.map(|a| reads[a].kind);
+        if arg_kind == Some(Kind::Text) {
+            return None;
+        }
         let ok = match (call.func, call.distinct, arg_kind) {
             (AggFunc::CountStar, _, _) => true,
             (AggFunc::Count, _, Some(_)) => true,
@@ -470,7 +513,7 @@ pub(crate) fn prepare<'s>(
         if part.is_some() && !temporal {
             return None;
         }
-        if read.kind == Kind::Floats && part.is_some() {
+        if read.kind == Kind::Floats && part.is_some() || read.kind == Kind::Text {
             return None;
         }
     }
@@ -713,6 +756,7 @@ fn scatter(
         Kind::Codes => Values::Codes(vec![0; keys]),
         Kind::Ints => Values::Ints(vec![0; keys], vec![true; keys]),
         Kind::Floats => Values::Floats(vec![0.0; keys], vec![true; keys]),
+        Kind::Text => return None,
     };
     let mut codes = Vec::new();
     for segment in stored.segments.iter() {
@@ -844,7 +888,8 @@ pub(crate) enum Values {
 impl Values {
     fn empty(kind: Kind) -> Self {
         match kind {
-            Kind::Codes => Self::Codes(Vec::new()),
+            // text is never decoded
+            Kind::Codes | Kind::Text => Self::Codes(Vec::new()),
             Kind::Ints => Self::Ints(Vec::new(), Vec::new()),
             Kind::Floats => Self::Floats(Vec::new(), Vec::new()),
         }
@@ -1519,9 +1564,12 @@ fn truncate(part: Part, days: i64, memo: &mut hashbrown::HashMap<(Part, i64), i6
     })
 }
 
+/// What a plan reads related and derived values through, per read.
+pub(crate) type Inputs = (Vec<Option<Arc<Map>>>, Vec<Option<Arc<DerivedDict>>>);
+
 /// Reusable buffers of one scanning task.
 #[derive(Default)]
-struct Scratch {
+pub(crate) struct Scratch {
     /// Decoded values per read, reused from morsel to morsel.
     buffers: Vec<Values>,
     loaded: Vec<bool>,
@@ -1532,6 +1580,136 @@ struct Scratch {
     /// Per aggregate: distinct-count bits not set yet.
     pending: Vec<Pending>,
     memo: hashbrown::HashMap<(Part, i64), i64>,
+    text: TextScratch,
+}
+
+impl Scratch {
+    /// The rows [`Prepared::select`] left, as offsets in its morsel.
+    pub(crate) fn selected(&self) -> &[u32] {
+        &self.sel
+    }
+}
+
+/// Buffers of a text search, reused from morsel to morsel.
+#[derive(Default)]
+pub(crate) struct TextScratch {
+    /// A morsel's text, lowercased.
+    folded: Vec<u8>,
+    bits: Vec<u64>,
+}
+
+/// Whether bit `r` is set.
+#[inline]
+fn bit(bits: &[u64], r: u32) -> bool {
+    bits.get(r as usize / 64)
+        .is_some_and(|w| w & (1 << (r % 64)) != 0)
+}
+
+/// A morsel's hits of `needle` in a string column: bit `r` for its row `r`.
+/// With the hits of a needle it narrows built for the morsel, only those
+/// rows are searched.
+fn morsel_hits(
+    column: &ColumnData,
+    needle: &Needle,
+    wider: Option<&[u64]>,
+    rows: Range<usize>,
+    scratch: &mut Vec<u8>,
+) -> Box<[u64]> {
+    let mut bits = vec![0u64; rows.len().div_ceil(64)];
+    let ColumnData::Str {
+        bytes,
+        offsets,
+        nulls,
+    } = column
+    else {
+        // a column added since (all NULL) holds nothing to find
+        return bits.into();
+    };
+    match wider {
+        Some(wider) => {
+            for r in 0..u32::try_from(rows.len()).unwrap_or(u32::MAX) {
+                if bit(wider, r) {
+                    let at = rows.start + r as usize;
+                    let text = &bytes[offsets[at] as usize..offsets[at + 1] as usize];
+                    if needle.is_in(text) {
+                        bits[r as usize / 64] |= 1 << (r % 64);
+                    }
+                }
+            }
+        }
+        None => needle.search(bytes, offsets, rows.clone(), scratch, &mut bits),
+    }
+    // NULLs are stored as empty strings, which only the empty needle is in
+    if let Some(nulls) = nulls
+        && needle.folded().is_empty()
+    {
+        for r in 0..rows.len() {
+            if nulls.get(rows.start + r) {
+                bits[r / 64] &= !(1 << (r % 64));
+            }
+        }
+    }
+    bits.into()
+}
+
+/// Keep the rows of `sel` (offsets from `rows.start`) whose text in
+/// `column` contains `needle`. Cached bits are used when built; otherwise a
+/// whole morsel is searched and cached, unless few rows are left, which are
+/// then searched one at a time.
+fn search(
+    column: &ColumnData,
+    needle: &Needle,
+    hits: Option<&TextHits>,
+    rows: Range<usize>,
+    sel: &mut Vec<u32>,
+    scratch: &mut TextScratch,
+) {
+    if sel.is_empty() {
+        return;
+    }
+    if let Some(bits) = hits.and_then(|h| h.built(rows.start)) {
+        return compact(sel, |r| bit(bits, r));
+    }
+    // a needle this one narrows: only its hits need searching, one at a
+    // time, which beats a search of the morsel only when they are few
+    let wider = hits
+        .and_then(|h| h.wider.as_ref())
+        .and_then(|w| w.built(rows.start))
+        .filter(|w| {
+            let found: u32 = w.iter().map(|word| word.count_ones()).sum();
+            (found as usize) * SPARSE < rows.len()
+        });
+    let sparse = sel.len() * SPARSE < rows.len();
+    if sparse {
+        let ColumnData::Str { bytes, offsets, .. } = column else {
+            sel.clear();
+            return;
+        };
+        let start = rows.start;
+        // NULLs are empty: only the empty needle is in them, and then the
+        // bitmap decides
+        let nulls = |r: u32| match column {
+            ColumnData::Str { nulls: Some(n), .. } => n.get(start + r as usize),
+            _ => false,
+        };
+        return compact(sel, |r| {
+            let at = start + r as usize;
+            wider.is_none_or(|w| bit(w, r))
+                && !nulls(r)
+                && needle.is_in(&bytes[offsets[at] as usize..offsets[at + 1] as usize])
+        });
+    }
+    if let Some(hits) = hits {
+        if let Some(bits) = hits.chunk(rows.start, || {
+            morsel_hits(column, needle, wider, rows.clone(), &mut scratch.folded)
+        }) {
+            compact(sel, |r| bit(bits, r));
+        }
+    } else {
+        scratch.bits = morsel_hits(column, needle, None, rows, &mut scratch.folded).into_vec();
+        let bits = &scratch.bits;
+        compact(sel, |r| bit(bits, r));
+    }
 }
 
 impl Prepared<'_> {
@@ -1621,23 +1799,19 @@ impl Prepared<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn scan(
+    /// The rows of a morsel `task` counts that pass every condition, as
+    /// offsets from `rows.start`, into `scratch.sel`: live rows from the
+    /// task's start (or its deleted ones). The reads the conditions needed
+    /// are left decoded in `scratch.buffers`.
+    pub(crate) fn select(
         &self,
-        partial: &mut Partial,
         table: &TableSnapshot,
         segment: usize,
         rows: Range<usize>,
         task: &Task,
-        ranks: &[Option<Vec<u32>>],
-        shared: &[Option<Bitset>],
         scratch: &mut Scratch,
     ) {
         let view = &table.segments[segment];
-        let weight = match task {
-            Task::Add { .. } => 1,
-            Task::Remove(_) => -1,
-        };
         // the selection: live rows passing every condition. Columns are
         // decoded as needed: a condition's before it filters, the rest after
         // the conditions, only at the rows left when few are.
@@ -1645,6 +1819,7 @@ impl Prepared<'_> {
             buffers,
             loaded,
             sel,
+            text,
             ..
         } = scratch;
         if buffers.len() != self.reads.len() {
@@ -1687,6 +1862,12 @@ impl Prepared<'_> {
             sel.retain(|r| *r >= skip);
         }
         for (read, test) in &self.conditions {
+            if let Test::Text { needle, hits } = test {
+                let hits = hits.as_ref().and_then(|h| h.get(segment)).map(|h| &**h);
+                let column = &view.data.columns[self.reads[*read].column];
+                search(column, needle, hits, rows.clone(), sel, text);
+                continue;
+            }
             if !loaded[*read] {
                 self.load(view, segment, *read, rows.clone(), sel, &mut buffers[*read]);
                 loaded[*read] = true;
@@ -1712,8 +1893,34 @@ impl Prepared<'_> {
                 _ => sel.clear(),
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn scan(
+        &self,
+        partial: &mut Partial,
+        table: &TableSnapshot,
+        segment: usize,
+        rows: Range<usize>,
+        task: &Task,
+        ranks: &[Option<Vec<u32>>],
+        shared: &[Option<Bitset>],
+        scratch: &mut Scratch,
+    ) {
+        let view = &table.segments[segment];
+        let weight = match task {
+            Task::Add { .. } => 1,
+            Task::Remove(_) => -1,
+        };
+        self.select(table, segment, rows.clone(), task, scratch);
+        let Scratch {
+            buffers,
+            loaded,
+            sel,
+            ..
+        } = scratch;
         for read in 0..self.reads.len() {
-            if !loaded[read] {
+            if !loaded[read] && self.reads[read].kind != Kind::Text {
                 self.load(view, segment, read, rows.clone(), sel, &mut buffers[read]);
             }
         }
@@ -1892,6 +2099,8 @@ impl Prepared<'_> {
             (None, Kind::Codes) => read.code_value(u32::try_from(part).unwrap_or(0)),
             (None, Kind::Ints) => scalar(Value::from_i64(read.layout.column_type, part)),
             (None, Kind::Floats) => Scalar::Float(f64::from_ne_bytes(part.to_ne_bytes())),
+            // `prepare` refuses text as a dimension
+            (None, Kind::Text) => Scalar::Null,
         }
     }
 
@@ -1919,6 +2128,48 @@ impl Prepared<'_> {
             .collect()
     }
 
+    /// What this plan reads related and derived values through: kept with
+    /// an answer, to tell whether it still applies ([`Self::same_reads`]).
+    pub(crate) fn inputs(&self) -> Inputs {
+        (
+            self.reads.iter().map(|r| r.gathered.clone()).collect(),
+            self.reads.iter().map(|r| r.derived.clone()).collect(),
+        )
+    }
+
+    /// Whether an answer built through `maps` and `derived` reads the same
+    /// values as this plan does: the same relationship maps, and derived
+    /// dictionaries that only grew.
+    pub(crate) fn same_reads(
+        &self,
+        maps: &[Option<Arc<Map>>],
+        derived: &[Option<Arc<DerivedDict>>],
+    ) -> bool {
+        let same_maps = maps.len() == self.reads.len()
+            && self
+                .reads
+                .iter()
+                .zip(maps)
+                .all(|(read, old)| match (&read.gathered, old) {
+                    (None, None) => true,
+                    (Some(map), Some(old)) => Arc::ptr_eq(map, old),
+                    _ => false,
+                });
+        let same_derived = derived.len() == self.reads.len()
+            && self
+                .reads
+                .iter()
+                .zip(derived)
+                .all(|(read, old)| match (&read.derived, old) {
+                    (None, None) => true,
+                    (Some(now), Some(old)) => {
+                        now.map.len() >= old.map.len() && now.map[..old.map.len()] == old.map[..]
+                    }
+                    _ => false,
+                });
+        same_maps && same_derived
+    }
+
     /// Whether every aggregate can take deleted rows back out.
     fn subtractable(&self) -> bool {
         self.aggs.iter().all(|a| {
@@ -1933,26 +2184,7 @@ impl Prepared<'_> {
     /// the same relationship maps, derived dictionaries that only grew, and
     /// group and bitset layouts that still have room for every code.
     fn compatible(&self, state: &Incremental, table: &TableSnapshot) -> bool {
-        let maps =
-            self.reads
-                .iter()
-                .zip(&state.maps)
-                .all(|(read, old)| match (&read.gathered, old) {
-                    (None, None) => true,
-                    (Some(map), Some(old)) => Arc::ptr_eq(map, old),
-                    _ => false,
-                });
-        let derived =
-            self.reads
-                .iter()
-                .zip(&state.derived)
-                .all(|(read, old)| match (&read.derived, old) {
-                    (None, None) => true,
-                    (Some(now), Some(old)) => {
-                        now.map.len() >= old.map.len() && now.map[..old.map.len()] == old.map[..]
-                    }
-                    _ => false,
-                });
+        let reads = self.same_reads(&state.maps, &state.derived);
         let dense = match (&self.dense, &state.dense) {
             (None, None) => true,
             (Some(now), Some(old)) => {
@@ -1978,7 +2210,7 @@ impl Prepared<'_> {
             .map(|s| s.data.start + u64::from(s.data.rows))
             .max()
             .unwrap_or(0);
-        maps && derived
+        reads
             && dense
             && bitsets
             && rows >= state.high

@@ -346,7 +346,7 @@ async fn relative_filters_that_cant_be_windows_are_400s() {
         ),
         (
             json!({"field": "orders.ordered_at", "from": "2026-01-01", "relative": {"unit": "day", "last": 7}}),
-            "needs one of `in`, `from` and/or `to`, or `relative`",
+            "needs one of `in`, `from` and/or `to`, `relative` or `contains`",
         ),
     ] {
         let reply = post(
@@ -473,4 +473,134 @@ async fn the_model_says_which_way_selections_flow() {
     );
     let model = common::call(both, Method::GET, "/v1/model").await.json();
     assert_eq!(model["filter_direction"], "both");
+}
+
+/// Orders with notes, written in two batches: o1 to o3, then o4 and o5.
+async fn with_notes() -> Arc<AppState> {
+    let state = loaded().await;
+    let order = |id: &str, customer: &str, note: Value| {
+        json!({
+            "order_id": id, "customer_id": customer, "product_id": "p1", "status": "paid",
+            "ordered_at": "2026-03-01T10:00:00Z", "quantity": 1, "amount": "1.00", "note": note,
+        })
+    };
+    let reply = post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([
+            order("o4", "c2", json!("Leave at the DOOR")),
+            order("o5", "c1", json!("door code 4417")),
+        ]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    state
+}
+
+#[tokio::test]
+async fn a_contains_filter_searches_text_ignoring_case() {
+    let state = with_notes().await;
+    let count = |filters: Value| {
+        let state = Arc::clone(&state);
+        async move {
+            let reply = post(
+                &state,
+                "/v1/query",
+                &json!({"metrics": ["order_count"], "filters": filters}),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+            reply.json()["rows"][0][0].clone()
+        }
+    };
+    // a plain-encoded column, in other case
+    assert_eq!(
+        count(json!([{"field": "orders.note", "contains": "Door"}])).await,
+        json!(2)
+    );
+    // a related field, through its dictionary
+    assert_eq!(
+        count(json!([{"field": "customers.name", "contains": "a"}])).await,
+        json!(3)
+    );
+    assert_eq!(
+        count(json!([{"field": "orders.note", "contains": "nowhere"}])).await,
+        json!(0)
+    );
+    // only strings are searched, and a field gets one condition
+    for (filters, says) in [
+        (
+            json!([{"field": "orders.quantity", "contains": "1"}]),
+            "`orders.quantity` is an integer, not a string, so it can't be searched",
+        ),
+        (
+            json!([{"field": "orders.note", "contains": "x", "in": ["x"]}]),
+            "has `contains` and another condition",
+        ),
+    ] {
+        let reply = post(
+            &state,
+            "/v1/query",
+            &json!({"metrics": ["order_count"], "filters": filters}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert!(reply.text().contains(says), "{}", reply.text());
+    }
+}
+
+#[tokio::test]
+async fn rows_come_newest_first_under_their_filters() {
+    let state = with_notes().await;
+    let reply = post(
+        &state,
+        "/v1/rows",
+        &json!({
+            "fields": ["orders.order_id", "customers.name", "orders.note"],
+            "filters": [{"field": "customers.region", "in": ["north"]}],
+        }),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let body = reply.json();
+    assert_eq!(
+        body["rows"],
+        json!([
+            ["o5", "Ada", "door code 4417"],
+            ["o2", "Ada", null],
+            ["o1", "Ada", null]
+        ])
+    );
+    assert_eq!(body["columns"][2]["name"], "orders.note");
+    assert_eq!(body["columns"][2]["type"], "string");
+
+    // a search, a limit, as CSV
+    let reply = post(
+        &state,
+        "/v1/rows?format=csv",
+        &json!({
+            "fields": ["orders.order_id", "orders.note"],
+            "filters": [{"field": "orders.note", "contains": "DOOR"}],
+            "limit": 1,
+        }),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        reply.text(),
+        "orders.order_id,orders.note\r\no5,door code 4417\r\n"
+    );
+
+    for (body, says) in [
+        (json!({"fields": []}), "`fields` is empty"),
+        (
+            json!({"fields": ["orders.order_id"], "limit": 5000}),
+            "1000 rows at most",
+        ),
+        (json!({"fields": ["orders.nope"]}), "has no field `nope`"),
+    ] {
+        let reply = post(&state, "/v1/rows", &body).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(reply.text().contains(says), "{}", reply.text());
+    }
 }

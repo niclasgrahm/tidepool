@@ -4,26 +4,22 @@
 //!
 //! [`Board`]: crate::board::Board
 
+use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{Value, json};
 use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
 
 use crate::api::{post_text, save_file};
 use crate::board::{
-    beside, display, export_request, next_period, next_sort, node_class, number, presets,
-    range_label, value_class, wanted_window,
+    beside, brush_range, display, export_request, export_rows_request, filter_meta, formatted,
+    marks, next_sort, node_class, number, share, value_class, visual_tags, wanted_window,
 };
-use crate::charts::{bar, line, palette};
-use crate::echarts::{Click, EChart};
+use crate::charts::Data;
+use crate::datepick::DateRange;
 use crate::live::Live;
+use crate::plot::{BarChart, LineChart};
 
 /// Whether the page is in dark mode (charts can't read CSS).
-pub fn dark() -> bool {
-    web_sys::window()
-        .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
-        .is_some_and(|m| m.matches())
-}
-
 /// The part of `dataset.field` people read.
 fn short(field: &str) -> String {
     field.split_once('.').map_or(field, |(_, f)| f).to_string()
@@ -45,6 +41,19 @@ pub fn Dashboard(slug: String) -> impl IntoView {
         live.dashboards
             .with(|all| all.iter().find(|d| d.id == slug).cloned())
     });
+    // the visual shown alone, as large as the grid; the rail and the
+    // selection bar stay, and selections go on working
+    let maximized = RwSignal::new(None::<String>);
+    let escape = window_event_listener(ev::keydown, move |e| {
+        // a popover's Escape closes the popover only
+        if e.key() == "Escape"
+            && !e.default_prevented()
+            && maximized.with_untracked(Option::is_some)
+        {
+            maximized.set(None);
+        }
+    });
+    on_cleanup(move || escape.remove());
     view! {
         {move || match info.get() {
             None => view! { <p class="quiet page-note">"Loading the dashboard…"</p> }.into_any(),
@@ -54,16 +63,22 @@ pub fn Dashboard(slug: String) -> impl IntoView {
                     {(!dashboard.filters.is_empty()).then(|| view! {
                         <aside class="rail" aria-label="Filters">
                             {dashboard.filters.into_iter().map(|f| view! { <Filter info=f height=LIST_HEIGHT /> }).collect_view()}
+                            <ul class="legend states" aria-label="What the colours mean">
+                                <li><span class="mark selected"></span>"selected"</li>
+                                <li><span class="mark possible"></span>"possible"</li>
+                                <li><span class="mark excluded"></span>"excluded"</li>
+                            </ul>
                         </aside>
                     })}
                     <section
                         class="grid"
+                        class:alone=move || maximized.with(Option::is_some)
                         style=format!(
                             "grid-template-columns: repeat({}, minmax(0, 1fr)); grid-auto-rows: {}px;",
                             dashboard.columns, dashboard.row_height
                         )
                     >
-                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v row_height=dashboard.row_height /> }).collect_view()}
+                        {dashboard.visuals.into_iter().map(|v| view! { <Visual info=v row_height=dashboard.row_height maximized=maximized /> }).collect_view()}
                     </section>
                 </div>
             }
@@ -77,9 +92,101 @@ pub fn Dashboard(slug: String) -> impl IntoView {
 #[component]
 fn Filter(info: FilterInfo, height: f64) -> impl IntoView {
     match info.widget.as_str() {
-        "date_range" => view! { <DateRange field=info.field timed=info.timed /> }.into_any(),
-        "tree" => view! { <FilterTree field=info.field measured=info.measure.is_some() format=info.measure_format height=height /> }.into_any(),
-        _ => view! { <FilterList field=info.field measured=info.measure.is_some() format=info.measure_format height=height /> }.into_any(),
+        "date_range" => view! { <DateRange title=short(&info.field) field=info.field timed=info.timed /> }.into_any(),
+        "tree" => view! { <FilterTree field=info.field measure=info.measure format=info.measure_format height=height /> }.into_any(),
+        "search" => view! { <SearchBox field=info.field /> }.into_any(),
+        _ => view! { <FilterList field=info.field measure=info.measure format=info.measure_format height=height /> }.into_any(),
+    }
+}
+
+/// How long typing pauses before a search goes to the server.
+const TYPING: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A search box (`widget: search`): what's typed selects the rows whose
+/// value contains it, sent once typing pauses. It follows the selection
+/// (back, clear) unless the viewer is typing something newer.
+#[component]
+fn SearchBox(field: String) -> impl IntoView {
+    let live = expect_context::<Live>();
+    let text = RwSignal::new(String::new());
+    // texts sent and not answered yet, oldest first: the selection
+    // catching up with one of them isn't news, and mustn't undo what was
+    // typed since
+    let pending = StoredValue::new(Vec::<String>::new());
+    let shown = StoredValue::new(String::new());
+    let typed = StoredValue::new(0u64);
+    {
+        let field = field.clone();
+        Effect::new(move |_| {
+            let chosen = live.selection.with(|s| {
+                s.iter()
+                    .find(|f| f.field == field)
+                    .and_then(|f| f.contains.clone())
+                    .unwrap_or_default()
+            });
+            let ours = pending.with_value(|p| p.iter().position(|t| *t == chosen));
+            match ours {
+                Some(at) => pending.update_value(|p| {
+                    p.drain(..=at);
+                }),
+                // changed elsewhere (back, clear): the box follows
+                None if chosen != shown.get_value() => {
+                    pending.update_value(Vec::clear);
+                    text.set(chosen.clone());
+                }
+                None => {}
+            }
+            shown.set_value(chosen);
+        });
+    }
+    let name = StoredValue::new(field.clone());
+    let send = move |value: String| {
+        pending.update_value(|p| p.push(value.clone()));
+        live.send(&json!({"type": "search", "field": name.get_value(), "text": value}));
+    };
+    // what was sent last, or what the selection says when nothing is on
+    // its way
+    let last = move || {
+        pending
+            .with_value(|p| p.last().cloned())
+            .unwrap_or_else(|| shown.get_value())
+    };
+    let on_input = move |event| {
+        let value = event_target_value(&event);
+        text.set(value.clone());
+        let n = typed.get_value() + 1;
+        typed.set_value(n);
+        set_timeout(
+            move || {
+                if typed.get_value() == n && value != last() {
+                    send(value);
+                }
+            },
+            TYPING,
+        );
+    };
+    let title = short(&field);
+    view! {
+        <section class="filter search-filter" data-field=field.clone()>
+            <header class="filter-head"><h2>{title.clone()}</h2></header>
+            <input
+                type="search"
+                placeholder="Contains…"
+                aria-label=format!("Search {title}")
+                prop:value=move || text.get()
+                on:input=on_input
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    // Enter sends at once
+                    if ev.key() == "Enter" {
+                        typed.set_value(typed.get_value() + 1);
+                        let value = text.get_untracked();
+                        if value != last() {
+                            send(value);
+                        }
+                    }
+                }
+            />
+        </section>
     }
 }
 
@@ -107,21 +214,65 @@ fn follow_scroll(
     });
 }
 
-const ROW: f64 = 30.0;
+const ROW: f64 = 26.0;
 const LIST_HEIGHT: f64 = 300.0;
 
 /// The room a filter visual `rows` tall has for its values: its cells and
 /// the gaps between them, less its padding, title and search box.
 fn list_height(rows: u16, row_height: u16) -> f64 {
     let cells = f64::from(rows) * f64::from(row_height) + f64::from(rows.saturating_sub(1)) * 16.0;
-    (cells - 100.0).max(ROW * 2.0)
+    (cells - 92.0).max(ROW * 2.0)
+}
+
+/// A filter's header: its name, and how many values, how many selected and
+/// what's measured.
+fn filter_head(
+    live: Live,
+    field: &str,
+    frame: Memo<Option<FilterFrame>>,
+    measure: Option<String>,
+    tree: bool,
+) -> impl IntoView + use<> {
+    let key = field.to_string();
+    let meta = move || {
+        let selected = live.selection.with(|s| {
+            s.iter()
+                .find(|f| f.field == key)
+                .map_or(0, |f| f.values.as_ref().map_or(1, Vec::len))
+        });
+        let total = frame.with(|f| f.as_ref().map(|f| f.total));
+        filter_meta(total, selected, measure.as_deref(), tree)
+    };
+    view! {
+        <header class="filter-head">
+            <h2>{short(field)}</h2>
+            <span class="filter-meta">{meta}</span>
+        </header>
+    }
+}
+
+/// The largest measure among the values shown, for their meters.
+fn largest(frame: &FilterFrame) -> f64 {
+    frame
+        .values
+        .iter()
+        .map(|v| v.measure.as_ref())
+        .chain(frame.nodes.iter().map(|n| n.measure.as_ref()))
+        .filter_map(|m| m.and_then(number))
+        .fold(0.0, f64::max)
 }
 
 /// A filter list: every value with its state (selected, possible,
 /// excluded), searchable, only the rows on screen in the DOM, fetched from
 /// the server a window at a time.
 #[component]
-fn FilterList(field: String, measured: bool, format: Option<String>, height: f64) -> impl IntoView {
+fn FilterList(
+    field: String,
+    measure: Option<String>,
+    format: Option<String>,
+    height: f64,
+) -> impl IntoView {
+    let measured = measure.is_some();
     let live = expect_context::<Live>();
     let key = field.clone();
     // only this list's frame: others mustn't re-render (and so swallow
@@ -147,8 +298,8 @@ fn FilterList(field: String, measured: bool, format: Option<String>, height: f64
     let title = short(&field);
     let select_field = field.clone();
     view! {
-        <section class="filter">
-            <h2>{title.clone()}</h2>
+        <section class="filter" data-field=field.clone()>
+            {filter_head(live, &field, frame, measure, false)}
             <input type="search" placeholder="Search" aria-label=format!("Search {title}") on:input=on_search />
             <div
                 class="values"
@@ -165,6 +316,7 @@ fn FilterList(field: String, measured: bool, format: Option<String>, height: f64
                     let height = f.total as f64 * ROW;
                     let field = select_field.clone();
                     let format = format.clone();
+                    let most = largest(&f);
                     view! {
                         <ul style=format!("height: {height}px")>
                             {f.values.into_iter().enumerate().map(|(i, v)| {
@@ -180,7 +332,8 @@ fn FilterList(field: String, measured: bool, format: Option<String>, height: f64
                                             aria-pressed=pressed.to_string()
                                             on:click=move |_| live.select(&field, std::slice::from_ref(&value), true)
                                         >
-                                            <span>{display(&v.value)}</span>
+                                            {measured.then(|| view! { <span class="meter" style=format!("width: {:.1}%", share(v.measure.as_ref(), most))></span> })}
+                                            <span class="label">{display(&v.value)}</span>
                                             <span class="rows">{beside(measured, v.measure.as_ref(), v.rows, format.as_deref())}</span>
                                         </button>
                                     </li>
@@ -201,7 +354,13 @@ fn FilterList(field: String, measured: bool, format: Option<String>, height: f64
 /// one with a selection somewhere below it carries a dot, so a selection
 /// stays findable with its branch closed.
 #[component]
-fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64) -> impl IntoView {
+fn FilterTree(
+    field: String,
+    measure: Option<String>,
+    format: Option<String>,
+    height: f64,
+) -> impl IntoView {
+    let measured = measure.is_some();
     let live = expect_context::<Live>();
     let key = field.clone();
     let frame = Memo::new(move |_| live.board.with(|b| b.filters.get(&key).cloned()));
@@ -222,8 +381,8 @@ fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64
     };
     let title = short(&field);
     view! {
-        <section class="filter tree">
-            <h2>{title.clone()}</h2>
+        <section class="filter tree" data-field=field.clone()>
+            {filter_head(live, &field, frame, measure, true)}
             <input type="search" placeholder="Search" aria-label=format!("Search {title}") on:input=on_search />
             <div
                 class="values"
@@ -240,6 +399,7 @@ fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64
                     #[allow(clippy::cast_precision_loss)]
                     let height = f.total as f64 * ROW;
                     let format = format.clone();
+                    let most = largest(&f);
                     view! {
                         <ul style=format!("height: {height}px")>
                             {f.nodes.into_iter().enumerate().map(|(i, node)| {
@@ -262,7 +422,7 @@ fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64
                                 };
                                 view! {
                                     <li
-                                        style=format!("top: {top}px; padding-left: {}px", node.depth * 14)
+                                        style=format!("top: {top}px; padding-left: {}px", node.depth * 12)
                                         role="treeitem"
                                         aria-expanded=has_children.then(|| open.to_string())
                                         attr:aria-level=(node.depth + 1).to_string()
@@ -270,13 +430,14 @@ fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64
                                         {if has_children {
                                             view! {
                                                 <button class="twist" aria-label=if open { "Close" } else { "Open" } on:click=twist>
-                                                    {if open { "▾" } else { "▸" }}
+                                                    <svg viewBox="0 0 10 10" aria-hidden="true" class:open=open><path d="M3.5 2 7 5 3.5 8" /></svg>
                                                 </button>
                                             }.into_any()
                                         } else {
                                             view! { <span class="twist" aria-hidden="true"></span> }.into_any()
                                         }}
                                         <button class=class aria-pressed=selected.to_string() on:click=select>
+                                            {measured.then(|| view! { <span class="meter" style=format!("width: {:.1}%", share(node.measure.as_ref(), most))></span> })}
                                             <span class="node-label">
                                                 {node.holds.then(|| view! { <span class="dot" aria-label="selection below"></span> })}
                                                 {display(&node.label)}
@@ -296,107 +457,18 @@ fn FilterTree(field: String, measured: bool, format: Option<String>, height: f64
     }
 }
 
-/// A from/to range on a date or time field, or a window relative to now
-/// ("Last 7 days") that moves as time passes.
+/// A visual on the grid. `maximized` names the visual shown alone, if
+/// any: this one is then the whole grid, or hidden. It stays the same
+/// element either way, so a chart keeps its state and only resizes.
 #[component]
-fn DateRange(field: String, timed: bool) -> impl IntoView {
-    let live = expect_context::<Live>();
-    let key = field.clone();
-    let selected = Memo::new(move |_| {
-        live.selection
-            .with(|s| s.iter().find(|f| f.field == key).cloned())
-    });
-    let current = Memo::new(move |_| selected.get().map(|f| (f.from, f.to)));
-    let windows = presets(timed);
-    // the period picker's value: a preset's index, "custom" or "" (all time)
-    let period = {
-        let windows = windows.clone();
-        move || match selected.get() {
-            None => String::new(),
-            Some(s) => s
-                .relative
-                .and_then(|w| windows.iter().position(|p| *p == w))
-                .map_or_else(|| "custom".to_string(), |i| i.to_string()),
-        }
-    };
-    // a window that isn't a preset (a dashboard's default) by its name
-    let custom = move || {
-        selected.get().map_or_else(
-            || "Custom".to_string(),
-            |s| match s.relative {
-                Some(w) => w.label(),
-                None => range_label(s.from.as_ref(), s.to.as_ref()),
-            },
-        )
-    };
-    let choose = {
-        let (field, windows) = (field.clone(), windows.clone());
-        move |ev| {
-            let value = event_target_value(&ev);
-            if value.is_empty() {
-                live.send(&json!({"type": "clear", "field": field}));
-            } else if let Some(window) = value.parse::<usize>().ok().and_then(|i| windows.get(i)) {
-                live.send(&json!({"type": "select_relative", "field": field, "window": window}));
-            }
-        }
-    };
-    let date = |v: &Option<Value>| {
-        v.as_ref()
-            .and_then(Value::as_str)
-            .map(|s| s.get(..10).unwrap_or(s).to_string())
-            .unwrap_or_default()
-    };
-    let from = RwSignal::new(String::new());
-    let to = RwSignal::new(String::new());
-    Effect::new(move |_| {
-        let (f, t) = current.get().unwrap_or_default();
-        from.set(date(&f));
-        // the range is half-open; the picker shows the last day inside it
-        to.set(date(&t));
-    });
-    let apply = {
-        let field = field.clone();
-        move || {
-            let (f, t) = (from.get_untracked(), to.get_untracked());
-            if f.is_empty() && t.is_empty() {
-                live.send(&json!({"type": "clear", "field": field}));
-            } else {
-                live.send(&json!({
-                    "type": "select_range", "field": field,
-                    "from": (!f.is_empty()).then(|| format!("{f}T00:00:00Z")),
-                    "to": (!t.is_empty()).then(|| format!("{t}T00:00:00Z")),
-                }));
-            }
-        }
-    };
-    let apply_from = apply.clone();
-    view! {
-        <section class="filter">
-            <h2>{short(&field)}</h2>
-            <div class="range">
-                <label>"Period"
-                    <select prop:value=period on:change=choose>
-                        <option value="">"All time"</option>
-                        {windows.iter().enumerate().map(|(i, w)| view! {
-                            <option value=i.to_string()>{w.label()}</option>
-                        }).collect_view()}
-                        <option value="custom" disabled=true>{custom}</option>
-                    </select>
-                </label>
-                <label>"From" <input type="date" prop:value=move || from.get()
-                    on:change=move |ev| { from.set(event_target_value(&ev)); apply_from(); } /></label>
-                <label>"Until" <input type="date" prop:value=move || to.get()
-                    on:change=move |ev| { to.set(event_target_value(&ev)); apply(); } /></label>
-            </div>
-        </section>
-    }
-}
-
-#[component]
-fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
+fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>) -> AnyView {
     let live = expect_context::<Live>();
     let id = info.id.clone();
     let frame = Memo::new(move |_| live.board.with(|b| b.visuals.get(&id).cloned()));
+    let alone = {
+        let id = info.id.clone();
+        move || maximized.with(|m| m.as_deref() == Some(id.as_str()))
+    };
     let place = format!(
         "grid-column: {} / span {}; grid-row: {} / span {};",
         info.at.x + 1,
@@ -417,7 +489,7 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
             measure_format: None,
         };
         return view! {
-            <article class="visual filter-visual" style=place>
+            <article class="visual filter-visual" style=place data-visual=info.id.clone()>
                 <Filter info=filter height=list_height(info.at.h, row_height) />
             </article>
         }
@@ -453,22 +525,24 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
             Some(_) => None,
         };
         let content = if info.visual_type == "bar" {
-            bar_chart(live, &info, rows)
+            bar_chart(live, &info, rows, title.clone())
         } else {
-            line_chart(live, &info, rows)
+            line_chart(live, &info, rows, title.clone())
         };
         return view! {
-            <article class=class style=place>
-                <header class="visual-head"><h2>{title.clone()}</h2>{export_button(live, &info)}</header>
+            <article class=class class:maximized=alone style=place data-visual=info.id.clone()>
+                {visual_head(live, &info, &title, maximized)}
                 {note}
                 {content}
             </article>
         }
         .into_any();
     }
+    let id = info.id.clone();
+    let head = visual_head(live, &info, &title, maximized);
     view! {
-        <article class=class style=place>
-            <header class="visual-head"><h2>{title.clone()}</h2>{export_button(live, &info)}</header>
+        <article class=class class:maximized=alone style=place data-visual=id>
+            {head}
             {move || match frame.get() {
                 None => view! { <p class="quiet">"Waiting for data"</p> }.into_any(),
                 Some(VisualFrame { error: Some(error), .. }) => {
@@ -484,15 +558,69 @@ fn Visual(info: VisualInfo, row_height: u16) -> AnyView {
     .into_any()
 }
 
+/// A visual's header: its title, how it's set up, its export, maximize.
+fn visual_head(
+    live: Live,
+    info: &VisualInfo,
+    title: &str,
+    maximized: RwSignal<Option<String>>,
+) -> impl IntoView + use<> {
+    let tags = visual_tags(info);
+    view! {
+        <header class="visual-head">
+            <h2>{title.to_string()}</h2>
+            {tags.into_iter().map(|t| view! { <code class="tag">{t}</code> }).collect_view()}
+            <span class="grow"></span>
+            {export_button(live, info)}
+            {maximize_button(&info.id, maximized)}
+        </header>
+    }
+}
+
+/// Show the visual alone, as large as the grid, or put it back (Escape
+/// does too).
+fn maximize_button(id: &str, maximized: RwSignal<Option<String>>) -> impl IntoView + use<> {
+    let id = id.to_string();
+    let alone = {
+        let id = id.clone();
+        Memo::new(move |_| maximized.with(|m| m.as_ref() == Some(&id)))
+    };
+    let toggle = move |_| maximized.set((!alone.get_untracked()).then(|| id.clone()));
+    view! {
+        <button
+            class="maximize icon-button"
+            aria-pressed=move || alone.get().to_string()
+            title=move || if alone.get() { "Restore (Esc)" } else { "Maximize" }
+            on:click=toggle
+        >
+            {move || if alone.get() {
+                view! { <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M10 2v4h4M14 10h-4v4M2 10h4v4" /></svg> }.into_any()
+            } else {
+                view! { <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" /></svg> }.into_any()
+            }}
+            <span class="sr">{move || if alone.get() { "Restore" } else { "Maximize" }}</span>
+        </button>
+    }
+}
+
 /// "CSV": the visual's query under the current selection, downloaded.
 fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
     let info = info.clone();
     let failed = RwSignal::new(None::<String>);
     let export = move |_| {
-        let request = live.selection.with_untracked(|s| export_request(&info, s));
         let name = format!("{}.csv", info.id);
+        // a rows visual exports its rows, as many as it can show
+        let rows = (info.visual_type == "rows").then(|| {
+            live.selection
+                .with_untracked(|s| export_rows_request(&info, s, 1000))
+        });
+        let request = live.selection.with_untracked(|s| export_request(&info, s));
         leptos::task::spawn_local(async move {
-            let outcome = match post_text("/v1/query?format=csv", &request).await {
+            let reply = match rows {
+                Some(rows) => post_text("/v1/rows?format=csv", &rows).await,
+                None => post_text("/v1/query?format=csv", &request).await,
+            };
+            let outcome = match reply {
                 Ok((200, text)) => save_file(&name, &text, "text/csv"),
                 Ok((status, text)) => Err(format!("the server answered {status}: {text}")),
                 Err(err) => Err(err),
@@ -501,7 +629,10 @@ fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
         });
     };
     view! {
-        <button class="export" title="Download this visual's data as CSV, under the current selection" on:click=export>"CSV"</button>
+        <button class="export icon-button" title="Download this visual's data as CSV, under the current selection" on:click=export>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13.5h10" /></svg>
+            <span class="sr">"CSV"</span>
+        </button>
         {move || failed.get().map(|e| view! { <span class="problem" role="alert">{e}</span> })}
     }
 }
@@ -510,6 +641,7 @@ fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
 fn body(live: Live, info: &VisualInfo, rows: Vec<Vec<Value>>, compare: Option<&Value>) -> AnyView {
     match info.visual_type.as_str() {
         "kpi" => kpi(live, info, &rows, compare),
+        "rows" => view! { <RowsTable info=info.clone() rows=rows /> }.into_any(),
         _ => view! { <Table info=info.clone() rows=rows /> }.into_any(),
     }
 }
@@ -529,55 +661,74 @@ fn kpi(live: Live, info: &VisualInfo, rows: &[Vec<Value>], compare: Option<&Valu
         _ => None,
     };
     let against = info.compare.clone().unwrap_or_default();
+    let format = info.metrics.first().and_then(|m| info.formats.get(m));
+    let shown = formatted(&value, format.map(String::as_str));
+    // the whole value, for when a format shortens it
+    let whole = (format.is_some() && shown != display(&value)).then(|| display(&value));
     view! {
-        <p class="kpi-value" class:fresh=fresh>{display(&value)}</p>
+        <p class="kpi-value" class:fresh=fresh title=whole>{shown}</p>
         {delta.map(|d| view! {
-            <p class="kpi-delta" class:down=d < 0.0>
-                {format!("{}{d:.1}% vs {against}", if d >= 0.0 { "+" } else { "" })}
+            <p class="kpi-delta">
+                <span class="delta" class:down=d < 0.0>{format!("{}{d:.1}%", if d >= 0.0 { "+" } else { "−" }, d = d.abs())}</span>
+                {format!(" vs {against}")}
             </p>
         })}
     }
     .into_any()
 }
 
-fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> AnyView {
+fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: String) -> AnyView {
     let field = info.dimensions[0].field.clone();
-    let metrics = info.metrics.clone();
+    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
+    let data = Memo::new(move |_| rows.with(|rows| Data::formatted(rows, &metrics, &formats)));
     let shown = field.clone();
-    let option = Signal::derive(move || {
-        // the selection colours the bars too
-        let chosen = live.selection.with(|s| {
+    // the selection colours the bars too
+    let selected = Signal::derive(move || {
+        live.selection.with(|s| {
             s.iter()
                 .find(|f| f.field == shown)
                 .and_then(|f| f.values.as_ref())
                 .map(|v| v.iter().map(display).collect::<Vec<_>>())
                 .unwrap_or_default()
-        });
-        rows.with(|rows| bar(rows, &metrics, &chosen, palette(dark())))
+        })
     });
-    let clickable = info.on_click;
-    let on_click = Callback::new(move |click: Click| {
-        if !clickable {
-            return;
-        }
-        let value =
-            rows.with_untracked(|rows| rows.get(click.data_index).and_then(|r| r.first()).cloned());
-        if let Some(value) = value {
-            live.select(&field, &[value], click.additive);
-        }
+    let on_select = info.on_click.then(|| {
+        Callback::new(move |(categories, additive): (Vec<usize>, bool)| {
+            let values: Vec<Value> = rows.with_untracked(|rows| {
+                categories
+                    .iter()
+                    .filter_map(|&i| rows.get(i).and_then(|r| r.first()).cloned())
+                    .collect()
+            });
+            if !values.is_empty() {
+                live.select(&field, &values, additive);
+            }
+        })
     });
-    view! { <div class="chart"><EChart option=option on_click=on_click /></div> }.into_any()
+    view! {
+        <div class="chart">
+            <BarChart data=data selected=selected on_select=on_select label=title />
+        </div>
+    }
+    .into_any()
 }
 
-fn line_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> AnyView {
-    let metrics = info.metrics.clone();
-    let option = Signal::derive(move || rows.with(|rows| line(rows, &metrics, palette(dark()))));
+fn line_chart(
+    live: Live,
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    title: String,
+) -> AnyView {
+    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
+    let data = Memo::new(move |_| rows.with(|rows| Data::formatted(rows, &metrics, &formats)));
     let dimension = info.dimensions[0].clone();
+    let grain = dimension.grain.clone();
     if !info.on_brush {
-        return view! { <div class="chart"><EChart option=option /></div> }.into_any();
+        return view! { <div class="chart"><LineChart data=data grain=grain label=title /></div> }
+            .into_any();
     }
-    // a brushed span of periods selects their range: from the first one's
-    // start to the start of the period after the last
+    // a brushed span selects its range: whole periods at a grain, the
+    // values themselves otherwise (`brush_range`)
     let on_brush = Callback::new(move |(start, end): (usize, usize)| {
         let at = |i: usize| {
             rows.with_untracked(|rows| {
@@ -587,21 +738,74 @@ fn line_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>) -> Any
                     .map(str::to_string)
             })
         };
-        let (Some(from), Some(last)) = (at(start), at(end.max(start))) else {
+        let (Some(first), Some(last)) = (at(start), at(end.max(start))) else {
             return;
         };
-        let to = next_period(&last, dimension.grain.as_deref().unwrap_or("day"));
+        let Some((from, to)) = brush_range(&first, &last, dimension.grain.as_deref()) else {
+            return;
+        };
         live.send(&json!({
-            "type": "select_range", "field": dimension.field,
-            "from": format!("{from}T00:00:00Z"),
-            "to": to.map(|t| format!("{t}T00:00:00Z")),
+            "type": "select_range", "field": dimension.field, "from": from, "to": to,
         }));
     });
-    view! { <div class="chart"><EChart option=option on_brush_x=on_brush /></div> }.into_any()
+    view! { <div class="chart"><LineChart data=data grain=grain on_brush=on_brush label=title /></div> }.into_any()
 }
 
 /// A table: sortable by any column (the server sorts), a row click selects
 /// its first dimension's value, changed cells flash.
+/// A `rows` visual: the newest rows, newest first, each as it is. Text a
+/// search selects is marked where it's found.
+#[component]
+fn RowsTable(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
+    let live = expect_context::<Live>();
+    let fields: Vec<String> = info.dimensions.iter().map(|d| d.field.clone()).collect();
+    // the text searched for in each column, if any
+    let searched: Vec<Option<String>> = live.selection.with_untracked(|s| {
+        fields
+            .iter()
+            .map(|f| {
+                s.iter()
+                    .find(|c| c.field == *f)
+                    .and_then(|c| c.contains.clone())
+            })
+            .collect()
+    });
+    let empty = rows.is_empty();
+    view! {
+        <div class="table-wrap rows-wrap">
+            <table class="rows-table">
+                <thead><tr>
+                    {fields.iter().map(|f| view! { <th>{short(f)}</th> }).collect_view()}
+                </tr></thead>
+                <tbody>
+                    {rows.into_iter().map(|row| view! {
+                        <tr>
+                            {row.into_iter().enumerate().map(|(c, v)| {
+                                let text = display(&v);
+                                let numeric = v.is_number();
+                                let parts = match searched.get(c).cloned().flatten() {
+                                    Some(needle) => marks(&text, &needle),
+                                    None => vec![(text, false)],
+                                };
+                                view! {
+                                    <td class:num=numeric class:null=v.is_null()>
+                                        {parts.into_iter().map(|(part, hit)| if hit {
+                                            view! { <mark>{part}</mark> }.into_any()
+                                        } else {
+                                            part.into_any()
+                                        }).collect_view()}
+                                    </td>
+                                }
+                            }).collect_view()}
+                        </tr>
+                    }).collect_view()}
+                </tbody>
+            </table>
+            {empty.then(|| view! { <p class="quiet">"No rows match."</p> })}
+        </div>
+    }
+}
+
 #[component]
 fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
     let live = expect_context::<Live>();
@@ -617,6 +821,25 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
         .collect();
     let visual = info.id.clone();
     let field = info.dimensions.first().map(|d| d.field.clone());
+    // a bar behind the metric it's sorted by (the first metric otherwise):
+    // its share of the largest shown
+    let barred = live
+        .sorts
+        .with_untracked(|s| s.get(&visual).map(|(c, _)| c.clone()))
+        .and_then(|c| headers.iter().position(|h| *h == c))
+        .filter(|&i| i >= dims)
+        .or_else(|| (headers.len() > dims).then_some(dims));
+    // each metric column's format, in column order after the dimensions
+    let formats: Vec<Option<String>> = info
+        .metrics
+        .iter()
+        .map(|m| info.formats.get(m).cloned())
+        .collect();
+    let most = barred.map_or(0.0, |c| {
+        rows.iter()
+            .filter_map(|r| r.get(c).and_then(number))
+            .fold(0.0, f64::max)
+    });
     view! {
         <div class="table-wrap">
             <table>
@@ -666,7 +889,12 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
                                 {row.into_iter().enumerate().map(|(c, v)| {
                                     let numeric = c >= dims;
                                     let fresh = live.board.with_untracked(|b| b.fresh.contains(&(visual.clone(), r, c)));
-                                    view! { <td class:num=numeric class:fresh=fresh>{display(&v)}</td> }
+                                    let bar = (barred == Some(c)).then(|| view! {
+                                        <span class="cell-bar" style=format!("width: {:.1}%", share(Some(&v), most))></span>
+                                    });
+                                    let format = c.checked_sub(dims).and_then(|m| formats.get(m)).map(|f| f.as_deref());
+                                    let text = formatted(&v, format.flatten());
+                                    view! { <td class:num=numeric class:fresh=fresh class:barred=barred == Some(c)>{bar}<span class="cell">{text}</span></td> }
                                 }).collect_view()}
                             </tr>
                         }

@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `kpi_revenue`: format `compact millions`: unknown word `millions`
+  --> dashboards/sales.yaml:15:24
+   |
+15 |     format: { revenue: compact millions }         # 167.8M: a total that moves all the time, made readable
+   |                        ^^^^^^^^^^^^^^^^
+   = help: a format is a style (int, decimal, percent or currency:XXX with an ISO code), `compact` and `decimals:N`, in any order: `currency:EUR compact`
+
+1 error, 0 warnings

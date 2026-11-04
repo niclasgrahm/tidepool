@@ -95,6 +95,38 @@
         "target/editor-data"
       ],
       "port": 7074
+    },
+    {
+      "name": "tidepool-search",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/search-config",
+        "--listen",
+        "127.0.0.1:7075",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/search-data"
+      ],
+      "port": 7075
+    },
+    {
+      "name": "tidepool-pglogs",
+      "runtimeExecutable": "target/debug/tidepool",
+      "runtimeArgs": [
+        "serve",
+        "--config",
+        "target/pglogs-config",
+        "--listen",
+        "127.0.0.1:7076",
+        "--ui-dir",
+        "frontend/dist",
+        "--data",
+        "target/pglogs-data"
+      ],
+      "port": 7076
     }
   ]
 }

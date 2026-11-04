@@ -181,6 +181,17 @@ A query's answer.
 | `rows` | list of list of any | **required** | Values as JSON: decimals, dates and timestamps as strings, so nothing is lost on the way through. |
 
 
+## `RowsRequest` {#schema-rowsrequest}
+
+The newest rows of a table that pass some filters (`POST /v1/rows`).
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `fields` | list of string | **required** | The columns, `dataset.field`: fields of the table whose rows these are, and of tables it reaches. The table is the one that reaches all of them (and the fewest others). |
+| `filters` | list of [`QueryFilter`](#schema-queryfilter) | `[]` | As in a query: the fields the table reaches filter its rows. |
+| `limit` | integer |  | How many rows, newest first: 100 when not given, 1000 at most. |
+
+
 ## `ServerInfo` {#schema-serverinfo}
 
 What `GET /v1/info` answers: which server this is.
@@ -318,6 +329,7 @@ One problem with a write.
 | `dashboards` | list of string | **required** | Dashboards that show it. |
 | `description` | string |  |  |
 | `expression` | string | **required** | The SQL expression. |
+| `format` | string |  | How its value shows, when a visual does not set a different format: `currency:EUR compact`. |
 | `ignores` | list of string | **required** | Fields whose selection it ignores (`*` for all). |
 | `kind` | string | **required** | `base` (aggregates rows) or `derived` (combines other metrics). |
 | `name` | string | **required** |  |
@@ -386,10 +398,11 @@ A field to group by.
 
 ## `QueryFilter` {#schema-queryfilter}
 
-A condition on a field: `in`, a half-open range `from <= value < to` (either end may be left out), or a window of time `relative` to now (`{"unit": "day", "last": 7}`). Values are written as in ingested rows: decimals, dates and timestamps as strings or numbers.
+A condition on a field: `in`, a half-open range `from <= value < to` (either end may be left out), a window of time `relative` to now (`{"unit": "day", "last": 7}`), or for a string field the values that `contains` a text, ignoring the case of ASCII letters. Values are written as in ingested rows: decimals, dates and timestamps as strings or numbers.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `contains` | string |  | The text a string field's values contain. |
 | `field` | string | **required** | `dataset.field`. |
 | `from` | any |  |  |
 | `in` | list of any |  |  |

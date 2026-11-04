@@ -10,6 +10,8 @@
 //! changed: the client applies it as a whole, so what it shows is always
 //! one consistent epoch.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,6 +51,13 @@ pub enum ClientMessage {
     SelectRelative {
         field: String,
         window: RelativeWindow,
+    },
+    /// Select the rows whose value of a string field contains `text`,
+    /// ignoring the case of ASCII letters: a search box. An empty text
+    /// clears the field.
+    Search {
+        field: String,
+        text: String,
     },
     /// Clear one field's selection, or all of it.
     Clear {
@@ -245,7 +254,7 @@ pub struct DashboardInfo {
 pub struct FilterInfo {
     /// `dataset.field`.
     pub field: String,
-    /// `list`, `tree` or `date_range`.
+    /// `list`, `tree`, `date_range` or `search`.
     pub widget: String,
     /// Whether the field has a time of day, so windows of hours and
     /// minutes apply to it (a date has none).
@@ -257,7 +266,8 @@ pub struct FilterInfo {
     /// The metric shown beside each value instead of its rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
-    /// Its display hint: `int`, `decimal`, `percent` or `currency:XXX`.
+    /// The measure's format (`currency:EUR compact`, …; see the metric's
+    /// `format`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure_format: Option<String>,
 }
@@ -265,7 +275,7 @@ pub struct FilterInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct VisualInfo {
     pub id: String,
-    /// `kpi`, `bar`, `line`, `table`, …
+    /// `kpi`, `bar`, `line`, `table`, `filter` or `rows`.
     #[serde(rename = "type")]
     pub visual_type: String,
     pub dimensions: Vec<QueryDimension>,
@@ -281,6 +291,10 @@ pub struct VisualInfo {
     /// filter frames of its dimension's field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<String>,
+    /// How each metric reads here, by name: the visual's own format for it,
+    /// else the metric's. Metrics without one aren't listed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub formats: BTreeMap<String, String>,
     pub at: GridAt,
 }
 
@@ -306,6 +320,9 @@ pub struct SelectedField {
     /// A window relative to now; `from` and `to` are where it is now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative: Option<RelativeWindow>,
+    /// The text searched for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
 }
 
 /// A visual's new content.

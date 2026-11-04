@@ -50,7 +50,9 @@ use tokio::sync::mpsc;
 
 use crate::AppState;
 use crate::filters::{self, Window, token};
-use crate::query::{field, json, resolve, result, scalar, window_condition};
+use crate::query::{
+    DEFAULT_ROWS, field, json, resolve, result, rows_result, scalar, window_condition,
+};
 
 /// Messages a session hasn't sent yet, at most; past this a slow client is
 /// dropped rather than buffered without end.
@@ -503,6 +505,26 @@ fn apply(
             inner.push(next);
             selected(inner.selection() != before)
         }
+        ClientMessage::Search { field: name, text } => {
+            let (at, ty) = field(model, &name)?;
+            let mut next = inner.selection();
+            // a search being typed is one step back, not one per key
+            let typing = matches!(next.fixed.0.get(&at), Some(Condition::Contains(_)));
+            if text.is_empty() {
+                next.remove(&at);
+            } else {
+                next.set(at, crate::query::contains(&name, &text, ty)?);
+            }
+            let before = inner.selection();
+            if typing && !text.is_empty() {
+                let at = inner.at;
+                inner.history.truncate(at + 1);
+                inner.history[at] = next;
+            } else {
+                inner.push(next);
+            }
+            selected(inner.selection() != before)
+        }
         ClientMessage::Clear { field: name } => {
             let mut next = inner.selection();
             match name {
@@ -655,6 +677,7 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
                     from: None,
                     to: None,
                     relative: None,
+                    contains: None,
                 },
                 Condition::Range { from, to } => SelectedField {
                     field,
@@ -662,6 +685,7 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
                     from: from.as_ref().map(json),
                     to: to.as_ref().map(json),
                     relative: None,
+                    contains: None,
                 },
                 Condition::Set(set) => SelectedField {
                     field,
@@ -669,6 +693,15 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
                     from: None,
                     to: None,
                     relative: None,
+                    contains: None,
+                },
+                Condition::Contains(needle) => SelectedField {
+                    field,
+                    values: None,
+                    from: None,
+                    to: None,
+                    relative: None,
+                    contains: Some(needle.text().to_string()),
                 },
             };
             (at.clone(), selected)
@@ -690,6 +723,7 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
                     from: from.as_ref().map(json),
                     to: to.as_ref().map(json),
                     relative: Some(window),
+                    contains: None,
                 };
                 (at, selected)
             }),
@@ -771,6 +805,7 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                             .map(|f| name(&serde_json::to_value(f.widget).unwrap_or_default()))
                     })
                     .flatten(),
+                formats: formats(model, v),
                 at: GridAt {
                     x: v.at.x,
                     y: v.at.y,
@@ -783,6 +818,25 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
 }
 
 /// A visual as a one-shot query request.
+/// How each of a visual's metrics reads: its format there, else the
+/// metric's own.
+fn formats(
+    model: &Model,
+    visual: &tidepool_model::ir::Visual,
+) -> std::collections::BTreeMap<String, String> {
+    visual
+        .metrics
+        .iter()
+        .chain(visual.compare.iter())
+        .filter_map(|id| {
+            let metric = model.metric(*id)?;
+            let own = visual.formats.iter().find(|(m, _)| m == id).map(|(_, f)| f);
+            let format = own.or(metric.format.as_ref())?;
+            Some((metric.name.clone(), format.clone()))
+        })
+        .collect()
+}
+
 fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
     let metric_name = |id| {
         model
@@ -876,7 +930,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
                     let open = open.get(&name).cloned().unwrap_or_default();
                     filters::tree(state, snapshot, f, name, &selection, &window, &open).ok()
                 }
-                FilterWidget::DateRange => None,
+                FilterWidget::DateRange | FilterWidget::Search => None,
             }
         })
         .collect();
@@ -904,6 +958,49 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     });
 }
 
+/// A `rows` visual's frame: the newest rows under the part of the
+/// selection that can change them.
+fn rows_frame(
+    state: &AppState,
+    snapshot: &Snapshot,
+    visual: &tidepool_model::ir::Visual,
+    selection: &Selection,
+) -> VisualFrame {
+    let fields: Vec<String> = visual
+        .dimensions
+        .iter()
+        .map(|d| label(&snapshot.model, &d.field))
+        .collect();
+    let query = tidepool_engine::RowsQuery {
+        fields: visual.dimensions.iter().map(|d| d.field.clone()).collect(),
+        selection: selection.clone(),
+        limit: visual.limit.map_or(DEFAULT_ROWS, |l| l as usize),
+    };
+    let answer = tidepool_engine::rows_relevant(snapshot, &query).and_then(|relevant| {
+        state.engine.rows(
+            snapshot,
+            &tidepool_engine::RowsQuery {
+                selection: relevant,
+                ..query
+            },
+        )
+    });
+    match answer {
+        Ok(answer) => VisualFrame {
+            id: visual.id.clone(),
+            result: Some(rows_result(&fields, &answer, snapshot.epoch)),
+            error: None,
+            compare: None,
+        },
+        Err(error) => VisualFrame {
+            id: visual.id.clone(),
+            result: None,
+            error: Some(error.0),
+            compare: None,
+        },
+    }
+}
+
 fn visual_frame(
     state: &AppState,
     snapshot: &Snapshot,
@@ -911,6 +1008,9 @@ fn visual_frame(
     selection: &Selection,
     sort: Option<&(String, bool)>,
 ) -> VisualFrame {
+    if visual.visual_type == VisualType::Rows {
+        return rows_frame(state, snapshot, visual, selection);
+    }
     let mut request = request(&snapshot.model, visual);
     if let Some((column, desc)) = sort {
         request.sort = vec![QuerySort {

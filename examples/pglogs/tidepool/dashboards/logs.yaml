@@ -1,0 +1,71 @@
+name: Postgres logs
+layout: { columns: 12, row_height: 80 }
+filters:
+  # what's typed selects the lines whose message contains it, ignoring the
+  # case of letters, and every visual answers for those lines
+  - field: logs.message
+    widget: search
+  - field: logs.logged_at
+    widget: date_range
+    default: { last: 1, unit: hour }
+  # each value with its lines (a level's own row count would be its
+  # severities)
+  - field: severities.level
+    measure: lines
+  - field: logs.source
+    measure: lines
+  - field: logs.database
+    measure: lines
+  - field: logs.application
+    measure: lines
+visuals:
+  - id: kpi_lines
+    type: kpi
+    metrics: [lines]
+    at: { x: 0, y: 0, w: 3, h: 2 }
+  - id: kpi_problems
+    type: kpi
+    metrics: [problems]
+    at: { x: 3, y: 0, w: 3, h: 2 }
+  - id: kpi_share
+    type: kpi
+    metrics: [problem_share]
+    at: { x: 6, y: 0, w: 3, h: 2 }
+  - id: kpi_backends
+    type: kpi
+    metrics: [backends]
+    at: { x: 9, y: 0, w: 3, h: 2 }
+  - id: per_minute
+    type: line
+    dimensions: [logs.minute]
+    metrics: [lines, problems]
+    on_brush: select_range
+    at: { x: 0, y: 2, w: 8, h: 4 }
+  - id: by_severity
+    type: bar
+    dimensions: [logs.severity]
+    metrics: [lines]
+    sort: { by: lines, desc: true }
+    on_click: select
+    at: { x: 8, y: 2, w: 4, h: 4 }
+  - id: conditions
+    type: table
+    dimensions: [sqlstates.condition]
+    metrics: [lines]
+    sort: { by: lines, desc: true }
+    limit: 30
+    on_click: select
+    at: { x: 0, y: 6, w: 4, h: 6 }
+  # the newest lines that pass the selection, newest first
+  - id: tail
+    type: rows
+    dimensions: [logs.logged_at, logs.severity, logs.database, sqlstates.condition, logs.message]
+    limit: 200
+    at: { x: 4, y: 6, w: 8, h: 8 }
+  - id: by_application
+    type: bar
+    dimensions: [logs.application]
+    metrics: [problems]
+    sort: { by: problems, desc: true }
+    on_click: select
+    at: { x: 0, y: 12, w: 4, h: 4 }

@@ -35,11 +35,13 @@ just docs-build      # production build of the doc site
 just docker          # the container image, UI included (tidepool:dev)
 just demo            # the Kayak demo: MQTT → Kayak → Tidepool (docker compose)
 just northwind       # Northwind live: Postgres dims + order events → Kayak → Tidepool
+just pglogs          # Postgres logs live: app → Postgres jsonlog → shipper → Tidepool, searched
 just run             # debug server on :7070, UI served from frontend/dist
 just dev             # server on :7070 + trunk on :7080 (hot reload); open :7080
 just bench           # ingest throughput per format, release build (args: --rows N --batch N --clients N)
 just bench-query     # query latency on the reference dataset (args: --orders N --runs N --metrics a,b,c)
 just bench-live      # freshness: 50 WebSocket sessions while ingesting 100k rows/s
+just bench-search    # text search and rows on synthetic log lines (args: --lines N --runs N)
 just feed            # keep a running server (`just run`) fed with retail data, to watch it live
 just oracle 1000     # the DuckDB oracle over 1000 seeds, release build (`just test` runs 40)
 just crash           # 1,000 crash points and 25 kill -9 cycles (`just test` runs fewer)
@@ -92,7 +94,7 @@ resolves names in expressions.)
 | `tidepool-server` | AGPL | axum: router from the endpoint table, OpenAPI, UI serving, live sessions, model/status, the config pipeline | M0–M7 ✓ |
 | `tidepool-oracle` | AGPL | test-only DuckDB reference + random generators | M3 ✓ / M4 ✓ |
 | `tidepool` | AGPL | the binary: CLI and wiring; crash and browser e2e tests | M0–M6 ✓ |
-| `tidepool-bench` | AGPL | load/latency harness (`just bench`, not in CI) | M2 ✓ (ingest) |
+| `tidepool-bench` | AGPL | load/latency harness (`just bench`, `bench-search`…, not in CI) | M2 ✓ (ingest) |
 | `tidepool-docsgen` | AGPL | the doc site's generated reference (`just docs`), and the tests that keep `website/` true | ✓ |
 | `frontend` (`tidepool-frontend`) | AGPL | the web UI: Leptos, client-side rendered, built by trunk | M6 ✓ / M7 ✓ |
 
@@ -333,6 +335,26 @@ change to `auth`, `listen` or `agents` is class `security`
   tree (map-cache variant `ancestor:d`) and never put in
   `Caches::derived`, whose values must not change.
 
+- **Text search** (`text.rs`, plan §5.7): `Condition::Contains(Needle)`,
+  ASCII case folded. On a plain string column the fast path reads it as
+  `Kind::Text` (searched, never decoded: a plain string in a dimension or
+  argument still means the general path), searching a morsel's arena
+  slice at once (fold into scratch + `memchr::memmem`, hits mapped to
+  rows by the offsets, a hit across a row boundary is none). Hits are
+  cached per segment and morsel (`Caches::text`, keyed by segment
+  identity, column and folded needle; a needle that contains a cached
+  one searches only its hits). Text tests run after the other
+  conditions; when few rows are left they're searched one at a time.
+  On a dictionary column it's an ordinary per-code test.
+- **Rows** (`rows.rs`): `Engine::rows` is the `rows` visual and
+  `POST /v1/rows`: the newest rows passing the anchor's conditions, by
+  row id, scanned in waves of morsels from the newest (`Prepared::select`,
+  shared with `scan`), only the kept rows decoded (`exec::Rows`). The
+  answer is kept per plan and brought up to date with the rows appended
+  since (`Kept`); deletes of kept rows that leave it short start over.
+  The oracle compares rows with DuckDB as a set, and order and limit
+  across paths (`check_rows`, also live in `check_live`).
+
 - **Queries without metrics** (`plan::rows_anchor`): dimensions only are
   the combinations there are. They're counted (`ROWS`) on the table that
   reaches every dimension and reaches fewest tables (ties by name), and
@@ -474,6 +496,19 @@ output under `assets/` (`data-target-path` in `index.html`) so the server's
 immutable-cache rule applies to them. It depends on `tidepool-protocol`
 directly: request and response types are shared, never generated or copied.
 
+The look is Radix Themes' (slate, teal accent, ruby for the selection;
+the system's fonts, fetched from nowhere): `style.css` defines Radix's colour steps once,
+light and dark, and the rules use only its named tokens (`--ink`, `--line`,
+`--tide`, `--anemone`…). Every page has the top bar (sections, the ⌘K
+palette, the pulse) and a status bar (`/v1/status` every 5 s); a dashboard
+adds the context bar (where you are, the selection, "answered in", timed by
+`InFlight`).
+
+Every metric value on screen goes through `board::formatted` with the
+format that applies to it (`VisualInfo::formats`, `FilterInfo::measure_format`):
+the grammar is `tidepool_config::format` (one parser, for the compiler and the
+UI), and a format is display only, never applied to what's queried or exported.
+
 Pages (hash routes, `route.rs`): the dashboard list, dashboards, the
 dashboard editor (`designer.rs`), the model browser (tables with an ingest `curl`, a relationship diagram, the metric
 catalog; from `GET /v1/model`), the config pages (`configui.rs`: the files
@@ -486,15 +521,26 @@ a `?token=` from the page URL) and the signals its messages feed; frames
 are applied to a `Board`. Rules the dashboard follows:
 
 - **Nothing that receives clicks is rebuilt per frame.** Each filter and
-  visual reads its own entry through a `Memo`; charts are one `EChart` for
-  the visual's life, fed a derived option signal (re-created, a chart
-  replays its intro and loses the click in flight). State that must outlive
-  a frame (a table's sort) lives in `Live`, not in the rebuilt view.
-- **Options are plain JSON built in `charts.rs`**, where `cargo test`
-  reaches them; `echarts.rs` (from the spike: read its README's interop
-  pitfalls before changing it) only hands them over. ECharts is vendored in
-  `frontend/vendor/` with its licence.
-- Logic without a DOM goes in `board.rs`, `charts.rs`, `route.rs`,
+  visual reads its own entry through a `Memo`; a chart is one `BarChart`
+  or `LineChart` for the visual's life, fed a data memo. State that must
+  outlive a frame (a table's sort) lives in `Live`, not in the rebuilt view.
+- **Charts are our own** (no chart library). `scale.rs` (linear and band
+  scales, nice ticks) and `charts.rs` (`BarLayout`, `LineLayout`: where
+  every mark and label goes for a size, `hit`/`nearest` for which category
+  a position means, `span` for a brush, `blend` for the frames between two
+  layouts) have no DOM and get plain tests. `plot.rs` draws them as SVG,
+  coloured only by classes in `style.css` (so the theme applies), and
+  handles pointer events once on the chart's box, turning positions into
+  categories through the layout: the marks carry no handlers, so a frame
+  may rebuild them mid-click. A click or a drag selects (a drag across
+  bars chooses several; across a line, a range), and the keyboard does the
+  same (arrows, Shift to extend, Enter; `aria-activedescendant` names the
+  place). Text is measured with a canvas (`plot::measure`).
+- Logic without a DOM goes in `board.rs`, `charts.rs`, `scale.rs`, `route.rs`,
+  `calendar.rs` (the date range picker's days, months, typed bounds and
+  half-open ranges; `datepick.rs` draws it, no native date inputs),
+  `commands.rs` (what the ⌘K palette offers and how a query ranks it;
+  `palette.rs` draws it),
   `textdiff.rs`, `highlight.rs` (the config editor's YAML colours, drawn
   by a `<pre>` behind a transparent textarea), `layout.rs` (the editor's grid: snapping, moving,
   resizing, never overlapping), `diagram.rs` (the relationship diagram's
@@ -510,7 +556,7 @@ are applied to a `Board`. Rules the dashboard follows:
   (`crates/tidepool/tests/e2e.rs`): headless Chrome over the DevTools
   protocol against the built UI (on a copy of the example: config
   changes are written back), clicking a bar, watching a live update,
-  going back, adding a table in the config editor, and making a dashboard
+  going back, brushing the trend, dragging across bars, choosing with the keys, adding a table in the config editor, and making a dashboard
   in the dashboard editor (dragging and resizing with real mouse events). It needs Chrome, so it isn't in `just ci`; run it after UI
   changes.
 
@@ -528,6 +574,12 @@ It is a workspace member, so `just ci` lints and tests it natively.
   (`snapshot`) into upsert tables (unchanged rows skipped), and a publisher
   replaying its orders as events through Kayak's `http` input;
   `freshness.py` measures event → queryable.
+- `examples/pglogs/` (`just pglogs`) is the logs test bed: Postgres
+  logging everything as jsonlog, a Python shop app that makes errors on
+  purpose, a stdlib shipper tailing the log into Tidepool (positions
+  saved, idempotency keys from where a batch starts). `sample.ndjson` is
+  a real run's lines, used by `tidepool-server/tests/pglogs.rs`; refresh
+  it from a running stack when the shipper's mapping changes.
 - `examples/retail/` is the example project. Keep it covering every config
   feature as features land. A server run on it writes applied changes back
   into it (`git_commit: false` keeps them out of history); the demo in

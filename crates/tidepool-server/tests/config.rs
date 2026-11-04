@@ -384,6 +384,10 @@ async fn a_config_changed_while_down_is_applied_at_startup_and_destruction_needs
     if let Err(err) = std::fs::write(&path, edited) {
         panic!("{err}");
     }
+    // and the dashboard that searches it
+    if let Err(err) = std::fs::remove_file(config.path().join("dashboards/shipping_notes.yaml")) {
+        panic!("{err}");
+    }
     match open(config.path(), Some(data.path()), false).await {
         Ok(_) => panic!("removing a column with data shouldn't start without the flag"),
         Err(err) => assert!(
@@ -823,7 +827,11 @@ async fn sessions_follow_a_model_change() {
         .as_array()
         .map(|d| d.iter().map(|d| &d["id"]).collect())
         .unwrap_or_default();
-    assert_eq!(left, vec![&json!("sales_recent")], "only the other one");
+    assert_eq!(
+        left,
+        vec![&json!("sales_recent"), &json!("shipping_notes")],
+        "only the others"
+    );
     assert_eq!(next(&mut socket, "selection").await["fields"], json!([]));
     let error = next(&mut socket, "error").await;
     assert!(

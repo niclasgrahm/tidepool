@@ -32,7 +32,7 @@ The directory `shop/` now holds a small retail project:
 
 - four tables: `orders`, `customers`, `products` and `categories`;
 - a model with metrics such as `revenue` and `avg_order_value`;
-- two dashboards: `sales` and `sales_recent`.
+- three dashboards: `sales`, `sales_recent` and `shipping_notes` (a search of the order notes).
 
 All of them are YAML files. [The project directory](/project/the-project)
 explains each file.

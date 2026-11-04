@@ -11,6 +11,7 @@
 
 pub mod dashboard;
 pub mod diag;
+pub mod format;
 pub mod ossie;
 pub mod project;
 pub mod schema;
