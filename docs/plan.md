@@ -319,7 +319,7 @@ tidepool/
 │   └── tidepool/                 # the binary: CLI (serve, validate, plan, init) wiring it all together
 ├── frontend/                     # Leptos CSR app (tidepool-frontend), built by trunk into frontend/dist
 ├── tidepool-bench/               # load generator + benchmark scenarios (like kayak-bench)
-├── justfile                      # dev, run, build, frontend, ci, test, lint, deny, miri, bench (same verbs as Kayak)
+├── justfile                      # dev, run, build, frontend, ci, test, lint, deny, bench (same verbs as Kayak)
 ├── examples/retail/              # example project + synthetic data generator config
 └── docs/
 ```
@@ -1305,12 +1305,12 @@ Correctness is the main risk of an incremental engine. A bug shows up as **plaus
 
 1. **Oracle tests (`tidepool-oracle`)**:
    - A generator creates random models (star/snowflake, 1–4 dimensions, random types and encodings), random data, random metrics from the supported vocabulary, random view queries and random selections.
-   - Each query runs on Tidepool and, translated to plain SQL, on DuckDB (`duckdb` crate, bundled, dev-dependency only).
+   - Each query runs on Tidepool and, translated to plain SQL, on DuckDB (`duckdb` crate, test-only, linked against DuckDB's release of its version: `.cargo/config.toml`).
    - Results are compared exactly (decimals) or within ε (floats).
 2. **Incremental oracle:** the same, but the test interleaves appends, upserts, deletes, seals, selection changes and config changes. It checks every live subscription after every epoch against a cold DuckDB evaluation. This is the most important test in the repo, and it runs in CI with a fixed seed budget plus a nightly long run.
 3. **Shadow verification in production:** an optional setting (`verify_sample: 0.01`) occasionally recomputes a live result cold, with no caches, and compares it. Mismatches are logged and counted as metrics.
 4. **Crash/recovery:** fault injection in the WAL and the segment writer (crash at random points), restart, compare with the oracle. Also a `kill -9` loop test against the real binary.
-5. **Concurrency:** `loom` for the tail watermark protocol and snapshot publication. Miri on the store's unsafe code.
+5. **Concurrency:** `loom` for the tail watermark protocol and snapshot publication. No Miri: the workspace has no `unsafe` (`unsafe_code = "deny"`), so the job went on 2026-11-04. It comes back if that changes.
 6. **Fuzzing (`cargo-fuzz`):** JSON/NDJSON/Arrow decoders, YAML config parsing and compilation, expression parser.
 7. **Property tests (`proptest`):** dictionary encode/decode, bit-packing, aggregate-state merge laws (associativity, commutativity, identity).
 8. **Performance:**
@@ -1328,9 +1328,9 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 ### M0: Skeleton + frontend spike (1–2 wks)
 **Status: done 2026-10-07.**
 
-- Cargo workspace with the crates above. `justfile` with `dev`, `run`, `build`, `frontend`, `ci`, `test`, `lint`, `deny`, `miri`, `bench`.
+- Cargo workspace with the crates above. `justfile` with `dev`, `run`, `build`, `frontend`, `ci`, `test`, `lint`, `deny`, `bench`.
 - Lints as in Kayak: clippy `all` + `pedantic`, `unwrap_used`/`expect_used`, applied to tests too (`clippy.toml`).
-- CI (GitHub Actions running `just ci`): fmt, clippy `-D warnings`, test, Miri on `tidepool-store`, frontend lint and test, a licence-declaration test, `cargo deny`.
+- CI (GitHub Actions running `just ci`): fmt, clippy `-D warnings`, test, frontend lint and test, a licence-declaration test, `cargo deny`; beside it the release build, `just e2e` and the doc site. `deep.yml` runs the oracle and the crash suites at depth nightly.
 - `CLAUDE.md` with commands, the definition of done (new behaviour ships with a test that fails without it; `just ci` green before anything is called done), and an architecture tour that grows with the code.
 - Licence files per D13.
 - Endpoint-table skeleton (routes + roles + OpenAPI) ported from Kayak.
