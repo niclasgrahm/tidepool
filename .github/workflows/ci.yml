@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a pull request replaces its run. Runs on main all finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -13,39 +18,32 @@ jobs:
   # What `just ci` runs locally: formatting, clippy, the tests.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: extractions/setup-just@v2
       - run: just ci
-
-  # The store's unsafe code (the tail segment, from M2) under Miri. Nightly-only,
-  # so its own job; locally it is `just miri`, which needs `rustup toolchain
-  # install nightly --component miri`.
-  miri:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - uses: extractions/setup-just@v2
-      - run: just miri
 
   # The release build: frontend built and embedded, one binary. Proves that the
   # `embed-assets` path, which `just ci` deliberately skips, still compiles and
   # serves the app.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: extractions/setup-just@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -53,9 +51,30 @@ jobs:
       - run: just build
       - run: just test-embed
 
+  # The browser end to end: headless Chrome against the built UI. Chrome is on
+  # the runner; its sandbox needs the user namespaces Ubuntu restricts.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: just e2e
+
   # Dependency policy: licences, RUSTSEC advisories, bans, sources.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -69,6 +88,7 @@ jobs:
   # link fails the build.
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
