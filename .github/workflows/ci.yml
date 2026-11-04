@@ -89,6 +89,10 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The action lists a pull request's commits through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
