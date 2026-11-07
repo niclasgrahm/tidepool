@@ -49,7 +49,8 @@ Documentation: <https://propell.dev/tidepool/> (the source is
 - The reference (config files, HTTP API, MCP tools) is generated from the
   source by `just docs`.
 
-For contributors: [docs/plan.md](docs/plan.md) is the design and the
-milestones, [CLAUDE.md](CLAUDE.md) the conventions, [licensing.md](licensing.md)
-the licence split (the protocol and config crates are Apache-2.0, the rest
-AGPL-3.0-or-later).
+For contributors: [CONTRIBUTING.md](CONTRIBUTING.md) is where to start,
+[docs/plan.md](docs/plan.md) is the design and the milestones,
+[CLAUDE.md](CLAUDE.md) the conventions, [licensing.md](licensing.md) the licence
+split (the protocol and config crates are Apache-2.0, the rest
+AGPL-3.0-or-later). To report a vulnerability, see [SECURITY.md](SECURITY.md).

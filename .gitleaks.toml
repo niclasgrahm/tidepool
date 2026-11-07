@@ -1,0 +1,9 @@
+# Secret scanning: `just scan-secrets` over the whole history, CI's `secrets`
+# job over each push and pull request.
+#
+# Anything allowlisted here must be committed on purpose and fake, with the
+# reason next to its entry. There is nothing to allowlist yet, so a hit is worth
+# stopping for.
+
+[extend]
+useDefault = true
