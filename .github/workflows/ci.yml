@@ -84,6 +84,23 @@ jobs:
         with:
           command: check
 
+  # Secret scan of the commits in each push and pull request. `just scan-secrets`
+  # is the same scan over the whole history.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The action lists a pull request's commits through the API.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # The doc site. Its reference is committed, and `tidepool-docsgen`'s tests
   # (in `test` above) are what say it still matches the source. This job
   # checks that the site itself builds: a doc comment can be valid Rust and

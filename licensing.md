@@ -39,8 +39,9 @@ permissive crate may not depend on a copyleft one.
 
 Contributions are inbound = outbound: a patch to an Apache-2.0 crate is
 Apache-2.0, a patch anywhere else is AGPL-3.0-or-later, unless the patch says
-otherwise. A CLA will be in place before the first external contribution is
-merged, so that the commercial licence stays possible to grant.
+otherwise. Contributors also sign the [CLA](cla.md), so that the commercial
+licence stays possible to grant. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+rest.
 
 ## adding a crate
 

@@ -31,6 +31,10 @@ fmt-check:
 deny:
   cargo deny check
 
+# secret scan over the whole git history (needs gitleaks; .gitleaks.toml)
+scan-secrets:
+  gitleaks git --no-banner --redact .
+
 # build the web UI into frontend/dist (needs trunk and the wasm32 target)
 frontend:
   cd frontend && trunk build --release
