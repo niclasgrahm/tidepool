@@ -27,15 +27,11 @@ export default defineConfig({
   // other dead link still fails the build
   ignoreDeadLinks: 'localhostLinks',
   head: [
-    ['meta', { name: 'theme-color', content: '#1f7a73' }],
-    // the product's faces: Bricolage Grotesque for display, Atkinson
-    // Hyperlegible for text (see landing/visual-language.md)
-    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
-    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
-    ['link', {
-      rel: 'stylesheet',
-      href: 'https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&display=swap',
-    }],
+    // teal 9, the UI's accent fill. The type is the system's, as in the UI,
+    // so nothing is fetched (see landing/visual-language.md).
+    ['meta', { name: 'theme-color', content: '#12a594' }],
+    // the UI's mark; `head` is not given the base, so it's written out
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/tidepool/favicon.svg' }],
     ['meta', { property: 'og:title', content: 'tidepool' }],
     ['meta', {
       property: 'og:description',

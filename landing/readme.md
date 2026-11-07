@@ -24,6 +24,8 @@ To take them again:
 3. Run `./target/release/tidepool serve --config target/shots`.
 4. In another terminal, run `./target/release/tidepool feed`.
 5. Capture each page at 1600×1000, device scale 2, once with
-   `prefers-color-scheme: light` and once with `dark` (Playwright:
-   `browser.newContext({ viewport, deviceScaleFactor: 2, colorScheme })`).
-   For `02`, click the second value of the region filter.
+   `prefers-color-scheme: light` and once with `dark`, and with reduced
+   motion, so that no value is caught in its flash (Playwright:
+   `browser.newContext({ viewport, deviceScaleFactor: 2, colorScheme,
+   reducedMotion: 'reduce' })`). For `02`, click `east` in the region
+   filter. Save `02` as JPEG (quality 82) to `website/public/screens/` too.
