@@ -77,14 +77,17 @@ function sum(table: Record<Region, Record<Category, number>>, r: (r: Region) => 
 
 // the region list: its measure under the *other* field's selection, and its
 // state; with selections both ways, a region with no orders in the selected
-// categories is excluded
-const regionRows = computed(() =>
-  REGIONS.map((r) => {
+// categories is excluded. The measure is also a bar behind each value, as
+// long as its share of the largest, as in the product.
+const regionRows = computed(() => {
+  const rows = REGIONS.map((r) => {
     const value = sum(revenue, (x) => x === r, inCategories)
     const state = region.value.includes(r) ? 'selected' : value === 0 ? 'excluded' : 'possible'
     return { r, value, state }
-  }),
-)
+  })
+  const max = Math.max(1, ...rows.map((row) => row.value))
+  return rows.map((row) => ({ ...row, share: (row.value / max) * 100 }))
+})
 const categoryBars = computed(() => {
   const rows = CATEGORIES.map((c) => ({ c, value: sum(revenue, inRegions, (y) => y === c) }))
   const max = Math.max(1, ...rows.map((b) => b.value))
@@ -156,58 +159,82 @@ const shot = (name: string) => withBase(`/screens/${name}`)
     </div>
 
     <figure class="replica" aria-label="a working replica of a tidepool dashboard">
-      <div class="strip">
-        <span class="brand">tidepool</span>
-        <span class="pulse" :class="{ paused }">
-          <span class="dot" aria-hidden="true"></span>
-          <span>{{ paused ? 'paused' : 'Live' }} · epoch {{ epoch }} · {{ rate }} rows/s</span>
-          <button type="button" @click="paused = !paused">{{ paused ? 'Resume' : 'Pause' }}</button>
-        </span>
-      </div>
-      <div class="toolbar">
-        <strong>Sales overview</strong>
-        <ul class="chips" aria-label="the selection">
-          <li v-if="region.length" class="chip"><span class="chip-field">region</span> {{ region.join(', ') }}<button type="button" aria-label="clear region" @click="clearField('region')">×</button></li>
-          <li v-if="category.length" class="chip"><span class="chip-field">category</span> {{ category.join(', ') }}<button type="button" aria-label="clear category" @click="clearField('category')">×</button></li>
-          <li v-if="!region.length && !category.length" class="hint">Click a region or a bar. Ctrl/⌘ adds to the selection.</li>
-        </ul>
-        <button type="button" class="back" :disabled="!history.length" @click="back">Back</button>
-      </div>
-      <div class="board">
-        <div class="rail">
-          <h3>region <span class="measure">revenue</span></h3>
-          <button
-            v-for="row in regionRows"
-            :key="row.r"
-            type="button"
-            class="value"
-            :class="[row.state, { fresh: fresh.has('r:' + row.r) }]"
-            @click="pickRegion(row.r, $event)"
-          >
-            <span>{{ row.r }}</span>
-            <span class="num">{{ row.value ? euro(row.value) : '–' }}</span>
-          </button>
-        </div>
-        <div class="visuals">
-          <div class="visual kpi">
-            <h3>revenue</h3>
-            <p class="kpi-value" :class="{ fresh: fresh.has('kpi') }">{{ euro(kpiRevenue) }}</p>
-            <p class="kpi-sub">{{ count(kpiOrders) }} orders</p>
-          </div>
-          <div class="visual bars">
-            <h3>revenue by category</h3>
-            <button
-              v-for="bar in categoryBars"
-              :key="bar.c"
-              type="button"
-              class="bar-row"
-              :class="{ selected: bar.selected, fresh: fresh.has('c:' + bar.c) }"
-              @click="pickCategory(bar.c, $event)"
-            >
-              <span class="bar-label">{{ bar.c }}</span>
-              <span class="bar-track"><span class="bar" :style="{ width: bar.width + '%' }"></span></span>
-              <span class="num">{{ euro(bar.value) }}</span>
+      <div class="app">
+        <div class="strip">
+          <span class="brand">
+            <svg class="brand-mark" viewBox="0 0 20 20" aria-hidden="true">
+              <rect x="1" y="1" width="18" height="18" rx="5" />
+              <path d="M4 12c2-2 4-2 6 0s4 2 6 0" />
+              <path class="faint" d="M4 8c2-2 4-2 6 0s4 2 6 0" />
+            </svg>
+            tidepool
+          </span>
+          <span class="app-nav" aria-hidden="true"><span class="current">Dashboards</span><span>Model</span><span>Config</span></span>
+          <span class="grow"></span>
+          <span class="pulse" :class="{ paused }">
+            <span class="pill"><span class="dot" aria-hidden="true"></span>{{ paused ? 'Paused' : 'Live' }} <code>epoch {{ count(epoch) }}</code></span>
+            <button type="button" class="icon-button" :aria-label="paused ? 'Resume' : 'Pause'" @click="paused = !paused">
+              <svg v-if="paused" viewBox="0 0 12 12" aria-hidden="true"><path class="solid" d="M3 1.5v9l7-4.5z" /></svg>
+              <svg v-else viewBox="0 0 12 12" aria-hidden="true"><rect class="solid" x="2" y="1.5" width="2.5" height="9" rx="0.5" /><rect class="solid" x="7.5" y="1.5" width="2.5" height="9" rx="0.5" /></svg>
             </button>
+          </span>
+        </div>
+        <div class="toolbar">
+          <span class="crumbs"><span>Dashboards</span><span class="crumb-sep">/</span><strong>Sales overview</strong></span>
+          <span class="divider" aria-hidden="true"></span>
+          <span class="history">
+            <button type="button" class="icon-button" aria-label="Back" :disabled="!history.length" @click="back">
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5" /></svg>
+            </button>
+          </span>
+          <ul class="chips" aria-label="the selection">
+            <li v-if="region.length" class="chip"><span class="chip-field">customers.region</span><span class="chip-value">{{ region.join(', ') }}</span><button type="button" aria-label="Clear customers.region" @click="clearField('region')"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2 2 8" /></svg></button></li>
+            <li v-if="category.length" class="chip"><span class="chip-field">products.category</span><span class="chip-value">{{ category.join(', ') }}</span><button type="button" aria-label="Clear products.category" @click="clearField('category')"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2 2 8" /></svg></button></li>
+            <li v-if="!region.length && !category.length" class="hint">Click a value or a bar. Ctrl/⌘-click adds to the selection.</li>
+          </ul>
+        </div>
+        <div class="board">
+          <section class="filter">
+            <header class="filter-head">
+              <h3>region</h3>
+              <span class="filter-meta">{{ region.length ? `${region.length} of ${REGIONS.length}` : `${REGIONS.length} values` }} · revenue</span>
+            </header>
+            <button
+              v-for="row in regionRows"
+              :key="row.r"
+              type="button"
+              class="value"
+              :class="[row.state, { fresh: fresh.has('r:' + row.r) }]"
+              :aria-pressed="row.state === 'selected'"
+              @click="pickRegion(row.r, $event)"
+            >
+              <span class="meter" :style="{ width: row.share + '%' }"></span>
+              <span class="label">{{ row.r }}</span>
+              <span class="rows">{{ row.value ? euro(row.value) : '–' }}</span>
+            </button>
+          </section>
+          <div class="visuals">
+            <div class="visual kpi">
+              <div class="visual-head"><h3>Revenue</h3></div>
+              <p class="kpi-value" :class="{ fresh: fresh.has('kpi') }">{{ euro(kpiRevenue) }}</p>
+              <p class="kpi-delta"><span class="delta">{{ count(kpiOrders) }}</span> orders · {{ rate }} rows/s</p>
+            </div>
+            <div class="visual bars">
+              <div class="visual-head"><h3>Revenue by category</h3></div>
+              <button
+                v-for="bar in categoryBars"
+                :key="bar.c"
+                type="button"
+                class="bar-row"
+                :class="{ selected: bar.selected, fresh: fresh.has('c:' + bar.c) }"
+                :aria-pressed="bar.selected"
+                @click="pickCategory(bar.c, $event)"
+              >
+                <span class="bar-label">{{ bar.c }}</span>
+                <span class="bar-track"><span class="bar" :style="{ width: bar.width + '%' }"></span></span>
+                <span class="num">{{ euro(bar.value) }}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -220,7 +247,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <section class="section" id="associative">
   <div class="section-inner split">
     <div>
-      <p class="label">associative</p>
+      <p class="eyebrow">associative</p>
       <h2>a click filters the whole page</h2>
       <p>A click on a value, a bar or a table row selects it. Every visual on the dashboard then shows only the data that the selection allows. Each filter shows its values in three states:</p>
       <ul class="states">
@@ -238,7 +265,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
       <p><a :href="link('/project/selections')">filters and selections →</a></p>
     </div>
     <figure class="shot">
-      <img class="only-light" :src="shot('dashboard-selected-light.jpg')" alt="The sales dashboard with a region selected: a coral chip, the other regions possible, every visual filtered" loading="lazy" width="1600" height="1000">
+      <img class="only-light" :src="shot('dashboard-selected-light.jpg')" alt="The sales dashboard with a region selected: a selection chip, the other regions possible, every visual filtered" loading="lazy" width="1600" height="1000">
       <img class="only-dark" :src="shot('dashboard-selected-dark.jpg')" alt="The sales dashboard with a region selected, in the dark theme" loading="lazy" width="1600" height="1000">
     </figure>
   </div>
@@ -248,7 +275,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <section class="section alt" id="live">
   <div class="section-inner split">
     <div>
-      <p class="label">live</p>
+      <p class="eyebrow">live</p>
       <h2>rows in, dashboards move</h2>
       <p>Each table gets an ingest endpoint when you declare it. Send JSON, NDJSON or Arrow. tidepool checks every value and writes all of a batch or none of it. At each epoch, every open dashboard gets only what changed.</p>
       <ul class="facts">
@@ -277,7 +304,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <section class="section" id="code">
   <div class="section-inner split">
     <div>
-      <p class="label">the project is code</p>
+      <p class="eyebrow">the project is code</p>
       <h2>the model lives in git</h2>
       <p>Tables, the semantic model and dashboards are YAML files. The model is <a href="https://ossie.apache.org/">Apache Ossie</a>, with SQL for fields and metrics. tidepool plans every change and gives it a class. It applies the change while it serves, and writes it back to the files.</p>
       <ul class="classes">
@@ -314,7 +341,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <!-- ========================================================== numbers -->
 <section class="section alt" id="numbers">
   <div class="section-inner">
-    <p class="label">fast, and checked</p>
+    <p class="eyebrow">fast, and checked</p>
     <h2>measured, and compared with DuckDB</h2>
     <p class="wide">The numbers are from an Apple M1 Max (10 cores), release build, with the benchmarks in the repository. The reference is a retail star schema.</p>
     <dl class="numbers four">
@@ -345,7 +372,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <section class="section" id="kayak">
   <div class="section-inner split">
     <div>
-      <p class="label">with kayak</p>
+      <p class="eyebrow">with kayak</p>
       <h2>brokers in, through kayak</h2>
       <p>tidepool reads HTTP only. Its sister project, <a href="https://propell.dev/kayak/">kayak</a>, reads MQTT, Kafka, NATS, OPC UA and databases. kayak's <code>tidepool</code> output checks its mapping against the table at startup, and sends each batch with an idempotency key.</p>
       <p><code>just demo</code> starts a simulated plant: MQTT → kayak → tidepool, with a live dashboard of the plant floor.</p>
@@ -372,7 +399,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <section class="section alt" id="agents">
   <div class="section-inner split">
     <div>
-      <p class="label">agents</p>
+      <p class="eyebrow">agents</p>
       <h2>an MCP server, with a policy</h2>
       <p>An agent can read the model, calculate metrics, and plan changes over MCP. Each tool calls the HTTP endpoint that it wraps, with the token of the agent. The agent applies only the change classes that you allow. A person approves the rest.</p>
       <p><a :href="link('/agents')">agents →</a></p>
@@ -389,7 +416,7 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 <!-- ============================================================ limits -->
 <section class="section" id="limits">
   <div class="section-inner">
-    <p class="label">limits</p>
+    <p class="eyebrow">limits</p>
     <h2>what tidepool does not do</h2>
     <div class="limits">
       <div><h3>one machine</h3><p>No cluster and no shards. The target is up to about 500 million fact rows on one machine.</p></div>
@@ -425,18 +452,18 @@ const shot = (name: string) => withBase(`/screens/${name}`)
 .landing-page .VPPage { padding: 0 !important; }
 
 .landing {
-  --display: var(--tp-display);
   color: var(--tp-ink);
   font-variant-numeric: tabular-nums;
 }
 .landing a { color: var(--tp-tide); text-decoration: none; }
 .landing a:hover { text-decoration: underline; }
-.landing code { font-family: var(--vp-font-family-mono); font-size: 0.88em; background: color-mix(in srgb, var(--tp-kelp) 55%, transparent); padding: 1px 5px; border-radius: 4px; }
-.landing h1, .landing h2, .landing h3 { font-family: var(--display); letter-spacing: -0.01em; color: var(--tp-ink); margin: 0; border: 0; padding: 0; }
+.landing code { font-family: var(--tp-mono); font-size: 0.86em; background: var(--tp-gray-3); padding: 1px 5px; border-radius: 3px; }
+.landing h1, .landing h2, .landing h3 { font-family: var(--tp-display); letter-spacing: -0.01em; color: var(--tp-ink); margin: 0; border: 0; padding: 0; }
 .landing p { margin: 0 0 14px; line-height: 1.55; }
+.landing button { font: inherit; color: inherit; }
 
 /* ---------------------------------------------------------------- hero */
-.hero { border-bottom: 1px solid var(--tp-sand); }
+.hero { border-bottom: 1px solid var(--tp-line); }
 .hero-inner {
   max-width: 1240px;
   margin: 0 auto;
@@ -446,137 +473,250 @@ const shot = (name: string) => withBase(`/screens/${name}`)
   gap: 48px;
   align-items: center;
 }
-.hero h1 { font-size: clamp(38px, 5vw, 60px); line-height: 1.02; font-weight: 700; margin-bottom: 20px; }
-.hero h1 .thin { display: block; font-weight: 500; color: var(--tp-tide); }
+.hero h1 { font-size: clamp(38px, 5vw, 58px); line-height: 1.02; font-weight: 700; letter-spacing: -0.035em; margin-bottom: 20px; }
+.hero h1 .thin { display: block; font-weight: 600; color: var(--tp-tide); }
 .lede { font-size: 17px; color: var(--tp-ink-soft); max-width: 34em; }
 .install {
   margin: 22px 0 18px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   background: var(--tp-surface);
-  border-left: 3px solid var(--tp-tide);
-  font: 13px/1.7 var(--vp-font-family-mono);
+  border: 1px solid var(--tp-line);
+  border-radius: 6px;
+  font: 13px/1.7 var(--tp-mono);
   overflow-x: auto;
   white-space: pre;
 }
-.install .p, .code .p { color: var(--tp-ink-soft); user-select: none; }
+.install .p, .code .p { color: var(--tp-gray-9); user-select: none; }
 .install .c, .code .c { color: var(--tp-ink-soft); }
-.hero-links { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-.hero-links a {
-  padding: 6px 16px;
+.hero-links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.landing .hero-links a {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 14px;
   border: 1px solid var(--tp-sand);
   border-radius: 4px;
+  background: var(--tp-surface);
   color: var(--tp-ink);
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 500;
 }
-.hero-links a.primary { background: var(--tp-tide); border-color: var(--tp-tide); color: var(--tp-paper); }
-.hero-links a:hover { text-decoration: none; border-color: var(--tp-tide); }
+.landing .hero-links a:hover { text-decoration: none; background: var(--tp-gray-3); }
+.landing .hero-links a.primary { background: var(--tp-tide-fill); border-color: var(--tp-tide-fill); color: #fff; }
+.landing .hero-links a.primary:hover { background: var(--tp-tide-fill); filter: brightness(0.94); }
 .fine { font-size: 13px; color: var(--tp-ink-soft); }
 
 /* ------------------------------------------------------------ replica */
-.replica { margin: 0; background: var(--tp-paper); border: 1px solid var(--tp-sand); font-size: 13px; }
-.replica .strip { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--tp-sand); }
-.replica .brand { font: 700 15px/1 var(--display); }
-.pulse { display: flex; align-items: center; gap: 8px; color: var(--tp-ink-soft); font-size: 12px; }
-.pulse .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tp-tide); }
-.pulse.paused .dot { background: var(--tp-anemone); }
-.pulse button, .toolbar .back { border: 1px solid var(--tp-sand); background: transparent; border-radius: 4px; padding: 1px 8px; cursor: pointer; color: var(--tp-ink); font: inherit; }
-.toolbar .back:disabled { opacity: 0.4; cursor: default; }
-.toolbar { display: flex; align-items: center; gap: 8px 14px; padding: 10px 14px 0; flex-wrap: wrap; }
-.toolbar strong { font: 700 16px/1.1 var(--display); }
-.chips { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; flex: 1; flex-wrap: wrap; min-height: 22px; align-items: center; }
-.chip { display: flex; align-items: center; gap: 5px; padding: 1px 2px 1px 9px; border-radius: 999px; background: var(--tp-anemone); color: #fff; font-size: 12px; }
-.chip-field { opacity: 0.85; }
-.chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 6px; font: inherit; }
+/* The UI's own rules (frontend/style.css), at the UI's own sizes: 13px
+   text, 1px edges, 6px cards, numbers in mono. */
+.replica { margin: 0; }
+.app {
+  overflow: hidden;
+  background: var(--tp-paper);
+  border: 1px solid var(--tp-line);
+  border-radius: 8px;
+  box-shadow: var(--tp-shadow-pop);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.app .grow { flex: 1; }
+.app .icon-button {
+  width: 24px; height: 24px; flex: none;
+  display: inline-grid; place-items: center;
+  padding: 0;
+  border: 1px solid var(--tp-sand); border-radius: 4px;
+  background: var(--tp-surface); color: var(--tp-ink);
+  cursor: pointer;
+}
+.app .icon-button:hover:not(:disabled) { background: var(--tp-gray-3); }
+.app .icon-button:disabled { opacity: 0.45; cursor: default; }
+.app .icon-button svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.app .icon-button svg .solid { fill: currentColor; stroke: none; }
+.app :focus-visible { outline: 2px solid var(--tp-tide-fill); outline-offset: 2px; }
+.app code { padding: 0; background: none; font-size: 11px; }
+
+.strip {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 40px; padding: 6px 10px;
+  background: var(--tp-panel);
+  border-bottom: 1px solid var(--tp-line);
+}
+.brand { display: flex; align-items: center; gap: 8px; font: 600 14px/1 var(--tp-display); letter-spacing: -0.01em; }
+.brand-mark { width: 20px; height: 20px; }
+.brand-mark rect { fill: var(--tp-tide-fill); }
+.brand-mark path { fill: none; stroke: #fff; stroke-width: 1.6; stroke-linecap: round; }
+.brand-mark path.faint { stroke-opacity: 0.6; }
+.app-nav { display: flex; gap: 2px; }
+.app-nav span { padding: 3px 8px; border-radius: 4px; color: var(--tp-ink-soft); }
+.app-nav .current { background: var(--tp-kelp); color: var(--tp-ink); font-weight: 500; }
+.pulse { display: flex; align-items: center; gap: 6px; }
+.pulse .pill {
+  height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px;
+  border-radius: 999px; background: var(--tp-green-3); color: var(--tp-green-11);
+  font-size: 12px; font-weight: 500; white-space: nowrap;
+}
+.pulse .pill code { font-weight: 400; color: inherit; }
+.pulse .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tp-green-9); box-shadow: 0 0 0 3px var(--tp-green-6); }
+.pulse.paused .pill { background: var(--tp-amber-3); color: var(--tp-amber-11); }
+.pulse.paused .dot { background: var(--tp-amber-11); box-shadow: none; }
+
+.toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+  min-height: 38px; padding: 6px 10px;
+  background: var(--tp-panel);
+  border-bottom: 1px solid var(--tp-line);
+}
+.crumbs { display: flex; align-items: center; gap: 6px; color: var(--tp-ink-soft); white-space: nowrap; }
+.crumbs strong { font-weight: 600; color: var(--tp-ink); }
+.crumb-sep { color: var(--tp-gray-8); }
+.divider { width: 1px; height: 18px; background: var(--tp-line); }
+.history { display: flex; }
+.chips { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; min-height: 24px; margin: 0; padding: 0; list-style: none; }
+.chip {
+  height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 2px 0 8px;
+  border: 1px solid var(--tp-anemone-line); border-radius: 4px;
+  background: var(--tp-anemone-soft); color: var(--tp-anemone-text);
+  font-size: 12px;
+}
+.chip-field { font: 11px var(--tp-mono); opacity: 0.8; }
+.chip-value { font-weight: 500; }
+.chip button { width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; cursor: pointer; }
+.chip button:hover { background: var(--tp-ruby-4); }
+.chip button svg { width: 10px; height: 10px; stroke: currentColor; stroke-width: 1.4; }
 .hint { color: var(--tp-ink-soft); font-size: 12px; }
-.board { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 14px; padding: 12px 14px 14px; }
-.rail h3, .visual h3 { font: 500 13px/1.2 var(--display); margin-bottom: 7px; }
-.measure { color: var(--tp-ink-soft); font-weight: 400; }
+
+.board { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 8px; padding: 8px; align-items: start; }
+.filter, .visual {
+  min-width: 0;
+  background: var(--tp-surface);
+  border: 1px solid var(--tp-line);
+  border-radius: 6px;
+}
+.filter { padding: 8px; }
+.filter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.landing .filter-head h3 { font: 500 11px/1.2 var(--tp-display); letter-spacing: 0.04em; text-transform: uppercase; color: var(--tp-ink-soft); }
+.filter-meta { font: 10.5px var(--tp-mono); color: var(--tp-ink-soft); white-space: nowrap; }
 .value {
-  display: flex; justify-content: space-between; align-items: center; width: 100%;
-  height: 28px; margin-bottom: 2px; padding: 3px 8px;
-  border: 0; border-left: 4px solid var(--tp-tide); background: var(--tp-surface);
-  color: var(--tp-ink); font: inherit; text-align: left; cursor: pointer;
+  position: relative; display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 24px; margin-bottom: 2px; padding: 0 6px;
+  border: 0; border-radius: 3px; background: transparent;
+  font-size: 12px; text-align: left; cursor: pointer; overflow: hidden;
 }
-.value.selected { border-left-color: var(--tp-anemone); background: var(--tp-anemone); color: #fff; }
-.value.excluded { border-left-color: var(--tp-kelp); background: transparent; color: var(--tp-ink-soft); }
-.value .num { opacity: 0.8; }
-.visuals { display: grid; grid-template-rows: auto 1fr; gap: 12px; min-width: 0; }
-.visual { padding: 10px 12px; background: var(--tp-surface); border-top: 3px solid var(--tp-tide); }
-.kpi-value { font: 700 30px/1 var(--display); margin: 2px 0 4px; display: inline-block; }
-.kpi-sub { color: var(--tp-ink-soft); margin: 0; font-size: 12px; }
+/* the state's mark: a small square before the value */
+.value::before, .state::before {
+  content: ""; position: relative; z-index: 1;
+  flex: 0 0 8px; width: 8px; height: 8px; border-radius: 2px;
+  background: var(--tp-tide-fill);
+}
+.value:hover { background: var(--tp-gray-3); }
+.value .label { position: relative; z-index: 1; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.value .rows { position: relative; z-index: 1; font: 11px var(--tp-mono); color: var(--tp-ink-soft); white-space: nowrap; }
+.value .meter { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--tp-tide-soft); transition: width 0.3s ease; }
+.value.selected, .value.selected:hover { background: var(--tp-anemone); color: #fff; }
+.value.selected::before { background: #fff; }
+.value.selected .rows { color: inherit; opacity: 0.85; }
+.value.selected .meter { background: rgb(255 255 255 / 0.16); }
+.value.excluded { background: var(--tp-gray-2); color: var(--tp-gray-9); }
+.value.excluded::before { background: var(--tp-gray-7); }
+.value.excluded .rows { color: var(--tp-gray-9); }
+
+.visuals { display: grid; gap: 8px; min-width: 0; }
+.visual { padding: 10px 12px; }
+.visual-head { margin-bottom: 6px; }
+.landing .visual-head h3 { font: 600 13px/1.3 var(--tp-display); }
+.kpi-value { display: inline-block; margin: 0 !important; font: 600 30px/1.1 var(--tp-display); letter-spacing: -0.02em; border-radius: 3px; }
+.kpi-delta { display: flex; align-items: center; gap: 6px; margin: 6px 0 0 !important; font-size: 11px; color: var(--tp-ink-soft); }
+.kpi-delta .delta { padding: 0 4px; border-radius: 3px; background: var(--tp-gray-3); color: var(--tp-ink); font: 500 11px var(--tp-mono); }
 .bar-row {
-  display: grid; grid-template-columns: 52px minmax(0, 1fr) 70px; align-items: center; gap: 8px;
-  width: 100%; padding: 3px 0; border: 0; background: transparent; color: var(--tp-ink);
-  font: inherit; text-align: left; cursor: pointer;
+  display: grid; grid-template-columns: 52px minmax(0, 1fr) 64px; align-items: center; gap: 8px;
+  width: 100%; padding: 2px 0; border: 0; border-radius: 3px; background: transparent;
+  font: 10.5px var(--tp-mono); text-align: left; cursor: pointer;
 }
+.bar-label { color: var(--tp-ink-soft); }
 .bar-track { height: 16px; }
-.bar { display: block; height: 100%; background: var(--tp-tide); transition: width 0.4s ease; }
+.bar { display: block; height: 100%; border-radius: 2px; background: var(--tp-tide-fill); transition: width 0.3s ease; }
+.bar-row:hover .bar { filter: brightness(1.08); }
 .bar-row.selected .bar { background: var(--tp-anemone); }
 .bar-row .num { text-align: right; color: var(--tp-ink-soft); }
-.replica figcaption { padding: 8px 14px; border-top: 1px solid var(--tp-sand); color: var(--tp-ink-soft); font-size: 12px; }
+.replica figcaption { padding: 10px 2px 0; color: var(--tp-ink-soft); font-size: 12px; }
 @media (prefers-reduced-motion: no-preference) {
   .landing .fresh { animation: tp-fresh 1.2s ease-out; }
   .landing .value.selected.fresh { animation: none; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .value .meter, .bar { transition: none; }
+}
 @keyframes tp-fresh {
-  from { background-color: color-mix(in srgb, var(--tp-anemone) 30%, transparent); }
+  from { background-color: color-mix(in srgb, var(--tp-anemone) 22%, transparent); }
 }
 
 /* ------------------------------------------------------------ sections */
-.section { border-bottom: 1px solid var(--tp-sand); }
-.section.alt { background: var(--tp-surface); }
+.section { border-bottom: 1px solid var(--tp-line); }
+.section.alt { background: var(--tp-panel); }
 .section-inner { max-width: 1240px; margin: 0 auto; padding: 64px 24px; }
 .split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 48px; align-items: start; }
-.label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--tp-tide) !important; font-weight: 700; margin-bottom: 8px !important; }
-.section h2, .end h2 { font-size: clamp(26px, 3vw, 36px); font-weight: 700; margin-bottom: 16px; line-height: 1.1; }
-.section h3 { font-size: 17px; font-weight: 500; margin-bottom: 6px; }
+.eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--tp-tide) !important; font-weight: 600; margin-bottom: 8px !important; }
+.section h2, .end h2 { font-size: clamp(26px, 3vw, 34px); font-weight: 700; letter-spacing: -0.025em; margin-bottom: 16px; line-height: 1.1; }
+.section h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
 .section p { color: var(--tp-ink-soft); }
 .wide { max-width: 46em; }
 .facts { margin: 0 0 16px; padding-left: 18px; color: var(--tp-ink-soft); list-style: disc; }
-.facts li::marker { color: var(--tp-tide); }
+.facts li::marker { color: var(--tp-tide-fill); }
 .facts li { margin: 4px 0; line-height: 1.5; }
 .states, .classes { list-style: none; padding: 0; margin: 0 0 16px; display: flex; flex-direction: column; gap: 6px; color: var(--tp-ink-soft); }
-.state { display: inline-block; width: 92px; margin-right: 10px; padding: 3px 8px; border-left: 4px solid var(--tp-tide); background: var(--tp-surface); color: var(--tp-ink); }
-.section.alt .state { background: var(--tp-paper); }
-.state.selected { border-left-color: var(--tp-anemone); background: var(--tp-anemone); color: #fff; }
-.state.excluded { border-left-color: var(--tp-kelp); background: transparent; color: var(--tp-ink-soft); }
-.badge { display: inline-block; min-width: 92px; margin-right: 10px; padding: 0 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--tp-sand); text-align: center; color: var(--tp-ink); }
-.badge.safe { border-color: var(--tp-tide); color: var(--tp-tide); }
-.badge.rebuild { background: var(--tp-kelp); }
-.badge.destructive { background: var(--tp-anemone); border-color: var(--tp-anemone); color: #fff; }
+.states li, .classes li { display: flex; align-items: center; gap: 10px; }
+/* the three states, as a filter list draws them */
+.state {
+  display: inline-flex; align-items: center; gap: 8px; flex: none;
+  width: 104px; height: 24px; padding: 0 6px; border-radius: 3px;
+  background: var(--tp-surface); border: 1px solid var(--tp-line);
+  color: var(--tp-ink); font-size: 12px;
+}
+.state.selected { background: var(--tp-anemone); border-color: var(--tp-anemone); color: #fff; }
+.state.selected::before { background: #fff; }
+.state.excluded { background: var(--tp-gray-2); color: var(--tp-gray-9); }
+.state.excluded::before { background: var(--tp-gray-7); }
+/* the plan's class badges, as the config page draws them */
+.badge {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  min-width: 92px; height: 20px; padding: 0 6px; border-radius: 3px;
+  background: var(--tp-gray-3); color: var(--tp-ink-soft);
+  font: 500 11px var(--tp-mono);
+}
+.badge.safe { background: var(--tp-tide-soft); color: var(--tp-tide); }
+.badge.rebuild { background: var(--tp-amber-3); color: var(--tp-amber-11); }
+.badge.destructive { background: var(--tp-anemone); color: #fff; }
 .shot { margin: 0; }
-.shot img { width: 100%; height: auto; border: 1px solid var(--tp-sand); display: block; }
+.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--tp-line); border-radius: 8px; box-shadow: var(--tp-shadow-pop); }
 .only-dark { display: none !important; }
 .dark .only-dark { display: block !important; }
 .dark .only-light { display: none !important; }
-.stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .code {
-  margin: 0; padding: 14px 16px;
-  background: var(--tp-surface); border-left: 3px solid var(--tp-tide);
-  font: 13px/1.6 var(--vp-font-family-mono); white-space: pre; overflow-x: auto; color: var(--tp-ink);
+  margin: 0; padding: 12px 14px;
+  background: var(--tp-surface); border: 1px solid var(--tp-line); border-radius: 6px;
+  font: 13px/1.6 var(--tp-mono); white-space: pre; overflow-x: auto; color: var(--tp-ink);
 }
-.section.alt .code { background: var(--tp-paper); }
-.code .k { color: var(--tp-tide); }
-.code .s { color: var(--tp-ink); }
+/* the config editor's YAML colours (frontend/style.css, --hl-*) */
+.code .k { color: var(--tp-teal-11); }
+.code .s { color: var(--tp-amber-11); }
 .code .o { color: var(--tp-ink-soft); }
-.numbers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.numbers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .numbers.four { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 8px 0 32px; }
-.numbers div { background: var(--tp-paper); padding: 14px 16px; border-top: 3px solid var(--tp-tide); }
-.section:not(.alt) .numbers div { background: var(--tp-surface); }
-.numbers dt { font-size: 13px; color: var(--tp-ink-soft); }
-.numbers dd { margin: 4px 0 6px; font: 700 28px/1.1 var(--display); color: var(--tp-ink); }
+.numbers div, .limits div { background: var(--tp-surface); border: 1px solid var(--tp-line); border-radius: 6px; padding: 12px 14px; }
+.numbers dt { font-size: 12px; color: var(--tp-ink-soft); }
+.numbers dd { margin: 4px 0 6px; font: 600 26px/1.1 var(--tp-display); letter-spacing: -0.02em; color: var(--tp-ink); }
 .numbers p { font-size: 13px; margin: 0; }
 .checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-bottom: 20px; }
 .flow { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
-.flow .node { padding: 10px 14px; background: var(--tp-surface); border: 1.5px solid var(--tp-tide); font: 500 15px var(--display); }
-.flow .node.tide { background: var(--tp-tide); color: var(--tp-paper); }
-.flow .arrow { width: 36px; height: 2px; background: var(--tp-ink-soft); position: relative; }
-.flow .arrow::after { content: ''; position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left: 7px solid var(--tp-ink-soft); border-right: 0; }
-.limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.limits div { padding: 14px 16px; background: var(--tp-surface); border-top: 3px solid var(--tp-sand); }
+.flow .node { padding: 8px 12px; background: var(--tp-surface); border: 1px solid var(--tp-line); border-radius: 6px; font-size: 14px; font-weight: 500; }
+.flow .node.tide { background: var(--tp-tide-fill); border-color: var(--tp-tide-fill); color: #fff; }
+.flow .arrow { width: 32px; height: 1px; background: var(--tp-gray-8); position: relative; }
+.flow .arrow::after { content: ''; position: absolute; right: -1px; top: -4px; border: 4.5px solid transparent; border-left: 6px solid var(--tp-gray-8); border-right: 0; }
+.limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .limits p { margin: 0; font-size: 14px; }
-.end { background: var(--tp-surface); }
-.end .install { background: var(--tp-paper); max-width: 760px; }
+.end { background: var(--tp-panel); }
+.end .install { max-width: 760px; }
 
 @media (max-width: 960px) {
   .hero-inner, .split { grid-template-columns: minmax(0, 1fr); gap: 32px; }
@@ -588,6 +728,6 @@ const shot = (name: string) => withBase(`/screens/${name}`)
   .hero-inner, .section-inner { padding-left: 16px; padding-right: 16px; }
   .board { grid-template-columns: minmax(0, 1fr); }
   .numbers, .numbers.four { grid-template-columns: minmax(0, 1fr); }
-  .pulse span:not(.dot) { display: none; }
+  .app-nav, .pulse .pill code, .crumbs > span:not(:last-child), .divider { display: none; }
 }
 </style>
