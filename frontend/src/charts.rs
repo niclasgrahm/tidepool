@@ -11,8 +11,8 @@ use std::fmt::Write;
 
 use serde_json::Value;
 
-use crate::board::{display, formatted, number};
-use crate::scale::{Band, Linear, Points, compact};
+use crate::board::{bucket_micros, display, formatted, number};
+use crate::scale::{Along, Band, Linear, Points, Times, compact};
 
 /// How wide a piece of text is, in pixels, in the charts' font. The browser
 /// measures (`plot::measure`); tests count characters.
@@ -89,6 +89,9 @@ pub struct Data {
     pub values: Vec<Vec<Option<f64>>>,
     /// The same values as the tooltip shows them.
     pub texts: Vec<Vec<String>>,
+    /// The category that holds the server's now: still filling up, so a low
+    /// value there doesn't read as a drop.
+    pub current: Option<usize>,
 }
 
 impl Data {
@@ -126,7 +129,17 @@ impl Data {
                         .collect()
                 })
                 .collect(),
+            current: None,
         }
+    }
+
+    /// The same, with `current` the category shown as the key `now`.
+    #[must_use]
+    pub fn at_now(mut self, now: Option<&Value>) -> Self {
+        self.current = now
+            .map(display)
+            .and_then(|now| self.keys.iter().position(|k| *k == now));
+        self
     }
 
     #[must_use]
@@ -218,6 +231,8 @@ pub struct Bar {
     pub key: String,
     pub rect: Rect,
     pub selected: bool,
+    /// Its period isn't over yet.
+    pub current: bool,
 }
 
 /// A bar chart of one dimension, laid out for a size.
@@ -238,15 +253,25 @@ pub struct BarLayout {
 
 impl BarLayout {
     /// `selected` are the categories (as shown) the selection holds.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(
+    pub fn new(data: &Data, size: (f64, f64), selected: &[String], measure: Measure) -> Self {
+        Self::grained(data, size, selected, None, measure)
+    }
+
+    /// The same, at a time grain if it has one: the bars are periods, so time
+    /// runs along the bottom however many there are, and they read short.
+    #[must_use]
+    pub fn grained(
         data: &Data,
         (width, height): (f64, f64),
         selected: &[String],
+        grain: Option<&str>,
         measure: Measure,
     ) -> Self {
-        let horizontal = data.len() > UPRIGHT_BARS;
-        let (plot, scale, bands, labels) = Self::axes(data, (width, height), horizontal, measure);
+        let horizontal = grain.is_none() && data.len() > UPRIGHT_BARS;
+        let (plot, scale, bands, labels) =
+            Self::axes(data, (width, height), horizontal, grain, measure);
         let zero = scale.at(0.0);
         let metrics = data.values.len().max(1);
         #[allow(clippy::cast_precision_loss)]
@@ -280,6 +305,7 @@ impl BarLayout {
                     key: data.keys[i].clone(),
                     rect,
                     selected: selected.contains(&data.keys[i]),
+                    current: data.current == Some(i),
                 });
             }
         }
@@ -303,6 +329,7 @@ impl BarLayout {
         data: &Data,
         (width, height): (f64, f64),
         horizontal: bool,
+        grain: Option<&str>,
         measure: Measure,
     ) -> (Rect, Linear, Band, Vec<Label>) {
         let n = data.len();
@@ -350,18 +377,23 @@ impl BarLayout {
             };
             let scale = Linear::over(values(), (p.bottom(), p.y), count);
             let b = Band::new(n, (p.x, p.right()), 0.2);
-            let labels = data
-                .keys
-                .iter()
-                .enumerate()
-                .map(|(i, key)| Label {
-                    x: b.middle(i),
-                    y: p.bottom() + 16.0,
-                    text: fit(key, b.step - 4.0, measure),
-                    full: key.clone(),
-                    anchor: "middle",
+            let labels = if grain.is_some() {
+                period_labels(&data.keys, grain, b.step, width, measure, &|i| {
+                    (b.middle(i), p.bottom() + 16.0)
                 })
-                .collect();
+            } else {
+                data.keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, key)| Label {
+                        x: b.middle(i),
+                        y: p.bottom() + 16.0,
+                        text: fit(key, b.step - 4.0, measure),
+                        full: key.clone(),
+                        anchor: "middle",
+                    })
+                    .collect()
+            };
             (p, scale, b, labels)
         }
     }
@@ -484,13 +516,52 @@ pub struct LineLayout {
     pub width: f64,
     pub height: f64,
     pub plot: Rect,
-    pub points: Option<Points>,
+    pub along: Option<Along>,
     pub axes: Vec<Axis>,
     pub keys: Vec<String>,
     /// `series[metric][period]`: where each value is, if it has one.
     pub series: Vec<Vec<Option<(f64, f64)>>>,
     pub labels: Vec<Label>,
     pub dots: bool,
+    /// The period that holds the server's now.
+    pub current: Option<usize>,
+}
+
+/// Periods' labels along an axis `step` apart: every k-th, k as small as lets
+/// them stand apart, kept inside the chart rather than cut at its edges.
+fn period_labels(
+    keys: &[String],
+    grain: Option<&str>,
+    step: f64,
+    width: f64,
+    measure: Measure,
+    place: &dyn Fn(usize) -> (f64, f64),
+) -> Vec<Label> {
+    let short: Vec<String> = keys.iter().map(|k| short_period(k, grain)).collect();
+    let room = widest(&short, measure) + 16.0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let every = if step > 0.0 {
+        (room / step).ceil().max(1.0) as usize
+    } else {
+        1
+    };
+    short
+        .iter()
+        .zip(keys)
+        .enumerate()
+        .filter(|(i, _)| i % every == 0)
+        .map(|(i, (text, full))| {
+            let half = measure(text) / 2.0;
+            let (x, y) = place(i);
+            Label {
+                x: x.clamp(half, (width - half).max(half)),
+                y,
+                text: text.clone(),
+                full: full.clone(),
+                anchor: "middle",
+            }
+        })
+        .collect()
 }
 
 /// A period's label on the time axis: `2026-10-01` by day is `Oct 1`,
@@ -553,7 +624,15 @@ impl LineLayout {
             w: (width - left - 8.0 - if right > 0.0 { right + 8.0 } else { 10.0 }).max(0.0),
             h: (bottom - 8.0).max(0.0),
         };
-        let points = Points::new(data.len(), (plot.x, plot.right()));
+        // at a grain, buckets lie by time; otherwise they're categories, and a
+        // NULL time among buckets makes them categories too
+        let starts: Option<Vec<i64>> = data.keys.iter().map(|k| bucket_micros(k)).collect();
+        let along = match starts.filter(|_| grain.is_some()) {
+            Some(starts) if starts.windows(2).all(|s| s[0] < s[1]) => {
+                Along::Time(Times::new(&starts, (plot.x, plot.right())))
+            }
+            _ => Along::Even(Points::new(data.len(), (plot.x, plot.right()))),
+        };
         let mut axes = Vec::new();
         let mut series = Vec::new();
         for (m, values) in shown.iter().enumerate() {
@@ -567,70 +646,84 @@ impl LineLayout {
                 values
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| v.map(|v| (points.at(i), scale.at(v))))
+                    .map(|(i, v)| v.map(|v| (along.at(i), scale.at(v))))
                     .collect(),
             );
         }
-        let short: Vec<String> = data.keys.iter().map(|k| short_period(k, grain)).collect();
-        // every k-th label, k as small as lets them stand apart
-        let room = widest(&short, measure) + 16.0;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let every = if points.step > 0.0 {
-            (room / points.step).ceil().max(1.0) as usize
-        } else {
-            1
-        };
-        let labels = short
-            .iter()
-            .zip(&data.keys)
-            .enumerate()
-            .filter(|(i, _)| i % every == 0)
-            .map(|(i, (text, full))| {
-                // kept inside the chart, not cut at its edges
-                let half = measure(text) / 2.0;
-                Label {
-                    x: points.at(i).clamp(half, (width - half).max(half)),
-                    y: plot.bottom() + 16.0,
-                    text: text.clone(),
-                    full: full.clone(),
-                    anchor: "middle",
-                }
-            })
-            .collect();
+        #[allow(clippy::cast_precision_loss)]
+        let step = plot.w / (data.len().max(2) - 1) as f64;
+        let labels = period_labels(&data.keys, grain, step, width, measure, &|i| {
+            (along.at(i), plot.bottom() + 16.0)
+        });
         Self {
             width,
             height,
             plot,
-            points: Some(points),
+            along: Some(along),
             axes,
             keys: data.keys.clone(),
             series,
             labels,
             dots: data.len() <= DOTTED_POINTS,
+            current: data.current,
         }
     }
 
     /// The period nearest to `x`.
     #[must_use]
     pub fn nearest(&self, x: f64) -> Option<usize> {
-        self.points?.nearest(x)
+        self.along.as_ref()?.nearest(x)
+    }
+
+    /// Where period `i` is along the axis.
+    #[must_use]
+    pub fn x(&self, i: usize) -> Option<f64> {
+        Some(self.along.as_ref()?.at(i))
+    }
+
+    /// Metric `m`'s line, drawn solid: all of it but what leads to and from
+    /// the period that isn't over yet.
+    #[must_use]
+    pub fn solid(&self, m: usize) -> Vec<Option<(f64, f64)>> {
+        let mut points = self.series.get(m).cloned().unwrap_or_default();
+        if let Some(point) = self.current.and_then(|i| points.get_mut(i)) {
+            *point = None;
+        }
+        points
+    }
+
+    /// Metric `m`'s line to and from the period that isn't over yet, drawn
+    /// dashed. Empty when that period has no value.
+    #[must_use]
+    pub fn dashed(&self, m: usize) -> Vec<Option<(f64, f64)>> {
+        let (Some(points), Some(i)) = (self.series.get(m), self.current) else {
+            return Vec::new();
+        };
+        if points.get(i).copied().flatten().is_none() {
+            return Vec::new();
+        }
+        let from = i.saturating_sub(1);
+        let to = (i + 2).min(points.len());
+        points[from..to].to_vec()
     }
 
     /// The band a brush over periods `a..=b` covers: half a step either
     /// side, inside the plot.
     #[must_use]
     pub fn span(&self, a: usize, b: usize) -> Rect {
-        let Some(points) = self.points else {
+        let Some(along) = &self.along else {
             return Rect::default();
         };
         let (lo, hi) = (a.min(b), a.max(b));
-        let half = if points.step > 0.0 {
-            points.step / 2.0
+        // a lone period reaches the whole plot
+        let (from, to) = if along.len() <= 1 {
+            (self.plot.x, self.plot.right())
         } else {
-            self.plot.w / 2.0
+            (
+                along.reach(lo).0.max(self.plot.x),
+                along.reach(hi).1.min(self.plot.right()),
+            )
         };
-        let from = (points.at(lo) - half).max(self.plot.x);
-        let to = (points.at(hi) + half).min(self.plot.right());
         Rect {
             x: from,
             y: self.plot.y,
@@ -675,6 +768,14 @@ impl LineLayout {
             ..to.clone()
         }
     }
+}
+
+/// Whether point `i` has no neighbour to join: a line through it draws nothing,
+/// so it gets a dot however many points there are.
+#[must_use]
+pub fn lone(points: &[Option<(f64, f64)>], i: usize) -> bool {
+    let has = |j: Option<usize>| j.and_then(|j| points.get(j)).copied().flatten().is_some();
+    has(Some(i)) && !has(i.checked_sub(1)) && !has(Some(i + 1))
 }
 
 /// An SVG path through the points, broken where a value is missing.
@@ -987,9 +1088,9 @@ mod tests {
     #[test]
     fn periods_are_found_and_brushed_whole() {
         let layout = LineLayout::new(&data(5), (400.0, 200.0), None, &chars);
-        let points = layout
-            .points
-            .unwrap_or_else(|| panic!("points for five periods"));
+        let Some(Along::Even(points)) = layout.along else {
+            panic!("points for five periods");
+        };
         assert_eq!(layout.nearest(points.at(3) + 1.0), Some(3));
         let span = layout.span(3, 1);
         assert!(close(span.x, points.at(1) - points.step / 2.0));
@@ -999,6 +1100,175 @@ mod tests {
             close(ends.x, layout.plot.x) && close(ends.right(), layout.plot.right()),
             "clipped to the plot"
         );
+    }
+
+    fn days(rows: &[(&str, Option<i64>)]) -> Data {
+        let rows: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|(key, value)| vec![json!(key), json!(value)])
+            .collect();
+        Data::new(&rows, &["n".into()])
+    }
+
+    #[test]
+    fn a_grained_axis_places_buckets_by_time() {
+        // January is longer than February: months aren't evenly apart
+        let months = days(&[
+            ("2026-01-01", Some(1)),
+            ("2026-02-01", Some(2)),
+            ("2026-03-01", Some(3)),
+        ]);
+        let layout = LineLayout::new(&months, (600.0, 200.0), Some("month"), &chars);
+        let (Some(a), Some(b), Some(c)) = (layout.x(0), layout.x(1), layout.x(2)) else {
+            panic!("three periods");
+        };
+        assert!((b - a) > (c - b), "31 days wider than 28: {a} {b} {c}");
+        assert!(close(a, layout.plot.x) && close(c, layout.plot.right()));
+        assert!(matches!(layout.along, Some(Along::Time(_))));
+        assert_eq!(layout.nearest(c - 1.0), Some(2));
+
+        // the same keys without a grain are categories, evenly apart
+        let even = LineLayout::new(&months, (600.0, 200.0), None, &chars);
+        assert!(matches!(even.along, Some(Along::Even(_))));
+
+        // a NULL time, or anything out of order, can't lie on a time axis
+        let null = days(&[("–", Some(1)), ("2026-01-01", Some(2))]);
+        let layout = LineLayout::new(&null, (600.0, 200.0), Some("day"), &chars);
+        assert!(matches!(layout.along, Some(Along::Even(_))));
+        let sorted = days(&[("2026-02-01", Some(1)), ("2026-01-01", Some(2))]);
+        let layout = LineLayout::new(&sorted, (600.0, 200.0), Some("month"), &chars);
+        assert!(matches!(layout.along, Some(Along::Even(_))));
+    }
+
+    #[test]
+    fn a_time_axis_brushes_whole_buckets() {
+        let months = days(&[
+            ("2026-01-01", Some(1)),
+            ("2026-02-01", Some(2)),
+            ("2026-03-01", Some(3)),
+            ("2026-04-01", Some(3)),
+        ]);
+        let layout = LineLayout::new(&months, (600.0, 200.0), Some("month"), &chars);
+        let (Some(a), Some(b), Some(c)) = (layout.x(0), layout.x(1), layout.x(2)) else {
+            panic!("four periods");
+        };
+        let span = layout.span(1, 1);
+        assert!(close(span.x, f64::midpoint(a, b)));
+        assert!(close(span.right(), f64::midpoint(b, c)));
+        let whole = layout.span(0, 3);
+        assert!(close(whole.x, layout.plot.x), "clipped to the plot");
+        assert!(close(whole.right(), layout.plot.right()));
+        let lone = days(&[("2026-01-01", Some(1))]);
+        let layout = LineLayout::new(&lone, (600.0, 200.0), Some("month"), &chars);
+        assert!(close(layout.span(0, 0).w, layout.plot.w), "the whole plot");
+    }
+
+    #[test]
+    fn a_filled_gap_is_a_break_in_the_line() {
+        let data = days(&[
+            ("2026-01-01", Some(1)),
+            ("2026-01-02", Some(2)),
+            ("2026-01-03", None),
+            ("2026-01-04", None),
+            ("2026-01-05", Some(4)),
+            ("2026-01-06", None),
+            ("2026-01-07", Some(5)),
+        ]);
+        let layout = LineLayout::new(&data, (600.0, 200.0), Some("day"), &chars);
+        let series = &layout.series[0];
+        assert_eq!(series[2], None);
+        let path = line_path(series);
+        assert_eq!(path.matches('M').count(), 3, "three runs: {path}");
+        assert_eq!(path.matches('L').count(), 1, "one joined pair: {path}");
+        // the point between two gaps draws no line, so it needs a dot
+        assert!(lone(series, 4) && lone(series, 6));
+        assert!(!lone(series, 0) && !lone(series, 1));
+        assert!(!lone(series, 2), "no value, no dot");
+        // the gap's width is its buckets': a time axis doesn't close it up
+        let (Some(b), Some(e)) = (layout.x(1), layout.x(4)) else {
+            panic!("seven periods");
+        };
+        let (Some(first), Some(second)) = (layout.x(0), layout.x(1)) else {
+            panic!("seven periods");
+        };
+        assert!(close(e - b, 3.0 * (second - first)));
+    }
+
+    #[test]
+    fn a_filled_gap_is_a_missing_bar() {
+        let data = days(&[
+            ("2026-01-01", Some(1)),
+            ("2026-01-02", None),
+            ("2026-01-03", Some(3)),
+        ]);
+        let layout = BarLayout::grained(&data, (600.0, 200.0), &[], Some("day"), &chars);
+        assert_eq!(layout.bars.len(), 2, "no bar for the empty day");
+        assert_eq!(layout.bars[1].category, 2, "the third keeps its place");
+        assert_eq!(layout.labels[0].text, "Jan 1", "periods read short");
+    }
+
+    #[test]
+    fn grained_bars_stand_however_many_there_are() {
+        let rows: Vec<(String, Option<i64>)> = (1..=28)
+            .map(|d| (format!("2026-02-{d:02}"), Some(i64::from(d))))
+            .collect();
+        let rows: Vec<(&str, Option<i64>)> = rows.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        let data = days(&rows);
+        let layout = BarLayout::grained(&data, (600.0, 200.0), &[], Some("day"), &chars);
+        assert!(!layout.horizontal, "time runs along the bottom");
+        assert!(layout.labels.len() < 28, "and its labels thin out");
+        assert!(
+            layout
+                .labels
+                .windows(2)
+                .all(|w| w[1].x - w[0].x >= chars("Feb 28")),
+            "standing apart"
+        );
+        assert!(BarLayout::new(&data, (600.0, 200.0), &[], &chars).horizontal);
+    }
+
+    #[test]
+    fn the_bucket_that_holds_now_is_marked() {
+        let now = json!("2026-01-03");
+        let data = days(&[
+            ("2026-01-01", Some(1)),
+            ("2026-01-02", Some(2)),
+            ("2026-01-03", Some(3)),
+        ])
+        .at_now(Some(&now));
+        assert_eq!(data.current, Some(2));
+        let line = LineLayout::new(&data, (600.0, 200.0), Some("day"), &chars);
+        assert_eq!(line.current, Some(2));
+        // the last segment is dashed, the rest solid
+        let solid = line.solid(0);
+        assert_eq!(solid[2], None);
+        assert!(solid[0].is_some() && solid[1].is_some());
+        assert_eq!(line_path(&solid).matches('L').count(), 1);
+        let dashed = line.dashed(0);
+        assert_eq!(dashed, line.series[0][1..3].to_vec());
+        let bars = BarLayout::grained(&data, (600.0, 200.0), &[], Some("day"), &chars);
+        let marked: Vec<bool> = bars.bars.iter().map(|b| b.current).collect();
+        assert_eq!(marked, [false, false, true]);
+
+        // with values after it (an order from the future), both sides dashed
+        let early = days(&[
+            ("2026-01-02", Some(2)),
+            ("2026-01-03", Some(3)),
+            ("2026-01-04", Some(4)),
+        ])
+        .at_now(Some(&now));
+        let line = LineLayout::new(&early, (600.0, 200.0), Some("day"), &chars);
+        assert_eq!(line.dashed(0).len(), 3);
+
+        // a bucket with no value yet has nothing to dash
+        let empty = days(&[("2026-01-02", Some(2)), ("2026-01-03", None)]).at_now(Some(&now));
+        let line = LineLayout::new(&empty, (600.0, 200.0), Some("day"), &chars);
+        assert_eq!(line.dashed(0), Vec::new());
+
+        // now outside the axis marks nothing
+        let past = days(&[("2020-01-01", Some(2))]).at_now(Some(&now));
+        assert_eq!(past.current, None);
+        assert_eq!(days(&[("2020-01-01", Some(2))]).at_now(None).current, None);
     }
 
     #[test]

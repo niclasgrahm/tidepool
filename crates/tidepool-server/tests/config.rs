@@ -841,3 +841,88 @@ async fn sessions_follow_a_model_change() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn a_time_field_pointed_elsewhere_has_the_extent_of_what_it_reads_now() {
+    let (config, data) = (tempdir(), tempdir());
+    copy_example(config.path());
+    // the trend over a time field worked out from a column
+    let read = |path: &str| {
+        std::fs::read_to_string(config.path().join(path)).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let placed = |part: &str| {
+        read("model.ossie.yaml").replace(
+            "      - name: status\n",
+            &format!("      - name: placed\n        expression: {{ dialects: [{{ dialect: ANSI_SQL, expression: \"DATE_TRUNC('{part}', ordered_at)\" }}] }}\n        dimension: {{ is_time: true }}\n      - name: status\n"),
+        )
+    };
+    let original = placed("month");
+    let sales = read("dashboards/sales.yaml")
+        .replace(
+            "    dimensions: [{ field: orders.ordered_at, grain: auto }]",
+            "    dimensions: [{ field: orders.placed, grain: auto }]",
+        )
+        .replace(
+            "    zoom: [minute, hour, day, week, month]   # what a viewer may zoom between\n",
+            "",
+        );
+    let write = |path: &str, text: &str| {
+        std::fs::write(config.path().join(path), text).unwrap_or_else(|e| panic!("{e}"));
+    };
+    write("model.ossie.yaml", &original);
+    write("dashboards/sales.yaml", &sales);
+    let state = opened(config.path(), Some(data.path())).await;
+    seed(&state).await;
+    let later = json!([
+        {"order_id": "o2", "customer_id": "c1", "product_id": "p1", "status": "paid",
+         "ordered_at": "2026-03-05T10:00:00Z", "quantity": 1, "amount": "1.00"},
+    ]);
+    assert_eq!(post_rows(&state, "orders", &later).await, StatusCode::OK);
+
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => panic!("{err}"),
+    };
+    let address = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+    let app = tidepool_server::router(Arc::clone(&state));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let (mut socket, _) =
+        match tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws")).await {
+            Ok(connected) => connected,
+            Err(err) => panic!("{err}"),
+        };
+    let open = json!({"type": "open_dashboard", "id": "sales"}).to_string();
+    if let Err(err) = socket.send(Message::text(open)).await {
+        panic!("{err}");
+    }
+    // a deadline over the whole wait: status ticks arrive every second, so a
+    // timeout per message would never fire
+    let mut until = async |to: &str| {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let message = match tokio::time::timeout_at(deadline, socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => text,
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("waiting for the trend to end at {to}: {other:?}"),
+            };
+            let value: Value = serde_json::from_str(message.as_str()).unwrap_or_default();
+            let trend = value["visuals"]
+                .as_array()
+                .and_then(|v| v.iter().find(|v| v["id"] == "trend"));
+            if trend.is_some_and(|t| t["zoom"]["to"] == to) {
+                return;
+            }
+        }
+    };
+    until("2026-03-02").await;
+
+    // the same name and the same rows, another expression: the rows aren't
+    // touched, and what the field reached before is no answer any more
+    let model = read("model.ossie.yaml").replace("DATE_TRUNC('month'", "DATE_TRUNC('year'");
+    let (status, reply) = apply(&state, json!({"model.ossie.yaml": model}), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["status"], "applied", "{reply}");
+    until("2026-01-02").await;
+}

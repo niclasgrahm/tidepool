@@ -214,6 +214,7 @@ mod tests {
                 on_brush: false,
                 widget: None,
                 formats: std::collections::BTreeMap::new(),
+                zoom: Vec::new(),
                 at: GridAt {
                     x: 0,
                     y: 0,

@@ -155,15 +155,53 @@ pub struct Visual {
     /// It changes only what shows on the screen, not the value.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub format: IndexMap<String, String>,
+    /// The grains a viewer may zoom this visual between, as a list, or
+    /// `false` for no zoom. Without it a visual with one grained time
+    /// dimension zooms between all the grains its field has. `true` is the
+    /// same as leaving it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<Zoom>,
     pub at: GridPosition,
 }
 
-/// A dimension: `dataset.field`, or a time field at a grain.
+/// A dimension: `dataset.field`, or a time field at a grain, written
+/// `{ field: orders.ordered_at, grain: day }`. The grain can be `auto`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum DimensionRef {
     Field(String),
-    Grained { field: String, grain: TimeGrain },
+    Grained { field: String, grain: Grain },
+}
+
+/// How a visual groups a time field: at a fixed grain, or `auto`, the finest
+/// grain that gives a readable number of buckets over the range on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Grain {
+    Auto,
+    #[serde(untagged)]
+    Fixed(TimeGrain),
+}
+
+impl Grain {
+    /// As it's written: `auto`, `day`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Fixed(grain) => grain.name(),
+        }
+    }
+}
+
+/// `zoom:` on a visual.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Zoom {
+    /// `false`: a viewer can't change the grain.
+    Enabled(bool),
+    /// The grains a viewer may zoom between.
+    Steps(Vec<TimeGrain>),
 }
 
 impl DimensionRef {
@@ -175,7 +213,7 @@ impl DimensionRef {
     }
 
     #[must_use]
-    pub fn grain(&self) -> Option<TimeGrain> {
+    pub fn grain(&self) -> Option<Grain> {
         match self {
             Self::Field(_) => None,
             Self::Grained { grain, .. } => Some(*grain),
@@ -273,7 +311,7 @@ impl DashboardFile {
                     .map(|d| match d {
                         DimensionRef::Field(field) => scalar(field),
                         DimensionRef::Grained { field, grain } => {
-                            format!("{{ field: {}, grain: {} }}", scalar(field), word(grain))
+                            format!("{{ field: {}, grain: {} }}", scalar(field), grain.name())
                         }
                     })
                     .collect();
@@ -306,6 +344,16 @@ impl DashboardFile {
                     .map(|(metric, format)| format!("{}: {}", scalar(metric), scalar(format)))
                     .collect();
                 let _ = writeln!(out, "    format: {{ {} }}", formats.join(", "));
+            }
+            match &visual.zoom {
+                Some(Zoom::Enabled(on)) => {
+                    let _ = writeln!(out, "    zoom: {on}");
+                }
+                Some(Zoom::Steps(steps)) => {
+                    let steps: Vec<&str> = steps.iter().map(|s| s.name()).collect();
+                    let _ = writeln!(out, "    zoom: [{}]", steps.join(", "));
+                }
+                None => {}
             }
             let at = visual.at;
             let _ = writeln!(
@@ -400,9 +448,9 @@ visuals:
     type: kpi
     metrics: [order_count]
     at: { x: 3, y: 0, w: 3, h: 2 }
-  - id: by_hour
+  - id: over_time
     type: line
-    dimensions: [{ field: orders.ordered_at, grain: hour }]
+    dimensions: [{ field: orders.ordered_at, grain: auto }]
     metrics: [revenue, order_count]
     on_brush: select_range
     at: { x: 0, y: 2, w: 12, h: 4 }
@@ -414,6 +462,13 @@ visuals:
     type: table
     dimensions: [customers.region, products.category]
     at: { x: 3, y: 6, w: 9, h: 4 }
+  - id: by_week
+    type: bar
+    dimensions: [{ field: orders.ordered_at, grain: week }]
+    metrics: [revenue]
+    on_click: select
+    zoom: false
+    at: { x: 0, y: 10, w: 12, h: 3 }
 "
         );
     }
@@ -459,6 +514,7 @@ visuals:
                         (name.to_string(), "currency:EUR compact".to_string()),
                         ("b".to_string(), name.to_string()),
                     ]),
+                    zoom: None,
                     at: GridPosition {
                         x: 0,
                         y: 0,
@@ -469,6 +525,54 @@ visuals:
             };
             assert_eq!(read(&file.to_yaml()), file, "{name:?}");
         }
+    }
+
+    #[test]
+    fn grains_and_zoom_read_back_as_they_are_written() {
+        let text = "name: Z
+layout: { columns: 12, row_height: 80 }
+visuals:
+  - id: a
+    type: line
+    dimensions: [{ field: orders.ordered_at, grain: auto }]
+    metrics: [revenue]
+    zoom: [hour, day, month]
+    at: { x: 0, y: 0, w: 6, h: 4 }
+  - id: b
+    type: bar
+    dimensions: [{ field: orders.ordered_at, grain: week }]
+    metrics: [revenue]
+    zoom: false
+    at: { x: 6, y: 0, w: 6, h: 4 }
+";
+        let file = read(text);
+        assert_eq!(file.to_yaml(), text);
+        assert_eq!(file.visuals[0].dimensions[0].grain(), Some(Grain::Auto));
+        assert_eq!(
+            file.visuals[0].zoom,
+            Some(Zoom::Steps(vec![
+                TimeGrain::Hour,
+                TimeGrain::Day,
+                TimeGrain::Month
+            ]))
+        );
+        assert_eq!(
+            file.visuals[1].dimensions[0].grain(),
+            Some(Grain::Fixed(TimeGrain::Week))
+        );
+        assert_eq!(file.visuals[1].zoom, Some(Zoom::Enabled(false)));
+        assert!(
+            DashboardFile::from_yaml(&text.replace("grain: week", "grain: fortnight")).is_err(),
+            "a grain that isn't one"
+        );
+    }
+
+    #[test]
+    fn the_schema_says_a_grain_can_be_auto() {
+        let schema = schemars::schema_for!(DashboardFile);
+        let text = serde_json::to_string(&schema).unwrap_or_default();
+        assert!(text.contains("\"auto\""), "{text}");
+        assert!(text.contains("\"quarter\""), "{text}");
     }
 
     #[test]

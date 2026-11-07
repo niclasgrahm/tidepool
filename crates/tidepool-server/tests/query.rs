@@ -657,3 +657,23 @@ async fn rows_come_newest_first_under_their_filters() {
         assert!(reply.text().contains(says), "{}", reply.text());
     }
 }
+
+#[tokio::test]
+async fn auto_is_for_dashboards_a_query_says_what_it_wants() {
+    let state = loaded().await;
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({
+            "metrics": ["revenue"],
+            "dimensions": [{"field": "orders.ordered_at", "grain": "auto"}],
+        }),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text());
+    assert!(
+        reply.text().contains("unknown grain `auto`"),
+        "{}",
+        reply.text()
+    );
+}

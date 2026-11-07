@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `by_region`: `zoom` changes the grain of a time dimension, and it has none with a grain
+  --> dashboards/sales.yaml:23:5
+   |
+23 |     zoom: [day, month]
+   |     ^^^^
+   = help: give a time dimension a grain: `{ field: dataset.field, grain: auto }`
+
+1 error, 0 warnings

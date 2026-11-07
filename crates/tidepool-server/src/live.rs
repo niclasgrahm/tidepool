@@ -24,6 +24,10 @@
 //! only ever see ranges. Once a second the loop checks whether the clock has
 //! moved a session's window into a new period, and refreshes it if so, data
 //! or not.
+//!
+//! A session can pin a visual's time grain (plan §5.8), kept next to its sorts
+//! and not in the selection's history; `auto` grains and pins are resolved
+//! into a fixed grain ([`crate::zoom`]) before the engine sees the query.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -36,7 +40,8 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use serde_json::Value as Json;
-use tidepool_config::dashboard::{FilterWidget, VisualType};
+use tidepool_config::dashboard::{FilterWidget, Grain, VisualType};
+use tidepool_config::ossie::TimeGrain;
 use tidepool_engine::{Condition, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
@@ -133,6 +138,11 @@ struct SessionState {
     open: HashMap<String, BTreeSet<String>>,
     /// Sort overrides by visual: (result column, descending).
     sorts: HashMap<String, (String, bool)>,
+    /// Pinned grains, by dashboard and visual (ids are per dashboard).
+    grains: HashMap<(String, String), TimeGrain>,
+    /// The minute the last frame was computed in: a current bucket can only
+    /// have moved when this has.
+    minute: Option<i64>,
     /// What was last sent per visual or filter (a hash of it).
     sent: HashMap<String, u64>,
     out: Option<mpsc::Sender<ServerMessage>>,
@@ -286,24 +296,40 @@ impl Hub {
 
     /// Refresh the sessions whose windows the clock has moved into a new
     /// period since their last frame, and tell them where the windows are.
+    /// Those on a dashboard with a time axis are refreshed every minute: the
+    /// bucket that holds now moves without new data too.
     fn roll(&self, state: &AppState) {
         let snapshot = state.writer.snapshot();
         let now = state.clock.now();
         for session in self.sessions() {
-            let moved = {
+            let (moved, ticked) = {
                 let inner = session.lock();
+                if inner.paused || inner.out.is_none() {
+                    continue;
+                }
                 let chosen = inner.selection();
-                (!chosen.windows.is_empty()
-                    && !inner.paused
-                    && inner.out.is_some()
+                let moved = (!chosen.windows.is_empty()
                     && inner
                         .shown
                         .as_ref()
                         .is_some_and(|shown| *shown != chosen.resolve(&snapshot.model, now)))
-                .then(|| selection_message(&snapshot.model, &inner, now))
+                .then(|| selection_message(&snapshot.model, &inner, now));
+                let ticked = inner.minute.is_some_and(|m| m != minute_of(now))
+                    && inner.dashboard.as_ref().is_some_and(|slug| {
+                        snapshot
+                            .model
+                            .dashboards
+                            .iter()
+                            .find(|d| d.slug == *slug)
+                            .is_some_and(|d| d.visuals.iter().any(|v| v.grained().is_some()))
+                    });
+                (moved, ticked)
             };
+            let refreshing = moved.is_some() || ticked;
             if let Some(selection) = moved {
                 session.send(selection);
+            }
+            if refreshing {
                 refresh(state, &session, &snapshot);
             }
         }
@@ -322,6 +348,10 @@ impl Hub {
     pub(crate) fn disconnect(&self, session: &Session) {
         session.lock().out = None;
     }
+}
+
+fn minute_of(now: i64) -> i64 {
+    now.div_euclid(60_000_000)
 }
 
 /// The dashboards a client can open.
@@ -618,10 +648,53 @@ fn apply(
                 })
                 .chain(request.metrics.iter().cloned())
                 .collect();
-            if !columns.contains(&column) {
+            // a grained column goes by the grain it's at just now
+            let grained = found.grained().and_then(|at| request.dimensions.get(at));
+            let this_axis = grained.is_some_and(|d| {
+                column
+                    .strip_prefix(d.field.as_str())
+                    .and_then(|grain| grain.strip_prefix(':'))
+                    .is_some_and(|grain| TimeGrain::parse(grain).is_some())
+            });
+            if !columns.contains(&column) && !this_axis {
                 return Err(format!("visual `{visual}` has no column `{column}`"));
             }
             inner.sorts.insert(visual, (column, desc));
+            Changed {
+                selection: false,
+                frame: true,
+            }
+        }
+        ClientMessage::Grain { visual, grain } => {
+            let slug = inner
+                .dashboard
+                .clone()
+                .ok_or("no dashboard is open, so it has no visual to zoom")?;
+            let found = model
+                .dashboards
+                .iter()
+                .find(|d| d.slug == slug)
+                .and_then(|d| d.visuals.iter().find(|v| v.id == visual))
+                .ok_or_else(|| format!("no visual `{visual}` on `{slug}`"))?;
+            if !found.zoom || found.steps.is_empty() {
+                return Err(format!("visual `{visual}` can't be zoomed"));
+            }
+            match grain {
+                None => {
+                    inner.grains.remove(&(slug, visual));
+                }
+                Some(name) => {
+                    let pin = crate::query::grain(&name)?;
+                    if !found.steps.contains(&pin) {
+                        let steps: Vec<&str> = found.steps.iter().map(|g| g.name()).collect();
+                        return Err(format!(
+                            "visual `{visual}` doesn't zoom to `{name}`: its steps are {}",
+                            steps.join(", ")
+                        ));
+                    }
+                    inner.grains.insert((slug, visual), pin);
+                }
+            }
             Changed {
                 selection: false,
                 frame: true,
@@ -806,6 +879,11 @@ fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
                     })
                     .flatten(),
                 formats: formats(model, v),
+                zoom: if v.zoom {
+                    v.steps.iter().map(|g| g.name().to_string()).collect()
+                } else {
+                    Vec::new()
+                },
                 at: GridAt {
                     x: v.at.x,
                     y: v.at.y,
@@ -848,7 +926,7 @@ fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
         .iter()
         .map(|d| QueryDimension {
             field: label(model, &d.field),
-            grain: d.grain.map(|g| format!("{g:?}").to_lowercase()),
+            grain: d.grain.map(|g| g.name().to_string()),
             level: None,
         })
         .collect();
@@ -888,7 +966,7 @@ fn hash_of(value: &impl serde::Serialize) -> u64 {
 /// Send a session what changed on its dashboard as of `snapshot`, as one
 /// frame. Nothing when paused, without a dashboard, or when nothing changed.
 fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
-    let (dashboard, selection, windows, open, sorts) = {
+    let (dashboard, selection, windows, open, sorts, grains) = {
         let inner = session.lock();
         if inner.paused || inner.out.is_none() {
             return;
@@ -902,10 +980,12 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
             inner.windows.clone(),
             inner.open.clone(),
             inner.sorts.clone(),
+            inner.grains.clone(),
         )
     };
     let model = &snapshot.model;
-    let selection = selection.resolve(model, state.clock.now());
+    let now = state.clock.now();
+    let selection = selection.resolve(model, now);
     let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
         return;
     };
@@ -914,7 +994,13 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
         .visuals
         .iter()
         .filter(|v| v.visual_type != VisualType::Filter)
-        .map(|v| visual_frame(state, snapshot, v, &selection, sorts.get(&v.id)))
+        .map(|v| {
+            let pin = grains
+                .get(&(dashboard.slug.clone(), v.id.clone()))
+                .copied()
+                .filter(|_| v.zoom);
+            visual_frame(state, snapshot, v, &selection, sorts.get(&v.id), pin, now)
+        })
         .collect();
     let filters: Vec<FilterFrame> = dashboard
         .lists(model)
@@ -938,6 +1024,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     // only what changed since this session's last frame
     let mut inner = session.lock();
     inner.shown = Some(selection);
+    inner.minute = Some(minute_of(now));
     let mut changed = |key: String, hash: u64| inner.sent.insert(key, hash) != Some(hash);
     let visuals: Vec<VisualFrame> = visuals
         .into_iter()
@@ -991,14 +1078,94 @@ fn rows_frame(
             result: Some(rows_result(&fields, &answer, snapshot.epoch)),
             error: None,
             compare: None,
+            zoom: None,
         },
         Err(error) => VisualFrame {
             id: visual.id.clone(),
             result: None,
             error: Some(error.0),
             compare: None,
+            zoom: None,
         },
     }
+}
+
+/// `request` with its dimension `at` at `grain`, and a sort on it following.
+fn at_grain(request: &mut QueryRequest, at: usize, grain: TimeGrain) {
+    let Some(dimension) = request.dimensions.get_mut(at) else {
+        return;
+    };
+    dimension.grain = Some(grain.name().to_string());
+    let (field, column) = (
+        format!("{}:", dimension.field),
+        format!("{}:{}", dimension.field, grain.name()),
+    );
+    for sort in &mut request.sort {
+        if sort.column.starts_with(&field) {
+            sort.column.clone_from(&column);
+        }
+    }
+}
+
+/// Resolve a visual's time axis: `request` is left at the grain chosen, and
+/// what's returned is what its frame says about it. None for a visual without
+/// one.
+fn zoomed(
+    state: &AppState,
+    snapshot: &Snapshot,
+    visual: &tidepool_model::ir::Visual,
+    request: &mut QueryRequest,
+    selection: &Selection,
+    pin: Option<TimeGrain>,
+    now: i64,
+) -> Option<tidepool_protocol::live::ZoomFrame> {
+    let model = &snapshot.model;
+    let at = visual.grained()?;
+    let dimension = visual.dimensions.get(at)?;
+    let own = dimension.grain?;
+    let budget = crate::zoom::budget(visual.at.w);
+    let field = &dimension.field;
+    // a selection only counts if it can change this visual's answer (a metric
+    // may ignore it), so the provisional query's grain doesn't matter
+    let selected = if selection.0.contains_key(field) {
+        at_grain(request, at, *visual.steps.first()?);
+        resolve(model, request, now)
+            .ok()
+            .and_then(|query| {
+                tidepool_engine::relevant(
+                    snapshot,
+                    &Query {
+                        selection: selection.clone(),
+                        ..query
+                    },
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| selection.clone())
+    } else {
+        Selection::default()
+    };
+    let (span, narrowed) = crate::zoom::range(&selected, field, || {
+        state.extents.of(&state.engine, snapshot, field)
+    });
+    let grain = crate::zoom::choose(&visual.steps, own, pin, span, budget)?;
+    at_grain(request, at, grain);
+    let open = if visual.zoom {
+        crate::zoom::open(&visual.steps, span, budget)
+    } else {
+        Vec::new()
+    };
+    let auto = pin.is_none() && own == Grain::Auto;
+    let ty = field_type(model, field)?;
+    Some(crate::zoom::frame(
+        grain,
+        auto,
+        pin,
+        &open,
+        (span, narrowed),
+        now,
+        ty,
+    ))
 }
 
 fn visual_frame(
@@ -1007,6 +1174,8 @@ fn visual_frame(
     visual: &tidepool_model::ir::Visual,
     selection: &Selection,
     sort: Option<&(String, bool)>,
+    pin: Option<TimeGrain>,
+    now: i64,
 ) -> VisualFrame {
     if visual.visual_type == VisualType::Rows {
         return rows_frame(state, snapshot, visual, selection);
@@ -1018,6 +1187,7 @@ fn visual_frame(
             desc: *desc,
         }];
     }
+    let zoom = zoomed(state, snapshot, visual, &mut request, selection, pin, now);
     let run = |request: &QueryRequest| {
         resolve(&snapshot.model, request, state.clock.now())
             .map_err(tidepool_engine::QueryError)
@@ -1056,12 +1226,14 @@ fn visual_frame(
             result: Some(result(&request, &answer, snapshot.epoch)),
             error: None,
             compare,
+            zoom,
         },
         Err(error) => VisualFrame {
             id: visual.id.clone(),
             result: None,
             error: Some(error.0),
             compare: None,
+            zoom,
         },
     }
 }

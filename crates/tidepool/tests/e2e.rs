@@ -732,6 +732,9 @@ fn brush_the_trend_drag_across_bars_and_choose_with_keys() {
     );
     browser.wait_for(&format!("{KPI} === '422.00'"), "every order");
 
+    // the trend is `auto`, and hours fit three days: this test is about days
+    pin_the_trend(&mut browser, "day");
+
     // drag across the first two days of the trend: their range is chosen
     let dots = "[...document.querySelectorAll('.visual.line .plot .dot.m0')]";
     browser.wait_for(&format!("{dots}.length === 3"), "a dot per day");
@@ -802,6 +805,232 @@ fn brush_the_trend_drag_across_bars_and_choose_with_keys() {
         "a chip for all three days",
     );
     browser.wait_for(&format!("{KPI} === '422.00'"), "the three days' orders");
+}
+
+/// The trend's step `grain`, as a selector.
+fn trend_step(grain: &str) -> String {
+    format!("document.querySelector('.visual.line .step[data-grain=\"{grain}\"]')")
+}
+
+/// Pin the trend to `grain`, and wait until it shows.
+fn pin_the_trend(browser: &mut Browser, grain: &str) {
+    let step = trend_step(grain);
+    browser.wait_for(
+        &format!("{step} && !{step}.disabled"),
+        "the step to be open",
+    );
+    browser.click_element(&step);
+    browser.wait_for(
+        &format!(
+            "{step}.classList.contains('pinned') && {step}.getAttribute('aria-pressed') === 'true'"
+        ),
+        "the step pinned",
+    );
+}
+
+/// The grain the trend's control has pressed, and how it got there.
+const PRESSED: &str = "(b => b && `${b.dataset.grain}${b.classList.contains('auto') ? ' auto' : ''}${b.classList.contains('pinned') ? ' pinned' : ''}`)\
+     (document.querySelector('.visual.line .step[aria-pressed=\"true\"]'))";
+
+/// Press `+` or `-` on the chart that has the focus.
+fn zoom_key(browser: &mut Browser, finer: bool) {
+    browser.eval("document.querySelector('.visual.line .plot').focus()");
+    let (key, code) = if finer { ("+", 187) } else { ("-", 189) };
+    browser.press(key, code, false);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one walk through zooming, start to end
+fn zoom_a_trend_out_and_in_and_brush_its_hours() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    assert!(
+        workspace().join("frontend/dist/index.html").exists(),
+        "no frontend/dist: run `just frontend` first"
+    );
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([{"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"}]),
+    );
+    let order = |id: &str, at: &str, amount: &str| {
+        json!({
+            "order_id": id, "customer_id": "c1", "product_id": "p1", "status": "paid",
+            "ordered_at": at, "quantity": 1, "amount": amount, "note": null,
+        })
+    };
+    // four orders over eleven weeks, two of them hours apart on one day
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "2026-07-01T06:00:00Z", "1.00"),
+            order("o2", "2026-07-01T12:00:00Z", "10.00"),
+            order("o3", "2026-07-20T12:00:00Z", "100.00"),
+            order("o4", "2026-09-15T12:00:00Z", "1000.00"),
+        ]),
+    );
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    browser.wait_for(&format!("{KPI} === '1,111.00'"), "every order");
+    let dots = "[...document.querySelectorAll('.visual.line .plot .dot.m0')]";
+    let labels =
+        "[...document.querySelectorAll('.visual.line .plot .labels text')].map(t => t.textContent)";
+
+    // over eleven weeks, 1,800 hours are too many: days, and hours are closed
+    browser.wait_for(
+        &format!("{PRESSED} === 'day auto'"),
+        "days, chosen for the range",
+    );
+    browser.wait_for(&format!("{dots}.length === 3"), "a dot per day with orders");
+    assert_eq!(
+        browser.eval(&format!("{}.disabled", trend_step("hour"))),
+        json!(true),
+        "too many hours for this range"
+    );
+    assert_eq!(
+        browser.eval(&format!("{}.disabled", trend_step("week"))),
+        json!(false)
+    );
+
+    // out with the control: months, August among them with a break for it
+    pin_the_trend(&mut browser, "month");
+    browser.wait_for(
+        &format!("{dots}.length === 2"),
+        "a dot per month with orders",
+    );
+    browser.wait_for(
+        &format!("{labels}.join() === 'Jul 2026,Aug 2026,Sep 2026'"),
+        "months along the axis",
+    );
+    // only this visual changed: nothing to go back to, nothing selected
+    let chips = browser.eval(CHIPS);
+    assert_eq!(chips, json!(""), "a grain is no selection");
+
+    // in with the key on the focused chart, a step at a time
+    zoom_key(&mut browser, true);
+    browser.wait_for(
+        &format!("{PRESSED} === 'week pinned'"),
+        "weeks, one step in",
+    );
+    zoom_key(&mut browser, true);
+    browser.wait_for(&format!("{PRESSED} === 'day pinned'"), "days, another");
+    zoom_key(&mut browser, true);
+    // hours are closed: it stays
+    browser.wait_for(&format!("{PRESSED} === 'day pinned'"), "days still");
+    zoom_key(&mut browser, false);
+    browser.wait_for(
+        &format!("{PRESSED} === 'week pinned'"),
+        "weeks, one step out",
+    );
+
+    // a second click takes the pin off: the dashboard's grain again
+    browser.click_element(&trend_step("week"));
+    browser.wait_for(&format!("{PRESSED} === 'day auto'"), "auto again");
+
+    // a brush narrows the range, and `auto` follows it: drag from the first
+    // day to the second, three weeks of days
+    browser.wait_for(&format!("{dots}.length === 3"), "a dot per day with orders");
+    browser.eval("document.querySelector('.visual.line').scrollIntoView({block: 'center'})");
+    let first = browser.settled(&format!("{dots}[0]"));
+    let second = browser.settled(&format!("{dots}[1]"));
+    browser.drag(first, second);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('2026-07-01 to 2026-07-20')"),
+        "a chip for the days",
+    );
+    browser.wait_for(&format!("{KPI} === '111.00'"), "the first three orders");
+    browser.wait_for(
+        &format!("{PRESSED} === 'hour auto'"),
+        "hours fit twenty days",
+    );
+
+    // the hourly chart has empty hours between its orders: a break, not a line
+    // joining them, and dots for what's alone between the breaks
+    browser.wait_for(
+        &format!("{dots}.length === 3"),
+        "a dot per hour with orders",
+    );
+    assert_eq!(
+        browser.eval(
+            "document.querySelector('.visual.line .plot .line.m0').getAttribute('d').split('M').length - 1",
+        ),
+        json!(3),
+        "three runs of one point: nothing is joined over the gaps"
+    );
+
+    // brush two of those hours: hours select whole hours, not days
+    let first = browser.settled(&format!("{dots}[0]"));
+    let second = browser.settled(&format!("{dots}[1]"));
+    browser.drag(first, second);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('2026-07-01T06:00:00Z to 2026-07-01T13:00:00Z')"),
+        "a chip for seven hours",
+    );
+    browser.wait_for(&format!("{KPI} === '11.00'"), "the first two orders");
+    // seven hours: minutes fit, and the axis follows
+    browser.wait_for(
+        &format!("{PRESSED} === 'minute auto'"),
+        "minutes fit seven hours",
+    );
+
+    // back, and back: the grain comes back with the range
+    let back =
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')";
+    browser.click_element(back);
+    browser.wait_for(&format!("{PRESSED} === 'hour auto'"), "hours again");
+    browser.wait_for(&format!("{KPI} === '111.00'"), "the first three orders");
+    browser.click_element(back);
+    browser.wait_for(&format!("{PRESSED} === 'day auto'"), "days again");
+    browser.wait_for(&format!("{KPI} === '1,111.00'"), "every order");
+
+    // a fixed grain has no control, and its bars select whole weeks
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales_recent") }),
+    );
+    let week_bars = "[...document.querySelectorAll('[data-visual=\"by_week\"] .plot .bar')]";
+    // nothing in the last seven days: clear the window to see the orders
+    browser.wait_for(
+        "[...document.querySelectorAll('.selection button')].some(b => b.textContent === 'Clear all')",
+        "the dashboard's default window",
+    );
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Clear all')",
+    );
+    browser.wait_for(
+        &format!("{week_bars}.length === 3"),
+        "a bar per week with orders",
+    );
+    assert_eq!(
+        browser.eval("document.querySelector('[data-visual=\"by_week\"] .steps')"),
+        Value::Null,
+        "`zoom: false`"
+    );
+    browser.eval(
+        "document.querySelector('[data-visual=\"by_week\"]').scrollIntoView({block: 'center'})",
+    );
+    let bar = browser.settled(&format!("{week_bars}[0]"));
+    browser.click(bar.0, bar.1);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('2026-06-29 to 2026-07-05')"),
+        "a chip for the Monday to Sunday of the first order",
+    );
 }
 
 #[test]

@@ -19,6 +19,7 @@ pub mod openapi;
 mod query;
 mod tables;
 pub mod ui;
+mod zoom;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -59,6 +60,8 @@ pub struct AppState {
     pub(crate) limiter: limits::Limiter,
     /// What time it is, for selections relative to now.
     pub(crate) clock: Clock,
+    /// How far time fields' values reach, for `auto` grains.
+    pub(crate) extents: zoom::Extents,
 }
 
 /// The time relative windows are resolved against: the wall clock, or a
@@ -194,6 +197,7 @@ impl AppState {
             sessions: auth::Sessions::default(),
             limiter: limits::Limiter::default(),
             clock: Clock::default(),
+            extents: zoom::Extents::default(),
             config: config::ConfigStore::detached(&ModelVersion {
                 version: snapshot.version,
                 model: Arc::clone(&snapshot.model),

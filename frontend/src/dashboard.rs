@@ -7,12 +7,13 @@
 use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{Value, json};
-use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
+use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo, ZoomFrame};
 
 use crate::api::{post_text, save_file};
 use crate::board::{
-    beside, brush_range, display, export_request, export_rows_request, filter_meta, formatted,
-    marks, next_sort, node_class, number, share, value_class, visual_tags, wanted_window,
+    at_frame_grain, beside, brush_range, display, export_request, export_rows_request, filled,
+    filter_meta, formatted, marks, next_sort, node_class, number, same_column, share, step_click,
+    step_label, step_state, value_class, visual_tags, wanted_window, zoom_key,
 };
 use crate::charts::Data;
 use crate::datepick::DateRange;
@@ -504,15 +505,20 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
     let class = format!("visual {}", info.visual_type);
     let dims = info.dimensions.len();
     let chart = matches!(info.visual_type.as_str(), "bar" | "line") && dims == 1;
+    let zoom = Memo::new(move |_| frame.with(|f| f.as_ref().and_then(|f| f.zoom.clone())));
     if chart {
         // one chart for the visual's whole life, fed new options: re-made
         // per frame, it would replay its intro and lose clicks
         let rows = Memo::new(move |_| {
             frame.with(|f| {
-                f.as_ref()
-                    .and_then(|f| f.result.as_ref())
-                    .map(|r| r.rows.clone())
-                    .unwrap_or_default()
+                let Some((rows, zoom)) = f
+                    .as_ref()
+                    .and_then(|f| f.result.as_ref().map(|r| (&r.rows, f.zoom.as_ref())))
+                else {
+                    return Vec::new();
+                };
+                // a time axis has every bucket, those without rows too
+                zoom.map_or_else(|| rows.clone(), |zoom| filled(rows, zoom))
             })
         });
         let note = move || match frame.get() {
@@ -525,13 +531,13 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
             Some(_) => None,
         };
         let content = if info.visual_type == "bar" {
-            bar_chart(live, &info, rows, title.clone())
+            bar_chart(live, &info, rows, zoom, title.clone())
         } else {
-            line_chart(live, &info, rows, title.clone())
+            line_chart(live, &info, rows, zoom, title.clone())
         };
         return view! {
             <article class=class class:maximized=alone style=place data-visual=info.id.clone()>
-                {visual_head(live, &info, &title, maximized)}
+                {visual_head(live, &info, &title, zoom, maximized)}
                 {note}
                 {content}
             </article>
@@ -539,7 +545,7 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
         .into_any();
     }
     let id = info.id.clone();
-    let head = visual_head(live, &info, &title, maximized);
+    let head = visual_head(live, &info, &title, zoom, maximized);
     view! {
         <article class=class class:maximized=alone style=place data-visual=id>
             {head}
@@ -548,8 +554,8 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
                 Some(VisualFrame { error: Some(error), .. }) => {
                     view! { <p class="problem">{format!("Can't show this: {error}")}</p> }.into_any()
                 }
-                Some(VisualFrame { result: Some(result), compare, .. }) => {
-                    body(live, &info, result.rows, compare.as_ref())
+                Some(VisualFrame { result: Some(result), compare, zoom, .. }) => {
+                    body(live, &at_frame_grain(&info, zoom.as_ref()), result.rows, compare.as_ref())
                 }
                 Some(_) => view! { <p class="quiet">"No result"</p> }.into_any(),
             }}
@@ -558,11 +564,13 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
     .into_any()
 }
 
-/// A visual's header: its title, how it's set up, its export, maximize.
+/// A visual's header: its title, how it's set up, its zoom, its export,
+/// maximize.
 fn visual_head(
     live: Live,
     info: &VisualInfo,
     title: &str,
+    zoom: Memo<Option<ZoomFrame>>,
     maximized: RwSignal<Option<String>>,
 ) -> impl IntoView + use<> {
     let tags = visual_tags(info);
@@ -571,10 +579,124 @@ fn visual_head(
             <h2>{title.to_string()}</h2>
             {tags.into_iter().map(|t| view! { <code class="tag">{t}</code> }).collect_view()}
             <span class="grow"></span>
-            {export_button(live, info)}
+            {zoom_control(live, info, zoom)}
+            {export_button(live, info, zoom)}
             {maximize_button(&info.id, maximized)}
         </header>
     }
+}
+
+/// The steps a viewer may zoom a visual between. Each button stays for the
+/// visual's life and only its state follows the frames, so a frame arriving
+/// mid-click loses nothing.
+fn zoom_control(live: Live, info: &VisualInfo, zoom: Memo<Option<ZoomFrame>>) -> Option<AnyView> {
+    if info.zoom.is_empty() {
+        return None;
+    }
+    let buttons = info
+        .zoom
+        .iter()
+        .map(|grain| {
+            let visual = info.id.clone();
+            let name = grain.clone();
+            let label = step_label(grain).to_string();
+            let step = {
+                let grain = grain.clone();
+                Memo::new(move |_| zoom.with(|z| step_state(&grain, z.as_ref())))
+            };
+            let title = {
+                let grain = grain.clone();
+                move || {
+                    let state = step.get();
+                    if state.pinned {
+                        format!("Pinned to {grain}. Click to go back to the dashboard's grain.")
+                    } else if state.auto {
+                        format!("By {grain}: what fits the range. Click to keep it.")
+                    } else if state.open {
+                        format!("Show by {grain}")
+                    } else {
+                        format!("Too many or too few {grain}s over this range")
+                    }
+                }
+            };
+            view! {
+                <button
+                    class="step"
+                    class:auto=move || step.get().auto
+                    class:pinned=move || step.get().pinned
+                    data-grain=grain.clone()
+                    disabled=move || !step.get().open && !step.get().pinned
+                    aria-pressed=move || step.get().on.to_string()
+                    title=title
+                    on:click=move |_| {
+                        let pin = zoom.with_untracked(|z| step_click(&name, z.as_ref()));
+                        live.pin_grain(&visual, pin.as_deref());
+                    }
+                >
+                    {label}
+                </button>
+            }
+        })
+        .collect_view();
+    Some(
+        view! {
+            <div class="steps" role="group" aria-label="Time grain">{buttons}</div>
+        }
+        .into_any(),
+    )
+}
+
+/// What `+` and `−` do on a chart that zooms.
+fn zoom_keys(
+    live: Live,
+    info: &VisualInfo,
+    zoom: Memo<Option<ZoomFrame>>,
+) -> Option<Callback<bool>> {
+    let steps = info.zoom.clone();
+    if steps.is_empty() {
+        return None;
+    }
+    let visual = info.id.clone();
+    Some(Callback::new(move |finer: bool| {
+        let to = zoom.with_untracked(|z| z.as_ref().and_then(|z| zoom_key(&steps, z, finer)));
+        if let Some(to) = to {
+            live.pin_grain(&visual, Some(&to));
+        }
+    }))
+}
+
+/// The grain a chart's axis is at: the frame's, or the file's until there
+/// is one.
+fn axis_grain(info: &VisualInfo, zoom: Memo<Option<ZoomFrame>>) -> Signal<Option<String>> {
+    let own = info.dimensions.first().and_then(|d| d.grain.clone());
+    Signal::derive(move || {
+        zoom.with(|z| z.as_ref().map(|z| z.grain.clone()))
+            .or_else(|| own.clone())
+    })
+}
+
+/// A chart's data: the filled rows, with the bucket that holds now marked.
+fn chart_data(
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    zoom: Memo<Option<ZoomFrame>>,
+) -> Memo<Data> {
+    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
+    Memo::new(move |_| {
+        let now = zoom.with(|z| z.as_ref().and_then(|z| z.current.clone()));
+        rows.with(|rows| Data::formatted(rows, &metrics, &formats).at_now(now.as_ref()))
+    })
+}
+
+/// Select the buckets `first` to `last` of a time field: a half-open range, as
+/// a brush does.
+fn select_buckets(live: Live, field: &str, first: &str, last: &str, grain: Option<&str>) {
+    let Some((from, to)) = brush_range(first, last, grain) else {
+        return;
+    };
+    live.send(&json!({
+        "type": "select_range", "field": field, "from": from, "to": to,
+    }));
 }
 
 /// Show the visual alone, as large as the grid, or put it back (Escape
@@ -604,11 +726,17 @@ fn maximize_button(id: &str, maximized: RwSignal<Option<String>>) -> impl IntoVi
 }
 
 /// "CSV": the visual's query under the current selection, downloaded.
-fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
+fn export_button(
+    live: Live,
+    info: &VisualInfo,
+    zoom: Memo<Option<ZoomFrame>>,
+) -> impl IntoView + use<> {
     let info = info.clone();
     let failed = RwSignal::new(None::<String>);
     let export = move |_| {
         let name = format!("{}.csv", info.id);
+        // what's on screen: at the grain it's at just now
+        let info = zoom.with_untracked(|z| at_frame_grain(&info, z.as_ref()));
         // a rows visual exports its rows, as many as it can show
         let rows = (info.visual_type == "rows").then(|| {
             live.selection
@@ -677,10 +805,16 @@ fn kpi(live: Live, info: &VisualInfo, rows: &[Vec<Value>], compare: Option<&Valu
     .into_any()
 }
 
-fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: String) -> AnyView {
+fn bar_chart(
+    live: Live,
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    zoom: Memo<Option<ZoomFrame>>,
+    title: String,
+) -> AnyView {
     let field = info.dimensions[0].field.clone();
-    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
-    let data = Memo::new(move |_| rows.with(|rows| Data::formatted(rows, &metrics, &formats)));
+    let data = chart_data(info, rows, zoom);
+    let grain = axis_grain(info, zoom);
     let shown = field.clone();
     // the selection colours the bars too
     let selected = Signal::derive(move || {
@@ -700,14 +834,23 @@ fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: 
                     .filter_map(|&i| rows.get(i).and_then(|r| r.first()).cloned())
                     .collect()
             });
-            if !values.is_empty() {
+            // bars of time are periods: what they select is their range
+            let period = grain.with_untracked(Clone::clone);
+            if let (Some(period), Some(first), Some(last)) = (
+                &period,
+                values.first().and_then(Value::as_str),
+                values.last().and_then(Value::as_str),
+            ) {
+                select_buckets(live, &field, first, last, Some(period));
+            } else if !values.is_empty() {
                 live.select(&field, &values, additive);
             }
         })
     });
+    let on_zoom = zoom_keys(live, info, zoom);
     view! {
         <div class="chart">
-            <BarChart data=data selected=selected on_select=on_select label=title />
+            <BarChart data=data selected=selected grain=grain on_select=on_select on_zoom=on_zoom label=title />
         </div>
     }
     .into_any()
@@ -717,14 +860,15 @@ fn line_chart(
     live: Live,
     info: &VisualInfo,
     rows: Memo<Vec<Vec<Value>>>,
+    zoom: Memo<Option<ZoomFrame>>,
     title: String,
 ) -> AnyView {
-    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
-    let data = Memo::new(move |_| rows.with(|rows| Data::formatted(rows, &metrics, &formats)));
-    let dimension = info.dimensions[0].clone();
-    let grain = dimension.grain.clone();
+    let data = chart_data(info, rows, zoom);
+    let grain = axis_grain(info, zoom);
+    let field = info.dimensions[0].field.clone();
+    let on_zoom = zoom_keys(live, info, zoom);
     if !info.on_brush {
-        return view! { <div class="chart"><LineChart data=data grain=grain label=title /></div> }
+        return view! { <div class="chart"><LineChart data=data grain=grain on_zoom=on_zoom label=title /></div> }
             .into_any();
     }
     // a brushed span selects its range: whole periods at a grain, the
@@ -741,14 +885,10 @@ fn line_chart(
         let (Some(first), Some(last)) = (at(start), at(end.max(start))) else {
             return;
         };
-        let Some((from, to)) = brush_range(&first, &last, dimension.grain.as_deref()) else {
-            return;
-        };
-        live.send(&json!({
-            "type": "select_range", "field": dimension.field, "from": from, "to": to,
-        }));
+        let grain = grain.with_untracked(Clone::clone);
+        select_buckets(live, &field, &first, &last, grain.as_deref());
     });
-    view! { <div class="chart"><LineChart data=data grain=grain on_brush=on_brush label=title /></div> }.into_any()
+    view! { <div class="chart"><LineChart data=data grain=grain on_brush=on_brush on_zoom=on_zoom label=title /></div> }.into_any()
 }
 
 /// A table: sortable by any column (the server sorts), a row click selects
@@ -821,6 +961,7 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
         .collect();
     let visual = info.id.clone();
     let field = info.dimensions.first().map(|d| d.field.clone());
+    let period = info.dimensions.first().and_then(|d| d.grain.clone());
     // a bar behind the metric it's sorted by (the first metric otherwise):
     // its share of the largest shown
     let barred = live
@@ -850,7 +991,7 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
                         let label = if numeric { h.clone() } else { short(h) };
                         let sorted = {
                             let (column, visual) = (column.clone(), visual.clone());
-                            move || live.sorts.with(|s| s.get(&visual).filter(|(c, _)| *c == column).map(|(_, desc)| *desc))
+                            move || live.sorts.with(|s| s.get(&visual).filter(|(c, _)| same_column(c, &column)).map(|(_, desc)| *desc))
                         };
                         let mark = {
                             let sorted = sorted.clone();
@@ -868,7 +1009,10 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
                         view! {
                             <th class:num=numeric aria-sort=aria>
                                 <button on:click=move |_| {
-                                    let desc = live.sorts.with_untracked(|s| next_sort(s.get(&visual), &column, numeric));
+                                    let desc = live.sorts.with_untracked(|s| {
+                                        let current = s.get(&visual).filter(|(c, _)| same_column(c, &column)).map(|(_, desc)| (column.clone(), *desc));
+                                        next_sort(current.as_ref(), &column, numeric)
+                                    });
                                     live.sorts.update(|s| { s.insert(visual.clone(), (column.clone(), desc)); });
                                     live.send(&json!({"type": "sort", "visual": visual, "column": column, "desc": desc}));
                                 }>{label}{mark}</button>
@@ -880,10 +1024,18 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
                     {rows.into_iter().enumerate().map(|(r, row)| {
                         let (field, value) = (field.clone(), row.first().cloned());
                         let visual = info.id.clone();
+                        let period = period.clone();
                         view! {
                             <tr on:click=move |ev| {
-                                if let (Some(field), Some(value)) = (&field, &value) {
-                                    live.select(field, std::slice::from_ref(value), ev.ctrl_key() || ev.meta_key());
+                                let Some((field, value)) = field.as_ref().zip(value.as_ref()) else {
+                                    return;
+                                };
+                                // a row of a period selects its range
+                                match (&period, value.as_str()) {
+                                    (Some(_), Some(bucket)) => {
+                                        select_buckets(live, field, bucket, bucket, period.as_deref());
+                                    }
+                                    _ => live.select(field, std::slice::from_ref(value), ev.ctrl_key() || ev.meta_key()),
                                 }
                             }>
                                 {row.into_iter().enumerate().map(|(c, v)| {

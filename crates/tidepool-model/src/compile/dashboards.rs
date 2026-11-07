@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tidepool_config::dashboard::{
-    DashboardFile, FilterWidget, Visual as VisualSpec, VisualType, WindowUnit,
+    DashboardFile, FilterWidget, Grain, Visual as VisualSpec, VisualType, WindowUnit, Zoom,
 };
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::format::NumberFormat;
+use tidepool_config::ossie::TimeGrain;
 use tidepool_config::source::YamlPath;
 
 use super::metrics::Metrics;
@@ -252,6 +253,11 @@ fn visual(
     };
 
     let (formats, formats_ok) = visual_formats(cx, &site, spec, metrics);
+    let (steps, zoom, zoom_ok) = if dimensions_ok {
+        visual_zoom(cx, &site, spec, semantic, &dimensions)
+    } else {
+        (Vec::new(), false, false)
+    };
 
     let ok = metrics_ok
         && dimensions_ok
@@ -259,7 +265,8 @@ fn visual(
         && combinations_ok
         && reach_ok
         && sort_ok
-        && formats_ok;
+        && formats_ok
+        && zoom_ok;
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -271,7 +278,195 @@ fn visual(
         on_click: spec.on_click.is_some(),
         on_brush: spec.on_brush.is_some(),
         formats,
+        steps,
+        zoom,
         at: spec.at,
+    })
+}
+
+/// The grains a field has, finest first: its own list, or all, and none
+/// shorter than a day without a time of day. None for a time field that
+/// holds something other than dates or times.
+fn field_steps(field: &crate::ir::Field) -> Vec<TimeGrain> {
+    if !matches!(field.ty, Type::Date | Type::Timestamp | Type::TimestampTz) {
+        return Vec::new();
+    }
+    TimeGrain::ALL
+        .into_iter()
+        .filter(|g| field.grains.is_empty() || field.grains.contains(g))
+        .filter(|g| !g.is_sub_day() || field.ty.has_time_of_day())
+        .collect()
+}
+
+/// The steps of the visual's grained dimension, finest first, and whether a
+/// viewer may zoom between them (plan §5.8). A filter's or a rows visual's
+/// grain is an error of its own, so it isn't reported again here.
+fn visual_zoom(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    semantic: &Semantic,
+    dimensions: &[crate::ir::Dimension],
+) -> (Vec<TimeGrain>, bool, bool) {
+    let grained: Vec<usize> = (0..dimensions.len())
+        .filter(|i| dimensions[*i].grain.is_some())
+        .collect();
+    let refused_grain =
+        matches!(spec.visual_type, VisualType::Filter | VisualType::Rows) && !grained.is_empty();
+    let [one] = grained[..] else {
+        return if refused_grain {
+            (Vec::new(), false, false)
+        } else {
+            several_or_none(cx, site, spec, &grained)
+        };
+    };
+    if refused_grain {
+        return (Vec::new(), false, false);
+    }
+    let dimension = &dimensions[one];
+    let Some(field) = semantic
+        .dataset(dimension.field.table)
+        .and_then(|d| d.field(&dimension.field.field))
+    else {
+        return (Vec::new(), false, false);
+    };
+    let name = spec.dimensions[one].field();
+    let allowed = field_steps(field);
+    if allowed.is_empty() {
+        // a time field of numbers has fixed grains or none, as it always did
+        let auto = dimension.grain == Some(Grain::Auto);
+        let at = if auto {
+            site.path.key("dimensions").index(one).key("grain")
+        } else {
+            site.path.key("zoom")
+        };
+        return if auto || spec.zoom.is_some() {
+            cx.push(
+                Diagnostic::error(format!(
+                    "{}: `{name}` holds {}, not dates or times, so it can't be zoomed",
+                    site.what,
+                    field.ty.a()
+                ))
+                .at(site.file, at),
+            );
+            (Vec::new(), false, false)
+        } else {
+            (Vec::new(), false, true)
+        };
+    }
+    let steps = match &spec.zoom {
+        Some(Zoom::Steps(listed)) => {
+            let Some(steps) = listed_steps(cx, site, field, name, listed, &allowed) else {
+                return (Vec::new(), false, false);
+            };
+            steps
+        }
+        _ => allowed,
+    };
+    if let Some(Grain::Fixed(grain)) = dimension.grain
+        && !steps.contains(&grain)
+        && matches!(spec.zoom, Some(Zoom::Steps(_)))
+        && field_steps(field).contains(&grain)
+    {
+        cx.push(
+            Diagnostic::error(format!(
+                "{}: `zoom` leaves out `{}`, the grain it starts at",
+                site.what,
+                grain.name()
+            ))
+            .at_key(site.file, site.path.key("zoom"))
+            .help(format!("add `{}` to the list", grain.name())),
+        );
+        return (Vec::new(), false, false);
+    }
+    let zoom = !matches!(spec.zoom, Some(Zoom::Enabled(false)));
+    (steps, zoom, true)
+}
+
+/// `zoom` or `auto` on a visual with no grained dimension, or with several.
+fn several_or_none(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    grained: &[usize],
+) -> (Vec<TimeGrain>, bool, bool) {
+    if grained.is_empty() {
+        if spec.zoom.is_none() {
+            return (Vec::new(), false, true);
+        }
+        cx.push(
+            Diagnostic::error(format!(
+                "{}: `zoom` changes the grain of a time dimension, and it has none with a grain",
+                site.what
+            ))
+            .at_key(site.file, site.path.key("zoom"))
+            .help("give a time dimension a grain: `{ field: dataset.field, grain: auto }`"),
+        );
+        return (Vec::new(), false, false);
+    }
+    let auto = grained
+        .iter()
+        .find(|i| spec.dimensions[**i].grain() == Some(Grain::Auto));
+    let at = match (auto, &spec.zoom) {
+        (Some(i), _) => site.path.key("dimensions").index(*i).key("grain"),
+        (None, Some(_)) => site.path.key("zoom"),
+        (None, None) => return (Vec::new(), false, true),
+    };
+    cx.push(
+        Diagnostic::error(format!(
+            "{}: only a visual with exactly one grained dimension can be zoomed or use `auto`, and it has {}",
+            site.what,
+            grained.len()
+        ))
+        .at(site.file, at),
+    );
+    (Vec::new(), false, false)
+}
+
+/// A `zoom:` list checked against what the field allows: finest first.
+fn listed_steps(
+    cx: &mut Cx,
+    site: &Site,
+    field: &crate::ir::Field,
+    name: &str,
+    listed: &[TimeGrain],
+    allowed: &[TimeGrain],
+) -> Option<Vec<TimeGrain>> {
+    let at = site.path.key("zoom");
+    if listed.is_empty() {
+        cx.push(
+            Diagnostic::error(format!("{}: `zoom` lists no grains", site.what))
+                .at(site.file, at)
+                .help("for no zoom, write `zoom: false`"),
+        );
+        return None;
+    }
+    let mut ok = true;
+    for (i, step) in listed.iter().enumerate() {
+        if allowed.contains(step) {
+            continue;
+        }
+        ok = false;
+        let message = if step.is_sub_day() && !field.ty.has_time_of_day() {
+            format!(
+                "`{name}` has no time of day, so it has no grain `{}`",
+                step.name()
+            )
+        } else {
+            format!("`{name}` doesn't allow grain `{}`", step.name())
+        };
+        let its: Vec<&str> = allowed.iter().map(|g| g.name()).collect();
+        cx.push(
+            Diagnostic::error(format!("{}: {message}", site.what))
+                .at(site.file, at.index(i))
+                .help(format!("its grains are {}", its.join(", "))),
+        );
+    }
+    ok.then(|| {
+        TimeGrain::ALL
+            .into_iter()
+            .filter(|g| listed.contains(g))
+            .collect()
     })
 }
 
@@ -384,24 +579,19 @@ fn visual_dimensions(
             }
         };
         if let Some(grain) = dimension.grain() {
-            let problem = if !field.is_time {
-                Some(format!(
-                    "`{}` is not a time field, so it has no grain",
-                    dimension.field()
-                ))
-            } else if !field.grains.is_empty() && !field.grains.contains(&grain) {
-                Some(format!(
-                    "`{}` doesn't allow grain `{grain:?}`",
-                    dimension.field()
-                ))
-            } else if grain.is_sub_day() && !field.ty.has_time_of_day() {
-                Some(format!(
-                    "`{}` has no time of day, so it has no grain `{}`",
-                    dimension.field(),
-                    format!("{grain:?}").to_lowercase()
-                ))
-            } else {
-                None
+            let name = dimension.field();
+            let problem = match grain {
+                _ if !field.is_time => {
+                    Some(format!("`{name}` is not a time field, so it has no grain"))
+                }
+                Grain::Fixed(g) if !field.grains.is_empty() && !field.grains.contains(&g) => {
+                    Some(format!("`{name}` doesn't allow grain `{}`", g.name()))
+                }
+                Grain::Fixed(g) if g.is_sub_day() && !field.ty.has_time_of_day() => Some(format!(
+                    "`{name}` has no time of day, so it has no grain `{}`",
+                    g.name()
+                )),
+                _ => None,
             };
             if let Some(problem) = problem {
                 ok = false;

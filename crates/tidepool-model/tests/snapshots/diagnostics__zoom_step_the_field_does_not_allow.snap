@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `trend`: `orders.ordered_at` doesn't allow grain `minute`
+  --> dashboards/sales.yaml:31:12
+   |
+31 |     zoom: [minute, hour, day, week, month]   # what a viewer may zoom between
+   |            ^^^^^^
+   = help: its grains are hour, day, week, month
+
+1 error, 0 warnings

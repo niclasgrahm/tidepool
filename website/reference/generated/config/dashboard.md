@@ -41,6 +41,7 @@
 | `on_click` | [`ClickAction`](#dashboard-clickaction) |  | Bars and table rows: what a click does. |
 | `sort` | [`Sort`](#dashboard-sort) |  |  |
 | `type` | [`VisualType`](#dashboard-visualtype) | **required** |  |
+| `zoom` | [`Zoom`](#dashboard-zoom) |  | The grains a viewer may zoom this visual between, as a list, or `false` for no zoom. Without it a visual with one grained time dimension zooms between all the grains its field has. `true` is the same as leaving it out. |
 
 
 ## `RelativeWindow` {#dashboard-relativewindow}
@@ -76,7 +77,7 @@ Whole periods relative to now: the `last` ones of `unit`, ending with the curren
 
 ## `DimensionRef` {#dashboard-dimensionref}
 
-A dimension: `dataset.field`, or a time field at a grain.
+A dimension: `dataset.field`, or a time field at a grain, written `{ field: orders.ordered_at, grain: day }`. The grain can be `auto`.
 
 One of:
 
@@ -111,6 +112,25 @@ One of:
 - `rows`: The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics.
 
 
+## `Zoom` {#dashboard-zoom}
+
+`zoom:` on a visual.
+
+One of:
+
+- boolean: `false`: a viewer can't change the grain.
+- list of [`TimeGrain`](#dashboard-timegrain): The grains a viewer may zoom between.
+
+
 ## `WindowUnit` {#dashboard-windowunit}
 
 Type: `minute` · `hour` · `day` · `week` · `month` · `quarter` · `year`.
+
+
+## `TimeGrain` {#dashboard-timegrain}
+
+One of:
+
+- `day` · `week` · `month` · `quarter` · `year`
+- `minute`: Timestamps only.
+- `hour`: Timestamps only.

@@ -9,6 +9,7 @@
 //! [`Catalog`]: crate::catalog::Catalog
 
 use serde::{Deserialize, Serialize};
+use tidepool_config::dashboard::Grain;
 use tidepool_config::ossie::TimeGrain;
 use tidepool_config::server::ServerConfig;
 use tidepool_config::table::{Encoding, TableMode};
@@ -382,13 +383,33 @@ pub struct Visual {
     /// How metrics read in this visual, over their own `format`; checked.
     #[serde(default)]
     pub formats: Vec<(MetricId, String)>,
+    /// The grains of its one grained time dimension, finest first: what an
+    /// `auto` grain chooses from and a viewer zooms between (plan §5.8).
+    /// Empty when it has no such dimension.
+    #[serde(default)]
+    pub steps: Vec<TimeGrain>,
+    /// Whether a viewer may change the grain.
+    #[serde(default)]
+    pub zoom: bool,
     pub at: tidepool_config::dashboard::GridPosition,
+}
+
+impl Visual {
+    /// Where the visual's one grained time dimension is, when it has one
+    /// that can be zoomed or resolved.
+    #[must_use]
+    pub fn grained(&self) -> Option<usize> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        self.dimensions.iter().position(|d| d.grain.is_some())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dimension {
     pub field: FieldRef,
-    pub grain: Option<TimeGrain>,
+    pub grain: Option<Grain>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

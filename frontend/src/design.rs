@@ -6,8 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tidepool_config::dashboard::{BrushAction, ClickAction, DimensionRef, Visual, VisualType};
+use tidepool_config::dashboard::{
+    BrushAction, ClickAction, DimensionRef, Grain, Visual, VisualType,
+};
 use tidepool_config::format::NumberFormat;
+use tidepool_config::ossie::TimeGrain;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
@@ -185,6 +188,11 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
     if t == VisualType::Rows {
         visual.sort = None;
     }
+    // a zoom needs its one grained dimension
+    let grained = visual.dimensions.iter().filter(|d| d.grain().is_some());
+    if grained.count() != 1 || matches!(t, VisualType::Filter | VisualType::Rows) {
+        visual.zoom = None;
+    }
     let shown = |by: &str| {
         visual.metrics.iter().any(|m| m == by) || visual.dimensions.iter().any(|d| d.field() == by)
     };
@@ -252,7 +260,11 @@ pub fn request(visual: &Visual) -> QueryRequest {
         .iter()
         .map(|d| QueryDimension {
             field: d.field().to_string(),
-            grain: d.grain().map(|g| format!("{g:?}").to_lowercase()),
+            // the editor has no range to resolve `auto` from
+            grain: d.grain().map(|g| match g {
+                Grain::Auto => TimeGrain::Day.name().to_string(),
+                Grain::Fixed(g) => g.name().to_string(),
+            }),
             level: None,
         })
         .collect();
@@ -378,8 +390,9 @@ impl Reach {
 #[cfg(test)]
 mod tests {
     use tidepool_config::dashboard::{GridPosition, Sort};
-    use tidepool_config::ossie::TimeGrain;
     use tidepool_protocol::{DatasetInfo, MetricInfo, RelationshipInfo};
+
+    use tidepool_config::dashboard::Zoom;
 
     use super::*;
 
@@ -390,7 +403,7 @@ mod tests {
     fn by_day(f: &str) -> DimensionRef {
         DimensionRef::Grained {
             field: f.into(),
-            grain: TimeGrain::Day,
+            grain: Grain::Fixed(TimeGrain::Day),
         }
     }
 
@@ -405,6 +418,7 @@ mod tests {
             limit: None,
             on_click: None,
             on_brush: None,
+            zoom: None,
             format: indexmap::IndexMap::new(),
             at: GridPosition {
                 x: 0,
@@ -459,7 +473,7 @@ mod tests {
         // rows show each row's own values: no grain
         let grained = [DimensionRef::Grained {
             field: "orders.ordered_at".into(),
-            grain: tidepool_config::ossie::TimeGrain::Day,
+            grain: Grain::Auto,
         }];
         assert_eq!(allowed(&grained, 0), ["Table"]);
         assert_eq!(allowed(&[], 0), Vec::<&str>::new());
@@ -662,6 +676,38 @@ mod tests {
         assert_eq!(request.dimensions[0].grain.as_deref(), Some("day"));
         assert_eq!(request.sort[0].column, "orders.ordered_at:day");
         assert_eq!(request.limit, Some(200));
+    }
+
+    #[test]
+    fn a_zoom_goes_with_the_dimension_it_was_for() {
+        let is_time = |_: &str| true;
+        let mut v = visual(
+            VisualType::Line,
+            vec![by_day("orders.ordered_at")],
+            &["revenue"],
+        );
+        v.zoom = Some(Zoom::Enabled(false));
+        retype(&mut v, VisualType::Bar, &is_time);
+        assert_eq!(v.zoom, Some(Zoom::Enabled(false)), "a bar zooms too");
+        v.dimensions = vec![field("customers.region")];
+        retype(&mut v, VisualType::Bar, &is_time);
+        assert_eq!(v.zoom, None, "it has no grain left to zoom");
+    }
+
+    #[test]
+    fn a_preview_of_an_auto_grain_asks_for_days() {
+        let dimension = DimensionRef::Grained {
+            field: "orders.ordered_at".into(),
+            grain: Grain::Auto,
+        };
+        let mut v = visual(VisualType::Line, vec![dimension], &["revenue"]);
+        v.sort = Some(Sort {
+            by: "orders.ordered_at".into(),
+            desc: true,
+        });
+        let request = request(&v);
+        assert_eq!(request.dimensions[0].grain.as_deref(), Some("day"));
+        assert_eq!(request.sort[0].column, "orders.ordered_at:day");
     }
 
     fn retail() -> ModelInfo {

@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::{Value, json};
 use tidepool_config::dashboard::{
-    DashboardFile, DimensionRef, GridPosition as Rect, Layout, Visual, VisualType,
+    DashboardFile, DimensionRef, Grain, GridPosition as Rect, Layout, Visual, VisualType,
 };
 use tidepool_config::format::{MAX_DECIMALS, NumberFormat, Style};
 use tidepool_config::ossie::TimeGrain;
@@ -384,6 +384,7 @@ fn Editor(
                     limit: None,
                     on_click: None,
                     on_brush: None,
+                    zoom: None,
                     format: IndexMap::new(),
                     at,
                 };
@@ -699,7 +700,7 @@ fn Properties(
         .dimensions
         .iter()
         .map(|d| match d.grain() {
-            Some(g) => format!("{} by {}", d.field(), format!("{g:?}").to_lowercase()),
+            Some(g) => format!("{} by {}", d.field(), g.name()),
             None => d.field().to_string(),
         })
         .collect();
@@ -931,7 +932,7 @@ fn Picker(
             } else if time {
                 d.push(DimensionRef::Grained {
                     field,
-                    grain: TimeGrain::Day,
+                    grain: Grain::Auto,
                 });
             } else {
                 d.push(DimensionRef::Field(field));
@@ -940,14 +941,8 @@ fn Picker(
     };
     let set_grain = move |field: String, grain: String| {
         let grain = match grain.as_str() {
-            "minute" => Some(TimeGrain::Minute),
-            "hour" => Some(TimeGrain::Hour),
-            "day" => Some(TimeGrain::Day),
-            "week" => Some(TimeGrain::Week),
-            "month" => Some(TimeGrain::Month),
-            "quarter" => Some(TimeGrain::Quarter),
-            "year" => Some(TimeGrain::Year),
-            _ => None,
+            "auto" => Some(Grain::Auto),
+            name => TimeGrain::parse(name).map(Grain::Fixed),
         };
         dims.update(|d| {
             if let Some(slot) = d.iter_mut().find(|x| x.field() == field) {
@@ -979,7 +974,7 @@ fn Picker(
                             let grain = chosen
                                 .as_ref()
                                 .and_then(DimensionRef::grain)
-                                .map_or_else(String::new, |g| format!("{g:?}").to_lowercase());
+                                .map_or_else(String::new, |g| g.name().to_string());
                             let (toggle, regrain) = (name.clone(), name.clone());
                             view! {
                                 <li class:far=!ok>
@@ -993,6 +988,7 @@ fn Picker(
                                         <select aria-label=format!("Grain of {name}") prop:value=grain
                                             on:change=move |ev| set_grain(regrain.clone(), event_target_value(&ev))>
                                             <option value="">"each value"</option>
+                                            <option value="auto">"by what fits the range"</option>
                                             {timed.then(|| view! {
                                                 <option value="minute">"by minute"</option>
                                                 <option value="hour">"by hour"</option>
@@ -1158,7 +1154,11 @@ fn Preview(
             v.as_ref()
                 .and_then(|v| v.dimensions.first())
                 .and_then(DimensionRef::grain)
-                .map(|g| format!("{g:?}").to_lowercase())
+                // what the preview's query asks for (`design::request`)
+                .map(|g| match g {
+                    Grain::Auto => "day".to_string(),
+                    Grain::Fixed(g) => g.name().to_string(),
+                })
         })
     });
     move || {

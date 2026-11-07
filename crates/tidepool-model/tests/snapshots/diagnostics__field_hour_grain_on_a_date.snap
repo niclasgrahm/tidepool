@@ -5,7 +5,7 @@ expression: rendered
 error: field `orders.ordered_at` has no time of day, so it can't have grains shorter than a day
   --> model.ossie.yaml:12:19
    |
-12 |             data: '{"grain": ["hour", "day"]}'
-   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+12 |             data: '{"grain": ["hour", "day", "week"]}'
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 1 error, 0 warnings

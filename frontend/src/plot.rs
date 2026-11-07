@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::charts::{
-    BarLayout, Data, LineLayout, Rect, TWEEN_MS, area_path, ease, line_path, step_key,
+    BarLayout, Data, LineLayout, Rect, TWEEN_MS, area_path, ease, line_path, lone, step_key,
 };
 
 /// The charts' text, as `style.css` sets it on `.plot`.
@@ -177,6 +177,15 @@ fn capture(node: NodeRef<Div>, ev: &web_sys::PointerEvent) {
     }
 }
 
+/// What a key means to a chart that zooms: `+` finer, `−` coarser.
+fn zoom_finer(key: &str) -> Option<bool> {
+    match key {
+        "+" | "=" => Some(true),
+        "-" | "_" | "−" => Some(false),
+        _ => None,
+    }
+}
+
 fn additive(ev: &web_sys::MouseEvent) -> bool {
     ev.ctrl_key() || ev.meta_key()
 }
@@ -242,12 +251,17 @@ fn brush_rect(span: Option<Rect>) -> impl IntoView {
 ///   band, or a drag across several, or Enter on the keyboard's place,
 ///   gives the categories and whether Ctrl/Cmd was held (add, don't
 ///   replace).
+/// - `grain` makes the bars periods: time runs along the bottom.
+/// - `on_zoom` makes it zoom on `+` and `−` while it has the focus: it's
+///   given whether to go finer.
 #[allow(clippy::too_many_lines)] // one chart: its state, its handlers, its drawing
 #[component]
 pub fn BarChart(
     #[prop(into)] data: Memo<Data>,
     #[prop(into, optional)] selected: Signal<Vec<String>>,
+    #[prop(into, optional)] grain: Signal<Option<String>>,
     #[prop(into, optional_no_strip)] on_select: Option<Callback<(Vec<usize>, bool)>>,
+    #[prop(into, optional_no_strip)] on_zoom: Option<Callback<bool>>,
     #[prop(into, optional)] label: String,
 ) -> impl IntoView {
     let node = NodeRef::<Div>::new();
@@ -257,7 +271,10 @@ pub fn BarChart(
         if w <= 0.0 || h <= 0.0 {
             return BarLayout::default();
         }
-        data.with(|d| selected.with(|s| BarLayout::new(d, (w, h), s, &measure)))
+        data.with(|d| {
+            selected
+                .with(|s| grain.with(|g| BarLayout::grained(d, (w, h), s, g.as_deref(), &measure)))
+        })
     });
     let shown = tween(target);
     let hover = RwSignal::new(None::<(usize, (f64, f64))>);
@@ -328,7 +345,12 @@ pub fn BarChart(
                 ev.prevent_default();
                 active.set(step_key(&key, active.get_untracked().filter(|&i| i < n), n));
             }
-            _ => {}
+            _ => {
+                if let (Some(on_zoom), Some(finer)) = (on_zoom, zoom_finer(&key)) {
+                    ev.prevent_default();
+                    on_zoom.run(finer);
+                }
+            }
         }
     };
 
@@ -371,7 +393,7 @@ pub fn BarChart(
                 <svg class="plot" width=move || shown.with(|l| l.width) height=move || shown.with(|l| l.height)
                     role=if interactive { "listbox" } else { "img" } aria-label=label
                     aria-multiselectable=interactive.then_some("true")
-                    tabindex=interactive.then_some("0")
+                    tabindex=(interactive || on_zoom.is_some()).then_some("0")
                     aria-activedescendant=descendant
                     on:keydown=key on:blur=move |_| active.set(None)>
                     {move || shown.with(|l| {
@@ -390,7 +412,7 @@ pub fn BarChart(
                             {brush_rect(brush.get().map(|(a, b)| l.span(a, b)))}
                             <g class="bars">
                                 {l.bars.iter().map(|b| view! {
-                                    <rect class=format!("bar {}", metric_class(b.metric)) class:selected=b.selected
+                                    <rect class=format!("bar {}", metric_class(b.metric)) class:selected=b.selected class:current=b.current
                                         x=b.rect.x y=b.rect.y width=b.rect.w height=b.rect.h />
                                 }).collect_view()}
                             </g>
@@ -426,12 +448,15 @@ pub fn BarChart(
 ///
 /// `on_brush` makes periods selectable: a drag across them, a click on
 /// one, or Shift+arrows and Enter give the first and last period chosen.
+/// `on_zoom` makes it zoom on `+` and `−` while it has the focus: it's given
+/// whether to go finer.
 #[allow(clippy::too_many_lines)] // one chart: its state, its handlers, its drawing
 #[component]
 pub fn LineChart(
     #[prop(into)] data: Memo<Data>,
     #[prop(into, optional)] grain: Signal<Option<String>>,
     #[prop(into, optional_no_strip)] on_brush: Option<Callback<(usize, usize)>>,
+    #[prop(into, optional_no_strip)] on_zoom: Option<Callback<bool>>,
     #[prop(into, optional)] label: String,
 ) -> impl IntoView {
     let node = NodeRef::<Div>::new();
@@ -537,7 +562,12 @@ pub fn LineChart(
                 }
                 active.set(to);
             }
-            _ => {}
+            _ => {
+                if let (Some(on_zoom), Some(finer)) = (on_zoom, zoom_finer(&key)) {
+                    ev.prevent_default();
+                    on_zoom.run(finer);
+                }
+            }
         }
     };
 
@@ -545,7 +575,7 @@ pub fn LineChart(
         let n = data.with(Data::len);
         match (active.get().filter(|&i| i < n), hover.get()) {
             (Some(i), _) => shown.with(|l| {
-                let x = l.points.map_or(0.0, |p| p.at(i));
+                let x = l.x(i).unwrap_or(0.0);
                 Some((i, (x, l.plot.y + l.plot.h / 3.0)))
             }),
             (None, at) => at,
@@ -586,17 +616,18 @@ pub fn LineChart(
                             <line class="baseline" x1=plot.x x2=plot.right() y1=plot.bottom() y2=plot.bottom() />
                             {l.series.first().map(|s| view! { <path class="area" d=area_path(s, base) /> })}
                             {brush_rect(brush.get().map(|(a, b)| l.span(a, b)))}
-                            {cursor.and_then(|i| l.points.map(|p| p.at(i))).map(|x| view! {
+                            {cursor.and_then(|i| l.x(i)).map(|x| view! {
                                 <line class="cursor" x1=x x2=x y1=plot.y y2=plot.bottom() />
                             })}
-                            {l.series.iter().enumerate().map(|(m, s)| view! {
-                                <path class=format!("line {}", metric_class(m)) d=line_path(s) />
+                            {(0..l.series.len()).map(|m| view! {
+                                <path class=format!("line {}", metric_class(m)) d=line_path(&l.solid(m)) />
+                                <path class=format!("line now {}", metric_class(m)) d=line_path(&l.dashed(m)) />
                             }).collect_view()}
                             {l.series.iter().enumerate().map(|(m, s)| {
                                 s.iter().enumerate().filter_map(|(i, at)| {
                                     let (x, y) = (*at)?;
                                     let on = cursor == Some(i);
-                                    (l.dots || on).then(|| view! {
+                                    (l.dots || on || lone(s, i)).then(|| view! {
                                         <circle class=format!("dot {}", metric_class(m)) class:on=on cx=x cy=y r=if on { 4.0 } else { 2.5 } />
                                     })
                                 }).collect_view()

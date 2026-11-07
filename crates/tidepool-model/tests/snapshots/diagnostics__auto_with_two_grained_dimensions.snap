@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `who_buys_what`: only a visual with exactly one grained dimension can be zoomed or use `auto`, and it has 2
+  --> dashboards/sales_recent.yaml:33:53
+   |
+33 |     dimensions: [{ field: orders.ordered_at, grain: auto }, { field: orders.ordered_at, grain: day }]
+   |                                                     ^^^^
+
+1 error, 0 warnings

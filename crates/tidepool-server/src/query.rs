@@ -83,19 +83,10 @@ pub(crate) fn field(model: &Model, name: &str) -> Result<(FieldRef, Type), Strin
     ))
 }
 
-fn grain(name: &str) -> Result<TimeGrain, String> {
-    match name {
-        "minute" => Ok(TimeGrain::Minute),
-        "hour" => Ok(TimeGrain::Hour),
-        "day" => Ok(TimeGrain::Day),
-        "week" => Ok(TimeGrain::Week),
-        "month" => Ok(TimeGrain::Month),
-        "quarter" => Ok(TimeGrain::Quarter),
-        "year" => Ok(TimeGrain::Year),
-        other => Err(format!(
-            "unknown grain `{other}`: use minute, hour, day, week, month, quarter or year"
-        )),
-    }
+pub(crate) fn grain(name: &str) -> Result<TimeGrain, String> {
+    TimeGrain::parse(name).ok_or_else(|| {
+        format!("unknown grain `{name}`: use minute, hour, day, week, month, quarter or year")
+    })
 }
 
 /// A decimal written as text (`"12.50"`), with the scale it's written at.
@@ -145,9 +136,10 @@ pub(crate) fn scalar(value: &Json_, ty: Type) -> Option<Scalar> {
                 })
             })
             .map(Scalar::Date),
+        // with a `Z` too: the start of a period a brush sends, as for a date
         Type::Timestamp => value
             .as_str()
-            .and_then(parse_timestamp)
+            .and_then(|text| parse_timestamp(text.strip_suffix('Z').unwrap_or(text)))
             .map(Scalar::Timestamp),
         Type::TimestampTz => value
             .as_str()
@@ -578,6 +570,25 @@ pub async fn rows(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_period_start_with_a_z_is_a_value_of_every_time_type() {
+        // what a brush at a grain of a day or longer sends
+        let text = serde_json::json!("2026-10-01T00:00:00Z");
+        let midnight = super::parse_timestamp("2026-10-01").unwrap_or_default();
+        assert_eq!(
+            super::scalar(&text, Type::Timestamp),
+            Some(Scalar::Timestamp(midnight))
+        );
+        assert_eq!(
+            super::scalar(&text, Type::TimestampTz),
+            Some(Scalar::TimestampTz(midnight))
+        );
+        assert_eq!(
+            super::scalar(&text, Type::Date),
+            super::parse_date("2026-10-01").map(Scalar::Date)
+        );
+    }
+
     use super::*;
     use tidepool_protocol::QueryColumn;
 

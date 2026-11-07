@@ -8,7 +8,7 @@ use serde_json::Value;
 use tidepool_config::format::{NumberFormat, Style};
 use tidepool_protocol::live::{
     FilterFrame, RelativeUnit, RelativeWindow, SelectedField, ServerMessage, TreeNode, ValueState,
-    VisualFrame, VisualInfo,
+    VisualFrame, VisualInfo, ZoomFrame,
 };
 
 use crate::calendar::{civil_from_days, days_from_civil};
@@ -41,9 +41,14 @@ impl Board {
         self.epoch = *epoch;
         self.fresh.clear();
         for visual in visuals {
-            if let (Some(old), Some(new)) = (
-                self.visuals.get(&visual.id).and_then(|v| v.result.as_ref()),
+            let previous = self.visuals.get(&visual.id);
+            // at another grain every bucket is another: none of them changed
+            let same_grain = previous.and_then(|v| v.zoom.as_ref().map(|z| &z.grain))
+                == visual.zoom.as_ref().map(|z| &z.grain);
+            if let (Some(old), Some(new), true) = (
+                previous.and_then(|v| v.result.as_ref()),
                 visual.result.as_ref(),
+                same_grain,
             ) {
                 // rows are matched by their dimension values, so a row
                 // that only moved isn't new
@@ -194,6 +199,194 @@ fn timestamp_text(micros: i64, zoned: bool) -> String {
         text.push('Z');
     }
     text
+}
+
+/// A bucket's start, from its key in a result: a date (`2026-10-01`) or a
+/// timestamp, in microseconds.
+#[must_use]
+pub fn bucket_micros(key: &str) -> Option<i64> {
+    if let Some((micros, _)) = micros_of(key) {
+        return Some(micros);
+    }
+    let mut parts = key.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    (parts.next().is_none()).then(|| days_from_civil(y, m, d) * MICROS_PER_DAY)
+}
+
+/// The key of the bucket after `key` at `grain`.
+#[must_use]
+pub fn next_bucket(key: &str, grain: &str) -> Option<String> {
+    let seconds = match grain {
+        "minute" => 60,
+        "hour" => 3600,
+        _ => return next_period(key, grain),
+    };
+    let (at, zoned) = micros_of(key)?;
+    Some(timestamp_text(at + seconds * 1_000_000, zoned))
+}
+
+/// A time axis filled in past this many buckets isn't filled in: a fixed
+/// grain may be far too fine for its range.
+const MOST_FILLED: usize = 10_000;
+
+/// A grained result's rows with a row for every bucket from `zoom`'s range
+/// (metrics NULL where there were no rows, a break on the chart), so an empty
+/// bucket isn't joined over. Rows outside the range keep their place. Rows that
+/// aren't in time order (a sort, a limit) or aren't all buckets (a NULL time)
+/// are returned as they are.
+#[must_use]
+pub fn filled(rows: &[Vec<Value>], zoom: &ZoomFrame) -> Vec<Vec<Value>> {
+    fn key(row: &[Value]) -> Option<&str> {
+        row.first().and_then(Value::as_str)
+    }
+    let times: Option<Vec<i64>> = rows
+        .iter()
+        .map(|r| key(r).and_then(bucket_micros))
+        .collect();
+    let Some(times) = times else {
+        return rows.to_vec();
+    };
+    let width = rows.first().map_or(1, Vec::len);
+    if !times.windows(2).all(|t| t[0] < t[1]) {
+        return rows.to_vec();
+    }
+    let bound = |v: &Option<Value>| v.as_ref().and_then(Value::as_str).map(str::to_string);
+    let (from, to) = (bound(&zoom.from), bound(&zoom.to));
+    let start = match (&from, rows.first().and_then(|r| key(r))) {
+        (Some(from), Some(first)) if bucket_micros(first) < bucket_micros(from) => {
+            first.to_string()
+        }
+        (Some(from), _) => from.clone(),
+        (None, Some(first)) => first.to_string(),
+        (None, None) => return rows.to_vec(),
+    };
+    let end = to.as_deref().and_then(bucket_micros);
+    let last = times.last().copied();
+    let mut out = Vec::with_capacity(rows.len());
+    let mut next = 0;
+    let mut bucket = start;
+    loop {
+        let Some(at) = bucket_micros(&bucket) else {
+            return rows.to_vec();
+        };
+        if end.is_none_or(|end| at >= end) && last.is_none_or(|last| at > last) {
+            return out;
+        }
+        if out.len() >= MOST_FILLED {
+            return rows.to_vec();
+        }
+        if times.get(next) == Some(&at) {
+            out.push(rows[next].clone());
+            next += 1;
+        } else {
+            // a row between buckets isn't of this grain: nothing to fill
+            if times.get(next).is_some_and(|t| *t < at) {
+                return rows.to_vec();
+            }
+            let mut row = vec![Value::Null; width];
+            row[0] = Value::String(bucket.clone());
+            out.push(row);
+        }
+        let Some(after) = next_bucket(&bucket, &zoom.grain) else {
+            return rows.to_vec();
+        };
+        bucket = after;
+    }
+}
+
+/// How a grain reads in a visual's header.
+#[must_use]
+pub fn step_label(grain: &str) -> &str {
+    match grain {
+        "minute" => "min",
+        "hour" => "hour",
+        "day" => "day",
+        "week" => "week",
+        "month" => "mon",
+        "quarter" => "qtr",
+        "year" => "year",
+        other => other,
+    }
+}
+
+/// One step of a visual's zoom control.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent facts the control shows as such
+pub struct Step {
+    /// It gives a readable number of buckets over the range.
+    pub open: bool,
+    /// The answer on screen is at this grain.
+    pub on: bool,
+    /// This grain was chosen from the range.
+    pub auto: bool,
+    /// The viewer pinned this grain.
+    pub pinned: bool,
+}
+
+/// What the control shows for step `grain`, as of a frame.
+#[must_use]
+pub fn step_state(grain: &str, zoom: Option<&ZoomFrame>) -> Step {
+    let Some(zoom) = zoom else {
+        return Step {
+            open: false,
+            on: false,
+            auto: false,
+            pinned: false,
+        };
+    };
+    let on = zoom.grain == grain;
+    Step {
+        // what's on screen can always be clicked: that's how a pin comes off
+        open: on || zoom.open.iter().any(|o| o == grain),
+        on,
+        auto: on && zoom.auto,
+        pinned: zoom.pinned.as_deref() == Some(grain),
+    }
+}
+
+/// What a click on step `grain` pins: that step, or nothing (back to the
+/// dashboard's) when it is pinned already.
+#[must_use]
+pub fn step_click(grain: &str, zoom: Option<&ZoomFrame>) -> Option<String> {
+    let pinned = zoom.and_then(|z| z.pinned.as_deref());
+    (pinned != Some(grain)).then(|| grain.to_string())
+}
+
+/// What `+` (`finer`) or `−` pins: the next open step from the grain on
+/// screen, if there is one.
+#[must_use]
+pub fn zoom_key(steps: &[String], zoom: &ZoomFrame, finer: bool) -> Option<String> {
+    let at = steps.iter().position(|s| *s == zoom.grain)?;
+    let open = |s: &&String| zoom.open.contains(s);
+    if finer {
+        steps[..at].iter().rev().find(open).cloned()
+    } else {
+        steps[at + 1..].iter().find(open).cloned()
+    }
+}
+
+/// `info` as it is on screen: its grained dimension at the grain of the frame,
+/// which an export and a table's header go by. `auto` isn't a grain a query
+/// can ask for, so before the first frame it reads as a day.
+#[must_use]
+pub fn at_frame_grain(info: &VisualInfo, zoom: Option<&ZoomFrame>) -> VisualInfo {
+    let mut info = info.clone();
+    for dimension in &mut info.dimensions {
+        if let (Some(grain), Some(zoom)) = (&mut dimension.grain, zoom) {
+            grain.clone_from(&zoom.grain);
+        }
+        if dimension.grain.as_deref() == Some("auto") {
+            dimension.grain = Some("day".into());
+        }
+    }
+    info
+}
+
+/// Whether two result columns are the same one, whatever grain each is at.
+#[must_use]
+pub fn same_column(a: &str, b: &str) -> bool {
+    let name = |c: &'_ str| c.split(':').next().unwrap_or_default().to_string();
+    name(a) == name(b)
 }
 
 /// What brushing a line chart's categories `first` to `last` selects, as
@@ -708,9 +901,11 @@ pub fn filter_meta(
 /// `on_click: select`, `on_brush: select_range`.
 #[must_use]
 pub fn visual_tags(info: &VisualInfo) -> Vec<String> {
+    // a visual that zooms shows its grain in its control
     let mut tags: Vec<String> = info
         .dimensions
         .iter()
+        .filter(|_| info.zoom.is_empty())
         .filter_map(|d| d.grain.as_ref().map(|g| format!("grain: {g}")))
         .collect();
     if info.on_click {
@@ -793,6 +988,7 @@ mod tests {
                 result: None,
                 error: Some(format!("at {epoch}")),
                 compare: None,
+                zoom: None,
             }],
             filters: vec![FilterFrame {
                 field: "customers.region".into(),
@@ -875,6 +1071,7 @@ mod tests {
                 result: Some(result(rows)),
                 error: None,
                 compare: None,
+                zoom: None,
             }],
             filters: Vec::new(),
         };
@@ -1056,6 +1253,7 @@ mod tests {
             on_brush: false,
             widget: None,
             formats: std::collections::BTreeMap::new(),
+            zoom: Vec::new(),
             at: GridAt {
                 x: 0,
                 y: 0,
@@ -1250,6 +1448,7 @@ mod tests {
             on_brush: false,
             widget: None,
             formats: std::collections::BTreeMap::new(),
+            zoom: Vec::new(),
             at: tidepool_protocol::live::GridAt {
                 x: 0,
                 y: 0,
@@ -1373,6 +1572,271 @@ mod tests {
             Err(e) => panic!("a visual: {e}"),
         };
         assert_eq!(visual_tags(&info), ["grain: day", "on_brush: select_range"]);
+    }
+
+    fn axis(grain: &str, from: &str, to: &str) -> ZoomFrame {
+        ZoomFrame {
+            grain: grain.into(),
+            auto: true,
+            pinned: None,
+            open: vec![grain.into()],
+            from: Some(json!(from)),
+            to: Some(json!(to)),
+            current: None,
+        }
+    }
+
+    #[test]
+    fn missing_buckets_are_filled_from_the_grain_and_the_range() {
+        let rows = vec![
+            vec![json!("2026-10-02"), json!("5.00"), json!(1)],
+            vec![json!("2026-10-05"), json!("7.00"), json!(2)],
+        ];
+        let filled = filled(&rows, &axis("day", "2026-10-01", "2026-10-07"));
+        assert_eq!(
+            filled,
+            vec![
+                vec![json!("2026-10-01"), json!(null), json!(null)],
+                rows[0].clone(),
+                vec![json!("2026-10-03"), json!(null), json!(null)],
+                vec![json!("2026-10-04"), json!(null), json!(null)],
+                rows[1].clone(),
+                vec![json!("2026-10-06"), json!(null), json!(null)],
+            ]
+        );
+    }
+
+    #[test]
+    fn buckets_fill_at_every_grain() {
+        let keys = |grain, from, to, rows: &[&str]| -> Vec<String> {
+            let rows: Vec<Vec<Value>> = rows.iter().map(|k| vec![json!(k), json!(1)]).collect();
+            filled(&rows, &axis(grain, from, to))
+                .iter()
+                .map(|r| r[0].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert_eq!(
+            keys(
+                "hour",
+                "2026-10-01T22:00:00Z",
+                "2026-10-02T01:00:00Z",
+                &["2026-10-01T23:00:00Z"]
+            ),
+            [
+                "2026-10-01T22:00:00Z",
+                "2026-10-01T23:00:00Z",
+                "2026-10-02T00:00:00Z"
+            ],
+            "over midnight"
+        );
+        assert_eq!(
+            keys(
+                "minute",
+                "2026-10-01T10:00:00",
+                "2026-10-01T10:02:00",
+                &["2026-10-01T10:01:00"]
+            ),
+            ["2026-10-01T10:00:00", "2026-10-01T10:01:00"],
+            "a timestamp without a zone stays one"
+        );
+        assert_eq!(
+            keys("week", "2026-09-28", "2026-10-19", &["2026-10-05"]),
+            ["2026-09-28", "2026-10-05", "2026-10-12"]
+        );
+        assert_eq!(
+            keys("month", "2026-11-01", "2027-02-01", &["2026-12-01"]),
+            ["2026-11-01", "2026-12-01", "2027-01-01"],
+            "over a new year"
+        );
+        assert_eq!(
+            keys("quarter", "2026-07-01", "2027-04-01", &[]),
+            ["2026-07-01", "2026-10-01", "2027-01-01"],
+            "an empty answer still has an axis"
+        );
+        assert_eq!(
+            keys("year", "2025-01-01", "2027-01-01", &[]),
+            ["2025-01-01", "2026-01-01"]
+        );
+    }
+
+    #[test]
+    fn rows_past_the_range_keep_their_place() {
+        // an axis cut at now, and an order from the future
+        let rows = vec![vec![json!("2026-10-09"), json!(1)]];
+        let filled = filled(&rows, &axis("day", "2026-10-07", "2026-10-08"));
+        let keys: Vec<&str> = filled.iter().filter_map(|r| r[0].as_str()).collect();
+        assert_eq!(keys, ["2026-10-07", "2026-10-08", "2026-10-09"]);
+    }
+
+    #[test]
+    fn rows_that_are_not_a_time_axis_are_left_alone() {
+        let frame = axis("day", "2026-10-01", "2026-10-05");
+        // sorted by a metric, or limited: their order means something
+        let sorted = vec![
+            vec![json!("2026-10-03"), json!(9)],
+            vec![json!("2026-10-01"), json!(2)],
+        ];
+        assert_eq!(filled(&sorted, &frame), sorted);
+        // a NULL time has no place on the axis
+        let null = vec![
+            vec![json!(null), json!(1)],
+            vec![json!("2026-10-03"), json!(2)],
+        ];
+        assert_eq!(filled(&null, &frame), null);
+        // a row that isn't on the grain's buckets
+        let off = vec![vec![json!("2026-10-03T12:00:00Z"), json!(1)]];
+        assert_eq!(filled(&off, &frame), off);
+        // no range, no rows: nothing to place
+        let none = ZoomFrame {
+            from: None,
+            to: None,
+            ..frame.clone()
+        };
+        assert_eq!(filled(&[], &none), Vec::<Vec<Value>>::new());
+        // too many buckets to fill: a fixed minute over years
+        let far = vec![vec![json!("2020-01-01T00:00:00Z"), json!(1)]];
+        let years = axis("minute", "2020-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+        assert_eq!(filled(&far, &years), far);
+    }
+
+    #[test]
+    fn buckets_read_as_times() {
+        assert_eq!(bucket_micros("1970-01-02"), Some(MICROS_PER_DAY));
+        assert_eq!(bucket_micros("1970-01-02T00:00:00Z"), Some(MICROS_PER_DAY));
+        assert_eq!(
+            bucket_micros("1969-12-31T23:00:00"),
+            Some(-3_600_000_000),
+            "before 1970"
+        );
+        assert_eq!(bucket_micros("north"), None);
+        assert_eq!(bucket_micros("1,234"), None);
+    }
+
+    fn steps() -> Vec<String> {
+        ["minute", "hour", "day", "week", "month"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn plus_and_minus_step_through_the_open_steps() {
+        let mut zoom = axis("day", "2026-10-01", "2026-10-02");
+        zoom.open = ["hour", "day", "month"].map(String::from).to_vec();
+        assert_eq!(zoom_key(&steps(), &zoom, true).as_deref(), Some("hour"));
+        assert_eq!(
+            zoom_key(&steps(), &zoom, false).as_deref(),
+            Some("month"),
+            "over a closed week"
+        );
+        zoom.grain = "hour".into();
+        assert_eq!(zoom_key(&steps(), &zoom, true), None, "minute is closed");
+        zoom.grain = "month".into();
+        assert_eq!(zoom_key(&steps(), &zoom, false), None, "the last step");
+        // on a grain that isn't a step: a fixed one outside a list
+        zoom.grain = "year".into();
+        assert_eq!(zoom_key(&steps(), &zoom, true), None);
+    }
+
+    #[test]
+    fn a_step_says_what_it_is() {
+        let mut zoom = axis("day", "2026-10-01", "2026-10-02");
+        zoom.open = vec!["day".into(), "week".into()];
+        assert_eq!(
+            step_state("day", Some(&zoom)),
+            Step {
+                open: true,
+                on: true,
+                auto: true,
+                pinned: false
+            }
+        );
+        let week = step_state("week", Some(&zoom));
+        assert!(week.open && !week.on && !week.auto);
+        let hour = step_state("hour", Some(&zoom));
+        assert!(!hour.open, "too many buckets");
+        assert!(!step_state("day", None).open, "no frame yet");
+        // a pin that fell back: its own step closed, another on screen
+        zoom.auto = false;
+        zoom.pinned = Some("hour".into());
+        let hour = step_state("hour", Some(&zoom));
+        assert!(hour.pinned && !hour.open && !hour.on);
+        let day = step_state("day", Some(&zoom));
+        assert!(day.on && !day.auto && !day.pinned);
+        // a fixed grain outside what's readable can still be clicked
+        zoom.open = vec![];
+        assert!(step_state("day", Some(&zoom)).open);
+    }
+
+    #[test]
+    fn a_click_pins_and_a_second_takes_the_pin_off() {
+        let mut zoom = axis("day", "2026-10-01", "2026-10-02");
+        assert_eq!(step_click("hour", Some(&zoom)).as_deref(), Some("hour"));
+        assert_eq!(
+            step_click("day", Some(&zoom)).as_deref(),
+            Some("day"),
+            "what auto chose can be held"
+        );
+        zoom.pinned = Some("day".into());
+        assert_eq!(step_click("day", Some(&zoom)), None);
+        assert_eq!(step_click("hour", Some(&zoom)).as_deref(), Some("hour"));
+    }
+
+    #[test]
+    fn a_frame_at_another_grain_flashes_nothing() {
+        let frame = |grain: &str, key: &str, value: i64| ServerMessage::Frame {
+            epoch: 1,
+            visuals: vec![VisualFrame {
+                id: "trend".into(),
+                result: Some(tidepool_protocol::QueryResult {
+                    columns: vec![tidepool_protocol::QueryColumn {
+                        name: "t".into(),
+                        ty: "date".into(),
+                        role: "dimension".into(),
+                    }],
+                    rows: vec![vec![json!(key), json!(value)]],
+                    epoch: 1,
+                }),
+                error: None,
+                compare: None,
+                zoom: Some(axis(grain, "2026-10-01", "2026-10-02")),
+            }],
+            filters: vec![],
+        };
+        let mut board = Board::default();
+        board.apply(&frame("day", "2026-10-01", 1));
+        board.apply(&frame("hour", "2026-10-01T00:00:00Z", 1));
+        assert!(board.fresh.is_empty(), "{:?}", board.fresh);
+        board.apply(&frame("hour", "2026-10-01T00:00:00Z", 2));
+        assert_eq!(board.fresh.len(), 1, "the same grain, a new value");
+    }
+
+    #[test]
+    fn an_export_and_a_header_go_by_the_grain_on_screen() {
+        let info: VisualInfo = serde_json::from_value(json!({
+            "id": "trend", "type": "line", "metrics": ["revenue"],
+            "dimensions": [{"field": "orders.ordered_at", "grain": "auto"}, {"field": "orders.status"}],
+            "on_click": false, "on_brush": false, "zoom": ["hour", "day"],
+            "at": {"x": 0, "y": 0, "w": 6, "h": 4},
+        }))
+        .unwrap_or_else(|e| panic!("a visual: {e}"));
+        let zoom = axis("hour", "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z");
+        let shown = at_frame_grain(&info, Some(&zoom));
+        assert_eq!(shown.dimensions[0].grain.as_deref(), Some("hour"));
+        assert_eq!(shown.dimensions[1].grain, None);
+        let early = at_frame_grain(&info, None);
+        assert_eq!(
+            early.dimensions[0].grain.as_deref(),
+            Some("day"),
+            "never `auto`, which no query can ask for"
+        );
+        assert_eq!(visual_tags(&info), Vec::<String>::new(), "its control says");
+    }
+
+    #[test]
+    fn a_column_is_the_same_at_any_grain() {
+        assert!(same_column("orders.at:day", "orders.at:hour"));
+        assert!(same_column("revenue", "revenue"));
+        assert!(!same_column("orders.at:day", "orders.other:day"));
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub fn retail() -> Arc<Model> {
 /// The retail example's model with one edit: `from` replaced by `to` in
 /// the file at `path` (relative to the example).
 pub fn retail_with(path: &str, from: &str, to: &str) -> Arc<Model> {
+    retail_edited(&[(path, from, to)])
+}
+
+/// The retail example's model with several such edits.
+pub fn retail_edited(edits: &[(&str, &str, &str)]) -> Arc<Model> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/retail");
     let mut files = Vec::new();
     for sub in ["", "tables", "dashboards"] {
@@ -82,9 +87,11 @@ pub fn retail_with(path: &str, from: &str, to: &str) -> Arc<Model> {
                 continue;
             }
             let mut text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-            if relative == path {
-                assert!(text.contains(from), "{path} has no `{from}` to replace");
-                text = text.replace(from, to);
+            for (path, from, to) in edits {
+                if relative == *path {
+                    assert!(text.contains(from), "{path} has no `{from}` to replace");
+                    text = text.replace(from, to);
+                }
             }
             files.push((relative, text));
         }

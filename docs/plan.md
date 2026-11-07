@@ -27,7 +27,7 @@ Tidepool is a live, associative analytics server. Data is pushed in over HTTP an
 | D14 | Reuse Kayak's conventions and solved problems | `just` for tasks, `serde_norway` for YAML, the `embed-assets` feature with rust-embed, one endpoint table that generates routes + auth roles + OpenAPI + docs, Kayak's auth stack (basic / session cookie / JWT with the iframe embedding handshake), `${NAME}` secrets, a bench crate, clippy pedantic with `unwrap_used`/`expect_used`, and a "definition of done" in CLAUDE.md. Copy first; extract a shared crate only if a third project needs it. |
 | D15 | Ingest is private by default; public ingest is a grant | The UI being public says nothing about where producers are. Listeners are split by surface (public / ingest / admin), placed from the endpoint table's `Access`. Ingest credentials are named and scoped to tables and operations, and a table becomes writable from the internet only through a credential marked `public`, with mandatory limits. Off loopback, an ingest or admin level without a token refuses to start. Changes to `auth`, `listen` and `agents` are their own change class, never auto-applied. (Decided 2026-10-17; §9.2.) |
 | D16 | Measures grow by structured modifiers, not a formula language | D9 extended to the measures DAX's `CALCULATE` and Qlik's set analysis are used for (shares of totals, fixed selections, level of detail, time windows, sets from sets). The core of a metric stays one SQL aggregate expression. Each new modifier is a key in its `TIDEPOOL` extension, with a plain-SQL translation the oracle checks, a stated place in one order of application, and a plan the engine already knows how to run. Inter-row functions go on visuals, not metrics. (Proposed 2026-11-02; §6.8.) |
-| D17 | Time zoom is a visual's grain, not a selection | How wide a visual's time buckets are is view state of that visual in one session, like its sort: no other visual changes and the selection's history doesn't record it. Narrowing the time shown is a selection on the time field, as before, so every visual answers for it. An `auto` grain is resolved from that range and the visual's width in grid columns (never the browser's), before the engine sees the query, so sessions keep sharing answers. (Proposed 2026-11-03; §5.8.) |
+| D17 | Time zoom is a visual's grain, not a selection | How wide a visual's time buckets are is view state of that visual in one session, like its sort: no other visual changes and the selection's history doesn't record it. Narrowing the time shown is a selection on the time field, as before, so every visual answers for it. An `auto` grain is resolved from that range and the visual's width in grid columns (never the browser's), before the engine sees the query, so sessions keep sharing answers. (Decided 2026-11-03, built 2026-11-04; §5.8.) |
 
 ---
 
@@ -292,7 +292,7 @@ A visual's `metrics` may be left out: a `filter` visual has none (one dimension,
 
 A visual's `format` maps metrics it shows (its `metrics` and `compare`) to formats, in the grammar of the metric `format` (§3.4; `tidepool_config::format`); the compiler checks both, and refuses a format for a metric the visual doesn't show. The live protocol sends each visual the format that applies per metric (`VisualInfo::formats`: the visual's, else the metric's), and the UI formats every value of that metric through it (KPI, table cells, tooltips, filter measures). Formats are display only: queries, CSV and the API answer the full value. They're for values that change every epoch: 167,791,795.92 moving in its last digits can't be read; 167.8M can.
 
-*Proposed (§5.8):* a time dimension's `grain` may be `auto`, and a visual may say `zoom: [grain…]` (the steps a viewer may zoom between) or `zoom: false`.
+A time dimension's `grain` may be `auto`, and a visual may say `zoom: [grain…]` (the steps a viewer may zoom between) or `zoom: false` (§5.8). `zoom` needs exactly one grained dimension, on a field holding dates or times; the compiler refuses a step the field doesn't have and a list without the fixed grain the visual starts at.
 
 ### 3.6 Machine-readable schemas
 
@@ -745,8 +745,7 @@ filters), and the search runs only on what they leave.
 
 ### 5.8 Time zoom
 
-**Status: proposed 2026-11-03.** D17 is the decision; this is the design.
-Sub-day grains are built (2026-11-04); the rest isn't.
+**Status: built 2026-11-04.** D17 is the decision; this is the design.
 
 A visual that groups by a time field (revenue per hour) can be zoomed out
 (per day, per month) and in again. Two things are called zooming, and they
@@ -783,8 +782,10 @@ the range on screen: between 2 and the visual's bucket budget (below). So
 `minute` isn't offered over a year, nor `year` over three weeks. Which
 steps are open changes with the range, and every frame says so.
 
-Visuals with a `time_window` metric (§6.8) offer no grain coarser than
-the window until its spike has settled how the two combine.
+Visuals with a `time_window` metric (§6.8) are to offer no grain coarser
+than the window until its spike has settled how the two combine. Metrics
+don't have `time_window` yet, so nothing checks this: whoever builds it adds
+the limit to `zoom::open`.
 
 **Sub-day grains** (done 2026-11-04). `TimeGrain` has `hour` and `minute`,
 for timestamp fields only; the compiler refuses them on a date, in a
@@ -800,14 +801,21 @@ paths and a date check, which nothing has asked for yet.
 
 **The `auto` grain.** A dimension may say `grain: auto` (the dashboard
 editor writes it for new time dimensions; `grain: day` and the other
-fixed grains stay as they are). It resolves to the finest open step,
-every time a query runs, from:
+fixed grains stay as they are, closed or not, until a viewer pins another).
+It resolves to the finest open step, every time a query runs. With none
+open, it takes the one nearest to readable: the coarsest that still splits
+the range, or, when none does (a single instant, an empty table), the finest.
+It comes from:
 
 - the range: what the session selects on the field, with windows resolved
-  (`AppState::clock`, as in §5.5); without a selection, the extent of the
-  field's live values (from the segments' zone maps, §4.4, once they
-  exist; until then a min/max over the column, cached by the table
-  snapshot's identity like the other caches);
+  (`AppState::clock`, as in §5.5), a selection a visual's metrics all ignore
+  not counting; without a selection, the extent of the field's live values
+  (from the segments' zone maps, §4.4, once they exist; until then a
+  min/max over the column, `zoom::Extents`, kept per segment by identity
+  and the version of its deletes, so an epoch only reads what's new, and
+  dropped when a config change points the field elsewhere; a derived field's
+  comes from `Engine::values`, kept per table snapshot). An open end of a
+  selection reaches as far as the extent;
 - the bucket budget: 40 buckets per grid column of the visual's width
   (`at.w`, so 480 across a 12-column dashboard). The budget is from the
   dashboard file, not the browser's size, so every session on a dashboard
@@ -826,8 +834,13 @@ dashboard's (`auto` or fixed). The session keeps pins next to its sorts
 (`inner.grains`) and `visual_frame` puts them in the query, as it does a
 sort. A pin outside the open steps (the range moved) falls back to the
 nearest open step for that frame and stays pinned. Each visual's frame
-carries the grain its answer is at, whether it's `auto`, and the open
-steps.
+carries the grain its answer is at, whether it's `auto`, the pin, the open
+steps, the axis's first bucket and the one after its last, and the bucket
+that holds now (`ZoomFrame`). A selection's axis stops at the bucket that
+holds now, since later ones aren't missing yet; `Hub::roll` refreshes a
+session on a dashboard with a time axis every minute, so that bucket moves
+without new data. Pins are kept by dashboard and visual: visual ids are only
+unique within a dashboard, unlike what a sort assumes.
 
 **The engine** doesn't change: another grain is another query. Sessions on
 the same grain share it through the `Engine`'s caches, and switching back
@@ -837,16 +850,20 @@ cached finer answer (exact for `SUM`, `COUNT`, `MIN`, `MAX`, not for
 it: a rescan is milliseconds, and it would be a cache of its own.
 
 **The UI.** The tile's header gets the steps as a small segmented control
-(closed steps greyed out, `auto` marked), `+` and `−` on the focused
-chart, and later Ctrl+wheel (a plain wheel scrolls the page). Two
-things zooming makes visible, which the time axis needs first:
+(closed steps greyed out, `auto` marked; a click pins, a second takes the pin
+off), `+` and `−` on the focused chart, and later Ctrl+wheel (a plain wheel
+scrolls the page). A click on a grained bar or a table row with a grained
+first dimension selects its bucket's range, like a brush. Two things zooming
+makes visible, which the time axis needs first:
 
 - **Gaps.** The line chart's axis is categories (`scale::Points`) and a
   bucket with no rows isn't a group, so at `hour` or `minute` an empty
   bucket would be joined over silently. A grained axis becomes a time
-  scale: buckets are placed by time and the client fills the missing ones
-  from the grain and range (`next_period`), drawn as a break in the line
-  (or a missing bar).
+  scale (`scale::Times`): buckets are placed by time and the client fills the
+  missing ones from the grain and range (`board::filled`), drawn as a break
+  in the line (or a missing bar; a point between two breaks gets a dot,
+  since it draws no line). Rows that aren't in time order (a sort, a
+  limit) or hold a NULL time stay as they are, on a category axis.
 - **The current bucket.** At `month` on a live dashboard the last bucket
   is this month so far and reads as a drop. The bucket that holds the
   server's now is marked (a dashed last segment, a lighter bar).
@@ -861,13 +878,17 @@ visual and in a field's list), `tidepool-engine/tests/grains.rs` (every
 path, plain and dictionary columns, before 1970, a date refused), the
 oracle (`hour` and `minute` on timestamps, DuckDB's `date_trunc` without
 the `DATE` cast; a planted bug truncating them to days fails all three
-suites). Still to come: golden diagnostics for `zoom` (a visual without a
-grained dimension, a step the field doesn't allow);
-plain tests of `auto`'s choice and the open steps (budgets, ranges,
-windows, an empty table); `tests/live.rs` (a pin, a brush that refines an
-`auto` grain, `back` that coarsens it, two sessions sharing a grain, a pin
-that falls back); `charts.rs` tests for the time
-scale and filled gaps; `just e2e` zooms a trend out and in.
+suites). For the rest, golden diagnostics for `zoom` (a visual without a
+grained dimension, a step the field doesn't allow, a list without the fixed
+grain, none listed) and `auto` (off a time field, on two dimensions);
+plain tests of `auto`'s choice and the open steps in `zoom.rs` (budgets,
+ranges, windows, an empty table); `tests/live.rs` (a pin, a brush that
+refines an `auto` grain, `back` that coarsens it, two sessions sharing a
+grain, a pin that falls back, windows and the clock, extents over plain,
+dictionary, date and derived fields, and rows replaced); `charts.rs` and
+`board.rs` tests for the time scale, filled gaps and the current bucket;
+`just e2e` zooms a trend out and in, and brushes an hourly chart. The engine
+didn't change.
 
 ## 6. Query execution
 
@@ -1036,7 +1057,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `select_relative { field, window: { unit, last, ago? } }` | a period relative to now ("Last 7 days", §5.5) |
 | `clear { field? }` / `back` / `forward` | selection management |
 | `filter_window { filter_id, offset, limit, search?, sort? }` | page/search a filter list |
-| `grain { visual, grain? }` | pin a visual's time grain for this session, or go back to the dashboard's (proposed, §5.8) |
+| `grain { visual, grain? }` | pin a visual's time grain for this session, or go back to the dashboard's (§5.8) |
 | `pause` / `resume` | freeze live updates for this session (the server keeps the last frame) |
 
 **Server → client:**
@@ -1046,7 +1067,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `welcome { session_id, model_version, epoch }` | |
 | `model { version, dashboards… }` | sent on connect and whenever the config version changes |
 | `selection { state, can_back, can_forward }` | authoritative selection state after each change |
-| `frame { epoch, visuals: [{ id, payload_idx \| error }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit |
+| `frame { epoch, visuals: [{ id, payload_idx \| error, zoom? }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit |
 | `status { epoch, ingest_rate, lag_ms }` | for the live indicator, ~1 Hz |
 | `done` | one per client message, after everything it caused: the UI shows a selection as under way until its `done` arrives |
 
@@ -1269,7 +1290,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
 - Visuals:
   - KPI tile (value, comparison metric, delta %)
   - bar (vertical/horizontal)
-  - line/area with a time axis and grain; zoomed between grains (proposed, §5.8)
+  - line/area with a time axis and grain; zoomed between grains (2026-11-04, §5.8)
   - table (sortable, uses the server-side sort). Without metrics (2026-10-13): the distinct combinations of its dimensions, counted on one anchor (of the tables reaching every dimension, the one reaching fewest, ties by name); a group with no rows under the selection isn't one. Covered by the oracle (`SELECT DISTINCT` over the same anchor).
   - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
@@ -1461,7 +1482,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 18. A paid SaaS: a control plane and single-tenant cells (D2 and D3 kept). Threads in [saas.md](saas.md)
 19. The measure vocabulary (§6.8, D16): `total`, `set`, more aggregates, `per`/`then`, `time_window`, sets from sets
 20. Text search as a selection and the `rows` visual, for logs (§5.7), with an example of Postgres logs (`examples/pglogs`)
-21. Time zoom (§5.8, D17): `hour` and `minute` grains (done 2026-11-04), an `auto` grain from the range, a viewer's grain per visual, a time scale with gaps for grained axes
+21. Time zoom (§5.8, D17), done 2026-11-04: `hour` and `minute` grains, an `auto` grain from the range, a viewer's grain per visual, a time scale with gaps for grained axes. Left for later: a zoom of one visual's range that doesn't select, pins in bookmarks and URLs, dashboard time zones, Ctrl+wheel
 
 ---
 

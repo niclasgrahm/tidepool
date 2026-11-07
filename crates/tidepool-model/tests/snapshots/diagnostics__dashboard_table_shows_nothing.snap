@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `top_products`: it has no dimensions and no metrics, so there's nothing to show
-  --> dashboards/sales.yaml:31:11
+  --> dashboards/sales.yaml:34:11
    |
-31 |     type: table
+34 |     type: table
    |           ^^^^^
    = help: give it `dimensions: [...]`, `metrics: [...]` or both
 

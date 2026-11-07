@@ -360,4 +360,35 @@ impl TimeGrain {
     pub fn is_sub_day(self) -> bool {
         matches!(self, Self::Minute | Self::Hour)
     }
+
+    /// Every grain, finest first.
+    pub const ALL: [Self; 7] = [
+        Self::Minute,
+        Self::Hour,
+        Self::Day,
+        Self::Week,
+        Self::Month,
+        Self::Quarter,
+        Self::Year,
+    ];
+
+    /// As it's written: `day`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Quarter => "quarter",
+            Self::Year => "year",
+        }
+    }
+
+    /// The grain written as `name`.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|g| g.name() == name)
+    }
 }
