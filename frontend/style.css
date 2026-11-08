@@ -1058,3 +1058,7 @@ th.num button { text-align: right; }
 .plot .slice.selected { stroke: var(--anemone); stroke-width: 2.5; }
 .plot .slice.pointed { opacity: 0.85; }
 .plot .note { fill: var(--ink-soft); font-size: 10px; }
+.plot .point { fill: var(--tide); fill-opacity: 0.75; stroke: var(--panel); stroke-width: 1; }
+.plot.scatter.has-selection .point:not(.selected) { fill-opacity: 0.25; }
+.plot .point.selected { fill: var(--anemone); fill-opacity: 0.9; }
+.plot .point.pointed { stroke: var(--ink); stroke-width: 1.5; }

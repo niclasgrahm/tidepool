@@ -17,7 +17,7 @@ use crate::board::{
 use crate::charts::Data;
 use crate::datepick::DateRange;
 use crate::live::Live;
-use crate::plot::{BarChart, LineChart, PieChart};
+use crate::plot::{BarChart, LineChart, PieChart, ScatterChart};
 
 /// Whether the page is in dark mode (charts can't read CSS).
 /// The part of `dataset.field` people read.
@@ -562,7 +562,10 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
     };
     let class = format!("visual {}", info.visual_type);
     let dims = info.dimensions.len();
-    let chart = matches!(info.visual_type.as_str(), "bar" | "line" | "pie") && dims == 1;
+    let chart = matches!(
+        info.visual_type.as_str(),
+        "bar" | "line" | "pie" | "scatter"
+    ) && dims == 1;
     if chart {
         // one chart for the visual's whole life, fed new options: re-made
         // per frame, it would replay its intro and lose clicks
@@ -585,6 +588,7 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
         };
         let content = match info.visual_type.as_str() {
             "bar" => bar_chart(live, &info, rows, title.clone()),
+            "scatter" => scatter_chart(live, &info, rows, title.clone()),
             "pie" => {
                 let whole = Signal::derive(move || {
                     frame.with(|f| f.as_ref().and_then(|f| f.compare.as_ref()).and_then(number))
@@ -781,6 +785,46 @@ fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: 
     view! {
         <div class="chart">
             <BarChart data=data selected=selected on_select=on_select label=title />
+        </div>
+    }
+    .into_any()
+}
+
+fn scatter_chart(
+    live: Live,
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    title: String,
+) -> AnyView {
+    let field = info.dimensions[0].field.clone();
+    let (metrics, formats) = (info.metrics.clone(), info.formats.clone());
+    let data = Memo::new(move |_| rows.with(|rows| Data::formatted(rows, &metrics, &formats)));
+    let shown = field.clone();
+    let selected = Signal::derive(move || {
+        live.selection.with(|s| {
+            s.iter()
+                .find(|f| f.field == shown)
+                .and_then(|f| f.values.as_ref())
+                .map(|v| v.iter().map(display).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    });
+    let on_select = info.on_click.then(|| {
+        Callback::new(move |(categories, additive): (Vec<usize>, bool)| {
+            let values: Vec<Value> = rows.with_untracked(|rows| {
+                categories
+                    .iter()
+                    .filter_map(|&i| rows.get(i).and_then(|r| r.first()).cloned())
+                    .collect()
+            });
+            if !values.is_empty() {
+                live.select(&field, &values, additive);
+            }
+        })
+    });
+    view! {
+        <div class="chart">
+            <ScatterChart data=data selected=selected on_select=on_select label=title />
         </div>
     }
     .into_any()

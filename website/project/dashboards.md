@@ -67,6 +67,7 @@ pointer is on it, and `describe_model` gives both to agents. Without a
 | `line` | metrics over a time dimension at a grain. A second metric gets its own axis. | selects the period. A drag selects a range (`on_brush: select_range`). |
 | `table` | metrics by one or more dimensions, sortable. Without metrics, each combination of its dimensions that the data has. | selects the row (`on_click: select`) |
 | `pie` | one metric by one dimension, as slices of a ring: the largest `limit` (8, at most 12). For a sum or a count, the rest is one more slice. | selects the slice (`on_click: select`) |
+| `scatter` | the values of one dimension as points: the first metric across, the second up, a third as the size of each point. Up to `limit` points (1000, at most 5000). | selects the point. A drag selects the points in its rectangle. |
 | `filter` | the values of one dimension, as a list (a tree for a hierarchy). It has no metrics. | selects the value |
 | `rows` | the newest rows of one table that the selection allows, the newest first. Its dimensions are the columns. It has no metrics. | |
 

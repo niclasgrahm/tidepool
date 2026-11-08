@@ -471,6 +471,14 @@ case!(
     )]
 );
 case!(
+    scatter_of_one_metric,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [products.name]\n    metrics: [revenue, order_count]\n",
+        "    dimensions: [products.name]\n    metrics: [revenue]\n"
+    )]
+);
+case!(
     total_of_an_unknown_field,
     [Replace(
         "model.ossie.yaml",

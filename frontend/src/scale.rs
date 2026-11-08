@@ -36,6 +36,32 @@ impl Linear {
         }
     }
 
+    /// A scale over `values` alone, not reaching for zero (a scatter's
+    /// axes: points far from zero would huddle), ending on round numbers.
+    #[must_use]
+    pub fn fit(values: impl IntoIterator<Item = f64>, range: (f64, f64), count: usize) -> Self {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in values.into_iter().filter(|v| v.is_finite()) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        if !lo.is_finite() {
+            (lo, hi) = (0.0, 1.0);
+        }
+        if (hi - lo).abs() < f64::EPSILON {
+            (lo, hi) = (lo - 1.0, hi + 1.0);
+        }
+        let step = step(lo, hi, count);
+        Self {
+            domain: (
+                (lo / step + 1e-9).floor() * step,
+                (hi / step - 1e-9).ceil() * step,
+            ),
+            range,
+            step,
+        }
+    }
+
     #[must_use]
     pub fn at(&self, value: f64) -> f64 {
         let (d0, d1) = self.domain;
@@ -215,6 +241,17 @@ pub fn compact(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_fitted_scale_hugs_its_values() {
+        let s = Linear::fit([1003.0, 1012.0, 1048.0], (0.0, 100.0), 5);
+        assert!(s.domain.0 >= 1000.0 && s.domain.0 <= 1003.0, "{s:?}");
+        assert!(s.domain.1 >= 1048.0 && s.domain.1 <= 1050.0, "{s:?}");
+        assert!(s.at(1012.0) > s.at(1003.0));
+        // one value, or none: a span around it
+        assert!(Linear::fit([5.0], (0.0, 1.0), 4).domain.0 < 5.0);
+        assert_eq!(Linear::fit([], (0.0, 1.0), 4).domain, (0.0, 1.0));
+    }
+
     use super::*;
 
     #[test]

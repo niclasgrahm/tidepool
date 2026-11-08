@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `products_map`: a scatter plots one dimension's values by two metrics (across, up), and a third as their size
+  --> dashboards/sales.yaml:55:5
+   |
+55 |     metrics: [revenue]
+   |     ^^^^^^^
+
+1 error, 0 warnings

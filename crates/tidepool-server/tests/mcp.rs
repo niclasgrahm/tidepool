@@ -218,7 +218,9 @@ async fn describe_model_says_what_an_agent_needs_to_ask_well() {
         .unwrap_or_default();
     assert_eq!(
         types,
-        ["kpi", "bar", "line", "table", "pie", "filter", "rows"]
+        [
+            "kpi", "bar", "line", "table", "pie", "scatter", "filter", "rows"
+        ]
     );
     assert!(model["visual_types"].as_array().is_some_and(|t| {
         t.iter()
