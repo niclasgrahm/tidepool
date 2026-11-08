@@ -27,6 +27,7 @@ A proposed change: files to set or remove (`null`), against `base_version`. File
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `agent` | boolean |  | An agent makes it: the server applies it only as `agents.auto_apply` allows (never to a dashboard a person wrote last), and proposes it otherwise. Always so with the agent token. |
 | `approve` | boolean | `false` | Apply even if it destroys data (plan §8.2, destructive). |
 | `author` | string |  | Who makes it, for the history and the commit message. |
 | `base_version` | integer | **required** |  |
@@ -136,6 +137,7 @@ A change waiting for approval: `GET /v1/changes`.
 | `at` | string | **required** | RFC 3339. |
 | `author` | string | **required** |  |
 | `base_version` | integer | **required** |  |
+| `by` | string | `person` | `person` or `agent`, as in [`VersionInfo::by`]. |
 | `files` | map of string | **required** | The files it sets or removes. |
 | `id` | integer | **required** |  |
 | `plan` | [`PlanInfo`](#schema-planinfo) | **required** |  |
@@ -308,6 +310,7 @@ One applied version: `GET /v1/config/versions`.
 | --- | --- | --- | --- |
 | `at` | string | **required** | RFC 3339. |
 | `author` | string | **required** |  |
+| `by` | string | `person` | Who wrote it: `person`, `agent`, `files` (the config directory) or `startup`. |
 | `class` | string |  |  |
 | `source` | string | **required** | `startup`, `api`, `files` or `revert`. |
 | `summary` | string | **required** |  |
@@ -602,12 +605,14 @@ A window of whole periods relative to now: `last` periods of `unit`, ending with
 | --- | --- | --- | --- |
 | `at` | [`GridAt`](#schema-gridat) | **required** |  |
 | `compare` | string |  | A KPI's comparison metric. |
+| `description` | string |  |  |
 | `dimensions` | list of [`QueryDimension`](#schema-querydimension) | **required** |  |
 | `formats` | map of string |  | How each metric reads here, by name: the visual's own format for it, else the metric's. Metrics without one aren't listed. |
 | `id` | string | **required** |  |
 | `metrics` | list of string | **required** |  |
 | `on_brush` | boolean | **required** | Brushing a range selects it. |
 | `on_click` | boolean | **required** | Clicking a value selects it. |
+| `title` | string |  | What its header says, when the file gives it. |
 | `type` | string | **required** | `kpi`, `bar`, `line`, `table`, `filter` or `rows`. |
 | `widget` | string |  | A `filter` visual's list: `list` or `tree`. Its frames are the filter frames of its dimension's field. |
 

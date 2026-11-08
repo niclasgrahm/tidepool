@@ -49,6 +49,7 @@ fn credential(spec: Value) -> Arc<Credential> {
 /// without a token.
 fn tokens() -> Tokens {
     Tokens {
+        agent: None,
         read: None,
         admin: Some("admin-secret".into()),
         ingest: vec![

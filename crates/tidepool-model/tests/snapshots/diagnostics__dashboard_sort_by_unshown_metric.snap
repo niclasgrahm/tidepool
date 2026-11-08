@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `by_region` sorts by `order_count`, which it doesn't show
-  --> dashboards/sales.yaml:21:17
+  --> dashboards/sales.yaml:23:17
    |
-21 |     sort: { by: order_count, desc: true }
+23 |     sort: { by: order_count, desc: true }
    |                 ^^^^^^^^^^^
    = help: its metrics and dimensions: customers.region, revenue
 

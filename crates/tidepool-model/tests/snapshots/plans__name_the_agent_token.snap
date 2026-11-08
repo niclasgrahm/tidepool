@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tidepool.yaml\", \"durability: fsync\\n\",\n\"durability: fsync\\nauth: { agent_token_env: MY_AGENT_TOKEN }\\n\")])"
+---
+1 change (0 safe, 0 rebuild, 0 destructive, 1 security)
+
+  ~ setting      auth.agent_token_env  TIDEPOOL_AGENT_TOKEN → MY_AGENT_TOKEN  security  (takes effect on restart)

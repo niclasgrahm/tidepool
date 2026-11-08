@@ -83,12 +83,12 @@ pub(crate) fn placed(doc: &ApiDoc, listener: Listener, state: &AppState) -> bool
 /// `route_layer` rather than `layer`: it runs only for requests that matched
 /// the route, so an unknown path is a 404, never a 401.
 fn guarded(doc: &ApiDoc, state: &Arc<AppState>, listener: Listener) -> MethodRouter<Arc<AppState>> {
-    let access = doc.access;
+    let (access, operation) = (doc.access, doc.operation);
     let shared = Arc::clone(state);
     let mut route = handler_for(doc).route_layer(axum::middleware::from_fn(
         move |request: Request, next: Next| {
             let state = Arc::clone(&shared);
-            async move { crate::auth::authorize(access, &state, request, next).await }
+            async move { crate::auth::authorize(access, operation, &state, request, next).await }
         },
     ));
     if doc.request.is_some_and(|r| r.body == Body::Rows) {

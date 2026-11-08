@@ -31,6 +31,7 @@ Ingest is either one token for every table and operation (`ingest_token_env`, op
 | key | type | default | description |
 | --- | --- | --- | --- |
 | `admin_token_env` | string | `TIDEPOOL_ADMIN_TOKEN` | Changing the config, approving changes. |
+| `agent_token_env` | string | `TIDEPOOL_AGENT_TOKEN` | For agents (MCP): reading, and changing the config under `agents.auto_apply`; it never approves a change, its own or another's. |
 | `ingest` | list of [`IngestCredential`](#server-ingestcredential) |  | Named ingest credentials, in place of `ingest_token_env`. |
 | `ingest_token_env` | string |  | One token for writing and deleting rows in every table, named `ingest`. Default `TIDEPOOL_INGEST_TOKEN`; not used with `ingest`. |
 | `read_token_env` | string | `TIDEPOOL_READ_TOKEN` | Reading data, the model and dashboards. |

@@ -16,6 +16,8 @@ visuals:
     at: { x: 0, y: 0, w: 3, h: 4 }
   - id: by_region
     type: bar
+    title: Revenue by region
+    description: Every order's value, by the region of its customer
     dimensions: [customers.region]
     metrics: [revenue]
     sort: { by: revenue, desc: true }

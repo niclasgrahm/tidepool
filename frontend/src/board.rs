@@ -1046,6 +1046,8 @@ mod tests {
         let info = VisualInfo {
             id: "by_region".into(),
             visual_type: "bar".into(),
+            title: None,
+            description: None,
             dimensions: vec![tidepool_protocol::QueryDimension {
                 field: "customers.region".into(),
                 grain: None,
@@ -1240,6 +1242,8 @@ mod tests {
         let info = VisualInfo {
             id: "tail".into(),
             visual_type: "rows".into(),
+            title: None,
+            description: None,
             dimensions: vec![tidepool_protocol::QueryDimension {
                 field: "logs.message".into(),
                 grain: None,

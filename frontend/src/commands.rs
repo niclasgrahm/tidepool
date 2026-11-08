@@ -207,6 +207,8 @@ mod tests {
             visuals: vec![VisualInfo {
                 id: "by_region".into(),
                 visual_type: "bar".into(),
+                title: None,
+                description: None,
                 dimensions: vec![],
                 metrics: vec!["revenue".into()],
                 compare: None,

@@ -263,6 +263,8 @@ fn visual(
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
+        title: spec.title.clone(),
+        description: spec.description.clone(),
         dimensions,
         metrics: metric_ids,
         compare,

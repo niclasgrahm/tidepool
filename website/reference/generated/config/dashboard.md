@@ -32,6 +32,7 @@
 | --- | --- | --- | --- |
 | `at` | [`GridPosition`](#dashboard-gridposition) | **required** |  |
 | `compare` | string |  | KPI tiles: a second metric shown as the comparison. |
+| `description` | string |  | What it shows, in a sentence: under its title, and for agents. |
 | `dimensions` | list of [`DimensionRef`](#dashboard-dimensionref) |  |  |
 | `format` | map of string |  | How each metric shows in this visual, by the name of the metric: `{ revenue: compact }`. It replaces the `format` of the metric here. It changes only what shows on the screen, not the value. |
 | `id` | string | **required** | Unique within the dashboard. |
@@ -40,6 +41,7 @@
 | `on_brush` | [`BrushAction`](#dashboard-brushaction) |  | Line charts: what brushing the time axis does. |
 | `on_click` | [`ClickAction`](#dashboard-clickaction) |  | Bars and table rows: what a click does. |
 | `sort` | [`Sort`](#dashboard-sort) |  |  |
+| `title` | string |  | What its header says; made from its metrics and dimensions when left out. |
 | `type` | [`VisualType`](#dashboard-visualtype) | **required** |  |
 
 

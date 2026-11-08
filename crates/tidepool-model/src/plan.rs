@@ -769,6 +769,11 @@ fn security(plan: &mut Plan, a: &ServerConfig, b: &ServerConfig) {
         x.admin_token_env.clone(),
         y.admin_token_env.clone(),
     );
+    setting(
+        "auth.agent_token_env",
+        x.agent_token_env.clone(),
+        y.agent_token_env.clone(),
+    );
     if x.ingest.is_empty() && y.ingest.is_empty() {
         setting(
             "auth.ingest_token_env",

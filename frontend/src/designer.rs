@@ -377,6 +377,8 @@ fn Editor(
                 let mut visual = Visual {
                     id: visual_id(&pick.metrics, &pick.dimensions, &taken),
                     visual_type: t,
+                    title: None,
+                    description: None,
                     dimensions: Vec::new(),
                     metrics: Vec::new(),
                     compare: None,

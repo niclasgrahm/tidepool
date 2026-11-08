@@ -56,6 +56,7 @@ pub struct ExternalEdits {
 /// A proposed change: files to set or remove (`null`), against
 /// `base_version`. Files not named stay as they are, unless `replace` is set:
 /// then the named files are the whole config (a revert).
+#[allow(clippy::struct_excessive_bools)] // the wire format's flags, each its own question
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigChange {
     pub base_version: u64,
@@ -72,6 +73,11 @@ pub struct ConfigChange {
     /// Who makes it, for the history and the commit message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// An agent makes it: the server applies it only as `agents.auto_apply`
+    /// allows (never to a dashboard a person wrote last), and proposes it
+    /// otherwise. Always so with the agent token.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
 /// One problem with a config, located.
@@ -162,6 +168,14 @@ pub struct VersionInfo {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    /// Who wrote it: `person`, `agent`, `files` (the config directory) or
+    /// `startup`.
+    #[serde(default = "person")]
+    pub by: String,
+}
+
+fn person() -> String {
+    "person".into()
 }
 
 /// One version's files: `GET /v1/config/versions/{version}`.
@@ -177,6 +191,9 @@ pub struct PendingChange {
     pub id: u64,
     pub source: String,
     pub author: String,
+    /// `person` or `agent`, as in [`VersionInfo::by`].
+    #[serde(default = "person")]
+    pub by: String,
     /// RFC 3339.
     pub at: String,
     pub base_version: u64,

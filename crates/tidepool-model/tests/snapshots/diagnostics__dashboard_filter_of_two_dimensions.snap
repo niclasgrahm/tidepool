@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `top_products`: a filter lists the values of exactly one dimension
-  --> dashboards/sales.yaml:32:5
+  --> dashboards/sales.yaml:34:5
    |
-32 |     dimensions: [products.name, products.category]
+34 |     dimensions: [products.name, products.category]
    |     ^^^^^^^^^^
 
 1 error, 0 warnings

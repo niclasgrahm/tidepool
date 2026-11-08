@@ -392,6 +392,10 @@ pub struct Filter {
 pub struct Visual {
     pub id: String,
     pub visual_type: tidepool_config::dashboard::VisualType,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub dimensions: Vec<Dimension>,
     pub metrics: Vec<MetricId>,
     pub compare: Option<MetricId>,

@@ -322,6 +322,11 @@ pub struct VisualInfo {
     /// `kpi`, `bar`, `line`, `table`, `filter` or `rows`.
     #[serde(rename = "type")]
     pub visual_type: String,
+    /// What its header says, when the file gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub dimensions: Vec<QueryDimension>,
     pub metrics: Vec<String>,
     /// A KPI's comparison metric.
