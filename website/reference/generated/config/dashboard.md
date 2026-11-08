@@ -104,11 +104,14 @@ Type: `select`.
 
 ## `VisualType` {#dashboard-visualtype}
 
-One of:
-
-- `kpi` · `bar` · `line` · `table`
-- `filter`: The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics.
-- `rows`: The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics.
+| value | description |
+| --- | --- |
+| `kpi` | Metrics as large numbers, with no dimensions. `compare` adds a second metric and the change from it. |
+| `bar` | Bars: one dimension, one or more metrics. A click selects a bar, a drag several. |
+| `line` | A line over one dimension, usually a time field with a grain, with one or two metrics. A drag across it selects a range. |
+| `table` | Rows of dimensions and metrics, sortable. Without metrics: the combinations of the dimensions there are. |
+| `filter` | The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics. |
+| `rows` | The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics. |
 
 
 ## `WindowUnit` {#dashboard-windowunit}

@@ -867,6 +867,7 @@ mod tests {
             ],
             rows: serde_json::from_value(rows).unwrap_or_default(),
             epoch: 0,
+            as_of: None,
         };
         let frame = |epoch: u64, rows: Value| ServerMessage::Frame {
             epoch,

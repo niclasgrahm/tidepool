@@ -296,6 +296,9 @@
       },
       "DatasetInfo": {
         "properties": {
+          "ai_context": {
+            "description": "The dataset's Ossie `ai_context`, as written."
+          },
           "description": {
             "type": [
               "string",
@@ -386,6 +389,9 @@
       },
       "FieldInfo": {
         "properties": {
+          "ai_context": {
+            "description": "The field's Ossie `ai_context`, as written."
+          },
           "description": {
             "type": [
               "string",
@@ -398,6 +404,13 @@
               "string",
               "null"
             ]
+          },
+          "grains": {
+            "description": "The grains a visual may group a time field by (`day`, `month`, …);\nempty for other fields.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "hierarchy": {
             "anyOf": [
@@ -412,6 +425,13 @@
           },
           "is_time": {
             "type": "boolean"
+          },
+          "label": {
+            "description": "What to call the field on screen.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "name": {
             "type": "string"
@@ -568,6 +588,9 @@
       },
       "MetricInfo": {
         "properties": {
+          "ai_context": {
+            "description": "The metric's Ossie `ai_context`, as written."
+          },
           "anchor": {
             "description": "The table whose rows a base metric aggregates.",
             "type": [
@@ -633,11 +656,20 @@
       "ModelInfo": {
         "description": "The semantic model as the UI shows it (`GET /v1/model`).",
         "properties": {
+          "ai_context": {
+            "description": "The model's Ossie `ai_context` (instructions, synonyms, examples for\nan agent), as written."
+          },
           "datasets": {
             "items": {
               "$ref": "#/components/schemas/DatasetInfo"
             },
             "type": "array"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "filter_direction": {
             "default": "one_to_many",
@@ -649,6 +681,13 @@
               "$ref": "#/components/schemas/MetricInfo"
             },
             "type": "array"
+          },
+          "name": {
+            "description": "The Ossie model's name.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "relationships": {
             "items": {
@@ -1025,6 +1064,13 @@
       "QueryResult": {
         "description": "A query's answer.",
         "properties": {
+          "as_of": {
+            "description": "When that epoch was published (RFC 3339, UTC): how fresh the data\nthe answer reads is.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "columns": {
             "description": "Dimensions first, then metrics, in request order.",
             "items": {
@@ -1100,6 +1146,9 @@
       },
       "RelationshipInfo": {
         "properties": {
+          "ai_context": {
+            "description": "The relationship's Ossie `ai_context`, as written."
+          },
           "from": {
             "description": "The many side.",
             "type": "string"
@@ -1727,7 +1776,7 @@
     },
     "/mcp": {
       "post": {
-        "description": "The Model Context Protocol over Streamable HTTP: JSON-RPC 2.0 messages, each answered with one JSON body. Tools: describe_model, preview_table, query_metrics, get_config, plan_change, apply_change and ingest_rows. Each tool is the HTTP endpoint it wraps, called with the caller's credentials, so tools that change the config need the admin token and ingest_rows the ingest token. apply_change applies what `agents.auto_apply` allows and proposes the rest.",
+        "description": "The Model Context Protocol over Streamable HTTP: JSON-RPC 2.0 messages, each answered with one JSON body. `tools/list` lists the tools (the MCP reference has each one) and `resources/list` the config files' JSON Schemas. Each tool is the HTTP endpoint it wraps, called with the caller's credentials, so tools that change the config need the admin token and ingest_rows the ingest token. apply_change applies what `agents.auto_apply` allows and proposes the rest.",
         "operationId": "mcp",
         "requestBody": {
           "content": {

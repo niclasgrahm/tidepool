@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: field `orders.order_year` uses an aggregate
-  --> model.ossie.yaml:12:67
+  --> model.ossie.yaml:14:67
    |
-12 |         expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(quantity)" }] }
+14 |         expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(quantity)" }] }
    |                                                                   ^^^^^^^^^^^^^^^
    = help: fields are row-level; aggregates belong in metrics
 

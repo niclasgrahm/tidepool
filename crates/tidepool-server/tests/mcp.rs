@@ -136,6 +136,207 @@ async fn the_handshake_lists_the_tools() {
     assert_eq!(reply["error"]["code"], -32601);
 }
 
+/// A field of `describe_model`'s answer, by dataset and name.
+fn field<'a>(model: &'a Value, dataset: &str, name: &str) -> &'a Value {
+    let found = model["datasets"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["name"] == dataset))
+        .and_then(|d| d["fields"].as_array())
+        .and_then(|f| f.iter().find(|f| f["name"] == name));
+    match found {
+        Some(field) => field,
+        None => panic!("no field {dataset}.{name} in {model}"),
+    }
+}
+
+#[tokio::test]
+async fn describe_model_says_what_an_agent_needs_to_ask_well() {
+    let state = server(Tokens::default()).await;
+    let (failed, model) = tool(&state, None, "describe_model", json!({})).await;
+    assert!(!failed, "{model}");
+    // the Ossie ai_context, at every level it's written at
+    assert!(
+        model["ai_context"]["instructions"]
+            .as_str()
+            .is_some_and(|i| i.contains("ordered_at")),
+        "{model}"
+    );
+    assert_eq!(
+        model["description"],
+        "An outdoor shop: its orders, customers and products."
+    );
+    let region = field(&model, "customers", "region");
+    assert_eq!(region["label"], "Region");
+    assert_eq!(
+        region["ai_context"]["synonyms"],
+        json!(["area", "territory", "market"])
+    );
+    let revenue = model["metrics"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["name"] == "revenue"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        revenue["ai_context"]["synonyms"]
+            .as_array()
+            .is_some_and(|s| s.contains(&json!("sales"))),
+        "{revenue}"
+    );
+    // the grains a time field can be grouped by; none for other fields
+    let ordered_at = field(&model, "orders", "ordered_at");
+    assert_eq!(
+        ordered_at["grains"],
+        json!(["minute", "hour", "day", "week", "month", "quarter", "year"])
+    );
+    assert_eq!(ordered_at["label"], "Order time");
+    assert!(
+        field(&model, "orders", "order_year")
+            .get("grains")
+            .is_none()
+    );
+    // dashboards with what they show, and the visual types to choose from
+    let sales = model["dashboards"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["id"] == "sales"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        sales["visuals"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|v| v["type"] == "bar"
+                && v["metrics"] == json!(["revenue"])
+                && v["dimensions"][0]["field"] == "customers.region")),
+        "{sales}"
+    );
+    let types: Vec<&str> = model["visual_types"]
+        .as_array()
+        .map(|t| t.iter().filter_map(|t| t["type"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(types, ["kpi", "bar", "line", "table", "filter", "rows"]);
+    assert!(model["visual_types"].as_array().is_some_and(|t| {
+        t.iter()
+            .all(|t| t["shape"].as_str().is_some_and(|s| !s.is_empty()))
+    }));
+    // and how answers are computed
+    assert!(
+        model["semantics"].as_array().is_some_and(|s| s
+            .iter()
+            .any(|s| s.as_str().is_some_and(|s| s.contains("NULL")))),
+        "{model}"
+    );
+}
+
+#[tokio::test]
+async fn the_config_schemas_are_resources() {
+    let state = server(Tokens::default()).await;
+    let (_, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "clientInfo": {"name": "test", "version": "1"}}}),
+    )
+    .await;
+    assert!(
+        reply["result"]["capabilities"]["resources"].is_object(),
+        "{reply}"
+    );
+    let (_, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "resources/list"}),
+    )
+    .await;
+    let uris: Vec<&str> = reply["result"]["resources"]
+        .as_array()
+        .map(|r| r.iter().filter_map(|r| r["uri"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(uris.contains(&"tidepool://schemas/dashboard"), "{reply}");
+    assert!(
+        uris.contains(&"tidepool://schemas/metric-extension"),
+        "{reply}"
+    );
+    let (_, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+                "params": {"uri": "tidepool://schemas/dashboard"}}),
+    )
+    .await;
+    let contents = &reply["result"]["contents"][0];
+    assert_eq!(contents["mimeType"], "application/schema+json");
+    let schema: Value = match contents["text"].as_str().map(serde_json::from_str) {
+        Some(Ok(schema)) => schema,
+        _ => panic!("the schema should be JSON text: {reply}"),
+    };
+    assert!(schema["properties"]["visuals"].is_object(), "{schema}");
+    // a resource that isn't there is an error, not an empty answer
+    let (_, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read",
+                "params": {"uri": "tidepool://schemas/nope"}}),
+    )
+    .await;
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("nope")),
+        "{reply}"
+    );
+}
+
+#[tokio::test]
+async fn tools_with_structured_answers_declare_their_shape() {
+    let state = server(Tokens::default()).await;
+    let (_, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    )
+    .await;
+    let tools = reply["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let schema = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .map(|t| t["outputSchema"].clone())
+            .unwrap_or_default()
+    };
+    for name in ["query_metrics", "read_rows"] {
+        let schema = schema(name);
+        assert_eq!(schema["type"], "object", "{name}: {schema}");
+        assert!(
+            schema["properties"]["columns"].is_object(),
+            "{name}: {schema}"
+        );
+        assert!(schema.get("$schema").is_none(), "{name}: {schema}");
+    }
+    assert!(schema("plan_change")["properties"]["valid"].is_object());
+    // what query_metrics answers has only keys its schema has
+    let (_, answer) = tool(
+        &state,
+        None,
+        "query_metrics",
+        json!({"metrics": ["revenue"]}),
+    )
+    .await;
+    let declared = schema("query_metrics");
+    for key in answer
+        .as_object()
+        .map(|o| o.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        assert!(
+            declared["properties"].get(&key).is_some(),
+            "`{key}` isn't declared: {declared}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_agent_writes_rows_and_queries_them() {
     let state = server(Tokens::default()).await;
@@ -174,6 +375,13 @@ async fn an_agent_writes_rows_and_queries_them() {
     .await;
     assert!(!failed, "{answer}");
     assert_eq!(answer["rows"], json!([["north", "10.00"]]));
+    // and how fresh that is: when its epoch was published, in UTC
+    assert!(
+        answer["as_of"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("20") && t.ends_with('Z')),
+        "{answer}"
+    );
     // the rows themselves, found by their text
     let (failed, _) = tool(
         &state,

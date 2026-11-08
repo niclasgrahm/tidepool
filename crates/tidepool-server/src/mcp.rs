@@ -13,7 +13,8 @@
 //! `apply_change` is `POST /v1/config/apply`, and so on. The one rule of its
 //! own is the agents' policy: `apply_change` applies a change whose class
 //! `agents.auto_apply` lists, and proposes anything else for a person to
-//! approve.
+//! approve. Resources are the config files' JSON Schemas
+//! (`tidepool://schemas/<kind>`), read through `GET /v1/schemas/{kind}`.
 
 use std::sync::Arc;
 
@@ -56,9 +57,12 @@ pub fn tools() -> Value {
         {
             "name": "describe_model",
             "title": "Describe the model",
-            "description": "Tables with their columns and row counts, datasets and fields, \
-                            relationships, metrics with their SQL, and dashboards. Read this \
-                            first: names in queries are the ones it lists.",
+            "description": "Tables with their columns and row counts, datasets and fields \
+                            (with labels, grains and the model's ai_context: instructions, \
+                            synonyms and examples), relationships, metrics with their SQL, \
+                            dashboards and their visuals, the visual types there are, and how \
+                            answers are computed (`semantics`). Read this first: names in \
+                            queries are the ones it lists.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
@@ -121,6 +125,7 @@ pub fn tools() -> Value {
                 },
                 "required": ["metrics"],
             },
+            "outputSchema": output_schema("QueryResult"),
             "annotations": { "readOnlyHint": true },
         },
         {
@@ -152,6 +157,7 @@ pub fn tools() -> Value {
                 },
                 "required": ["fields"],
             },
+            "outputSchema": output_schema("QueryResult"),
             "annotations": { "readOnlyHint": true },
         },
         {
@@ -176,6 +182,7 @@ pub fn tools() -> Value {
                 },
                 "required": ["files"],
             },
+            "outputSchema": output_schema("PlanInfo"),
             "annotations": { "readOnlyHint": true },
         },
         {
@@ -212,6 +219,35 @@ pub fn tools() -> Value {
         },
     ])
 }
+
+/// The JSON Schema of a named API body, as a tool's `outputSchema`: the
+/// shape of its structured content when it succeeds.
+fn output_schema(name: &str) -> Value {
+    let mut schema = tidepool_protocol::api_docs::schemas()
+        .remove(name)
+        .unwrap_or_else(|| json!({ "type": "object" }));
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+    }
+    schema
+}
+
+/// How answers are computed: what an agent needs to know to read them
+/// right, and to word a question as a query.
+pub(crate) const SEMANTICS: [&str; 6] = [
+    "Every number is computed by the engine from the stored rows; nothing is estimated.",
+    "A metric aggregates its anchor table's rows. A selection on a field filters a metric when \
+     the metric's table reaches the field through many-to-one relationships (orders reach \
+     customers); with filter_direction both, a selection also narrows the tables it reaches.",
+    "Dividing by zero gives NULL, not an error.",
+    "A row whose related row doesn't exist reads that row's fields as NULL, as a LEFT JOIN \
+     does.",
+    "A query without dimensions answers one row; groups are the combinations of dimension \
+     values that have rows.",
+    "Metrics with Tidepool settings (ignore_selection, time_offset) mean something their plain \
+     SQL expression doesn't: another tool reading the same Ossie file computes them without \
+     the setting.",
+];
 
 /// A JSON-RPC error.
 fn error(id: &Value, code: i64, message: impl Into<String>) -> Value {
@@ -308,14 +344,42 @@ async fn call(
             let model = ok(api(state, caller, Method::GET, "/v1/model", None).await)?;
             let tables = ok(api(state, caller, Method::GET, "/v1/tables", None).await)?;
             let snapshot = state.writer.snapshot();
+            let dashboards: Vec<Value> = snapshot
+                .model
+                .dashboards
+                .iter()
+                .map(|d| {
+                    let info = crate::live::dashboard_info(&snapshot.model, d);
+                    json!({
+                        "id": info.id,
+                        "name": info.name,
+                        "visuals": info.visuals.iter().map(|v| json!({
+                            "id": v.id,
+                            "type": v.visual_type,
+                            "dimensions": v.dimensions,
+                            "metrics": v.metrics,
+                            "compare": v.compare,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let visual_types: Vec<Value> = tidepool_config::dashboard::VisualType::ALL
+                .iter()
+                .map(|t| json!({ "type": t.name(), "shape": t.shape() }))
+                .collect();
             Ok(json!({
-                "name": snapshot.model.name,
+                "name": model["name"],
+                "description": model["description"],
+                "ai_context": model["ai_context"],
                 "config_version": snapshot.version,
+                "filter_direction": model["filter_direction"],
+                "semantics": SEMANTICS,
                 "tables": tables,
                 "datasets": model["datasets"],
                 "relationships": model["relationships"],
                 "metrics": model["metrics"],
-                "dashboards": snapshot.model.dashboards.iter().map(|d| json!({"id": d.slug, "name": d.name})).collect::<Vec<_>>(),
+                "dashboards": dashboards,
+                "visual_types": visual_types,
             }))
         }
         "preview_table" => {
@@ -409,6 +473,57 @@ async fn apply_change(
     }
 }
 
+/// Where a config kind's JSON Schema is, as a resource.
+const SCHEMA_URI: &str = "tidepool://schemas/";
+
+/// The resources, as `resources/list` describes them: the JSON Schema of
+/// every kind of config file, for agents writing one.
+fn resources() -> Vec<Value> {
+    tidepool_config::schema::KINDS
+        .iter()
+        .map(|kind| {
+            json!({
+                "uri": format!("{SCHEMA_URI}{kind}"),
+                "name": format!("{kind} schema"),
+                "description": format!("The JSON Schema of a `{kind}` config file or setting."),
+                "mimeType": "application/schema+json",
+            })
+        })
+        .collect()
+}
+
+/// One resource's contents, read through the API like a tool's answer.
+async fn read_resource(
+    state: &Arc<AppState>,
+    caller: &Asker<'_>,
+    uri: &str,
+) -> Result<Vec<Value>, String> {
+    let Some(kind) = uri.strip_prefix(SCHEMA_URI) else {
+        return Err(format!("no resource `{uri}`"));
+    };
+    if !tidepool_config::schema::KINDS.contains(&kind) {
+        return Err(format!("no resource `{uri}`"));
+    }
+    let (status, schema) = api(
+        state,
+        caller,
+        Method::GET,
+        &format!("/v1/schemas/{kind}"),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(schema["error"]
+            .as_str()
+            .map_or_else(|| schema.to_string(), str::to_string));
+    }
+    Ok(vec![json!({
+        "uri": uri,
+        "mimeType": "application/schema+json",
+        "text": serde_json::to_string_pretty(&schema).unwrap_or_default(),
+    })])
+}
+
 /// One JSON-RPC message: the reply, or `None` for a notification.
 async fn handle(state: &Arc<AppState>, caller: &Asker<'_>, message: &Value) -> Option<Value> {
     let id = message.get("id")?.clone();
@@ -425,7 +540,10 @@ async fn handle(state: &Arc<AppState>, caller: &Asker<'_>, message: &Value) -> O
                 &id,
                 json!({
                     "protocolVersion": version,
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                        "resources": { "listChanged": false },
+                    },
                     "serverInfo": { "name": "tidepool", "title": "Tidepool", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": INSTRUCTIONS,
                 }),
@@ -433,6 +551,16 @@ async fn handle(state: &Arc<AppState>, caller: &Asker<'_>, message: &Value) -> O
         }
         "ping" => result(&id, json!({})),
         "tools/list" => result(&id, json!({ "tools": tools() })),
+        "resources/list" => result(&id, json!({ "resources": resources() })),
+        "resources/read" => {
+            let Some(uri) = params["uri"].as_str() else {
+                return Some(error(&id, -32602, "resources/read needs a `uri`"));
+            };
+            match read_resource(state, caller, uri).await {
+                Ok(contents) => result(&id, json!({ "contents": contents })),
+                Err(message) => error(&id, -32002, message),
+            }
+        }
         "tools/call" => {
             let Some(name) = params["name"].as_str() else {
                 return Some(error(&id, -32602, "tools/call needs a `name`"));

@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `order_count`: format `int compakt`: unknown word `compakt`
-  --> model.ossie.yaml:67:15
+  --> model.ossie.yaml:73:15
    |
-67 |         data: '{"table": "orders", "format": "int compakt"}'      # anchor table for COUNT(*)
+73 |         data: '{"table": "orders", "format": "int compakt"}'      # anchor table for COUNT(*)
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: a format is a style (int, decimal, percent or currency:XXX with an ISO code), `compact` and `decimals:N`, in any order: `currency:EUR compact`
 

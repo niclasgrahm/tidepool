@@ -4,7 +4,7 @@
 
 **Describe the model** · read only
 
-Tables with their columns and row counts, datasets and fields, relationships, metrics with their SQL, and dashboards. Read this first: names in queries are the ones it lists.
+Tables with their columns and row counts, datasets and fields (with labels, grains and the model's ai_context: instructions, synonyms and examples), relationships, metrics with their SQL, dashboards and their visuals, the visual types there are, and how answers are computed (`semantics`). Read this first: names in queries are the ones it lists.
 
 No arguments.
 

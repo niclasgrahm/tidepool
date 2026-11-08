@@ -51,7 +51,7 @@ use tokio::sync::mpsc;
 use crate::AppState;
 use crate::filters::{self, Window, token};
 use crate::query::{
-    DEFAULT_ROWS, field, json, resolve, result, rows_result, scalar, window_condition,
+    DEFAULT_ROWS, Stamp, field, json, resolve, result, rows_result, scalar, window_condition,
 };
 
 /// Messages a session hasn't sent yet, at most; past this a slow client is
@@ -754,7 +754,7 @@ fn window_of(window: tidepool_config::dashboard::RelativeWindow) -> RelativeWind
     }
 }
 
-fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
+pub(crate) fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardInfo {
     let name = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
     let lists = dashboard.lists(model);
     DashboardInfo {
@@ -988,7 +988,7 @@ fn rows_frame(
     match answer {
         Ok(answer) => VisualFrame {
             id: visual.id.clone(),
-            result: Some(rows_result(&fields, &answer, snapshot.epoch)),
+            result: Some(rows_result(&fields, &answer, Stamp::of(snapshot))),
             error: None,
             compare: None,
         },
@@ -1053,7 +1053,7 @@ fn visual_frame(
     match run(&request) {
         Ok(answer) => VisualFrame {
             id: visual.id.clone(),
-            result: Some(result(&request, &answer, snapshot.epoch)),
+            result: Some(result(&request, &answer, Stamp::of(snapshot))),
             error: None,
             compare,
         },

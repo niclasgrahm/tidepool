@@ -1160,6 +1160,7 @@ impl Store {
             .collect();
         Some(Snapshot {
             epoch: self.epoch,
+            published_at: wall_clock(),
             model: Arc::clone(&self.model),
             version: self.version,
             catalog: Arc::clone(&self.catalog),
@@ -1168,6 +1169,13 @@ impl Store {
             dicts,
         })
     }
+}
+
+/// Now, in UTC microseconds since 1970 (0 if the clock is before it).
+fn wall_clock() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX))
 }
 
 /// One table as of one epoch.
@@ -1197,6 +1205,9 @@ impl TableSnapshot {
 #[derive(Debug)]
 pub struct Snapshot {
     pub epoch: u64,
+    /// When the epoch was published: UTC microseconds since 1970, by the
+    /// writer's wall clock. What an answer from this snapshot is "as of".
+    pub published_at: i64,
     pub model: Arc<Model>,
     /// The config version of `model`, and its catalog.
     pub version: u64,
@@ -1224,6 +1235,7 @@ impl Snapshot {
         let mut store = Store::new(model);
         store.publish().unwrap_or_else(|| Self {
             epoch: 0,
+            published_at: wall_clock(),
             model: Arc::clone(&store.model),
             version: 0,
             catalog: Arc::new(Catalog::default()),

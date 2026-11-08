@@ -669,6 +669,7 @@ mod tests {
             name: name.into(),
             table: name.into(),
             description: None,
+            ai_context: None,
             fields: Vec::new(),
         };
         let rel = |from: &str, to: &str| RelationshipInfo {
@@ -678,6 +679,7 @@ mod tests {
             to: to.into(),
             to_columns: Vec::new(),
             role: None,
+            ai_context: None,
         };
         let metric = |name: &str, anchor: Option<&str>| MetricInfo {
             format: None,
@@ -688,6 +690,7 @@ mod tests {
             anchor: anchor.map(str::to_string),
             ignores: Vec::new(),
             time_offset: None,
+            ai_context: None,
             dashboards: Vec::new(),
         };
         ModelInfo {
@@ -705,6 +708,7 @@ mod tests {
                 metric("avg_order_value", None),
             ],
             filter_direction: "one_to_many".into(),
+            ..ModelInfo::default()
         }
     }
 

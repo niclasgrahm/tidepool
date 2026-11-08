@@ -359,7 +359,27 @@ pub(crate) fn json(value: &Scalar) -> Json_ {
     }
 }
 
-pub(crate) fn result(request: &QueryRequest, answer: &ResultSet, epoch: u64) -> QueryResult {
+/// Which data an answer is from: its epoch, and when that was published.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Stamp {
+    pub epoch: u64,
+    pub at: i64,
+}
+
+impl Stamp {
+    pub(crate) fn of(snapshot: &tidepool_store::Snapshot) -> Self {
+        Self {
+            epoch: snapshot.epoch,
+            at: snapshot.published_at,
+        }
+    }
+
+    fn as_of(self) -> Option<String> {
+        (self.at > 0).then(|| tidepool_store::value::format_timestamp(self.at, true))
+    }
+}
+
+pub(crate) fn result(request: &QueryRequest, answer: &ResultSet, stamp: Stamp) -> QueryResult {
     // the request's spelling of the dimensions, which is also how they sort
     let names = request
         .dimensions
@@ -385,7 +405,8 @@ pub(crate) fn result(request: &QueryRequest, answer: &ResultSet, epoch: u64) -> 
             .iter()
             .map(|row| row.iter().map(json).collect())
             .collect(),
-        epoch,
+        epoch: stamp.epoch,
+        as_of: stamp.as_of(),
     }
 }
 
@@ -452,7 +473,7 @@ pub async fn query(
         Err(message) => return bad_request(message),
     };
     // scans are CPU-bound and parallel: keep them off the async workers
-    let epoch = snapshot.epoch;
+    let epoch = Stamp::of(&snapshot);
     let engine = Arc::clone(&state.engine);
     let started = std::time::Instant::now();
     let answer = tokio::task::spawn_blocking(move || engine.run(&snapshot, &query)).await;
@@ -510,7 +531,7 @@ pub(crate) fn resolve_rows(
 pub(crate) const DEFAULT_ROWS: usize = 100;
 
 /// Rows as a result: one column per field, named as the request names it.
-pub(crate) fn rows_result(fields: &[String], answer: &ResultSet, epoch: u64) -> QueryResult {
+pub(crate) fn rows_result(fields: &[String], answer: &ResultSet, stamp: Stamp) -> QueryResult {
     QueryResult {
         columns: answer
             .columns
@@ -527,7 +548,8 @@ pub(crate) fn rows_result(fields: &[String], answer: &ResultSet, epoch: u64) -> 
             .iter()
             .map(|row| row.iter().map(json).collect())
             .collect(),
-        epoch,
+        epoch: stamp.epoch,
+        as_of: stamp.as_of(),
     }
 }
 
@@ -547,7 +569,7 @@ pub async fn rows(
         Ok(query) => query,
         Err(message) => return bad_request(message),
     };
-    let epoch = snapshot.epoch;
+    let epoch = Stamp::of(&snapshot);
     let engine = Arc::clone(&state.engine);
     let started = std::time::Instant::now();
     let answer = tokio::task::spawn_blocking(move || engine.rows(&snapshot, &query)).await;
@@ -610,6 +632,7 @@ mod tests {
                 vec![serde_json::json!("plain"), serde_json::json!(3)],
             ],
             epoch: 1,
+            as_of: None,
         };
         assert_eq!(
             csv(&result),

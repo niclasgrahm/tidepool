@@ -17,7 +17,7 @@ Omit the header when the server has no tokens.
 
 | tool | what it does | token |
 | --- | --- | --- |
-| `describe_model` | the tables, datasets, fields, relationships, metrics and dashboards | read |
+| `describe_model` | the tables, datasets, fields, relationships, metrics, dashboards with their visuals, the visual types, and how answers are calculated | read |
 | `preview_table` | the newest rows of a table | read |
 | `query_metrics` | metrics grouped by fields, under filters | read |
 | `read_rows` | the newest rows of a table that pass filters. A `contains` filter finds text, for example in log lines. | read |
@@ -31,6 +31,42 @@ agent. Thus an agent can do what its token can do over HTTP, and nothing
 more. The answers and the errors are the same as over HTTP.
 
 The [MCP reference](/reference/mcp) has the arguments of each tool.
+`query_metrics`, `read_rows` and `plan_change` also declare the shape of
+their answer (`outputSchema`). Each answer of `query_metrics` and
+`read_rows` has an `epoch` and an `as_of` time: when the data it reads was
+published.
+
+## resources
+
+The JSON Schema of each kind of config file is a resource, at
+`tidepool://schemas/<kind>`: for example `tidepool://schemas/dashboard`.
+An agent that writes a config file can read its schema first.
+
+## help an agent ask well
+
+An agent can only find what the model tells it about. Write it down in the
+Ossie file, where `describe_model` shows it:
+
+- `description` on the model, datasets, fields and metrics.
+- `label` on a field: what to call it on screen.
+- `ai_context` on the model, a dataset, a field, a relationship or a
+  metric: instructions, synonyms and example questions. tidepool sends it
+  to the agent as you write it.
+
+```yaml
+# fragment
+metrics:
+  - name: revenue
+    ai_context: { synonyms: [sales, turnover], instructions: "every order, whatever its status" }
+```
+
+`describe_model` also gives the grains that each time field can be grouped
+by, and `semantics`: how tidepool calculates answers. For example, a
+division by zero gives NULL.
+
+[`evals/questions.yaml`](https://github.com/niclasgrahm/tidepool/blob/main/evals/questions.yaml)
+has questions about the retail example, each with the query that answers it
+and the answer on known data. Use it to test how well an agent asks.
 
 ## what an agent can apply
 

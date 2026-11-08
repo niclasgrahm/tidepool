@@ -215,3 +215,23 @@ fn every_whole_yaml_sample_compiles_in_the_retail_example() {
         "no whole yaml sample on the site was compiled"
     );
 }
+
+/// The agents page lists the tools by hand; a tool it leaves out is one a
+/// reader never hears of.
+#[test]
+fn the_agents_page_lists_every_mcp_tool() {
+    let page = read(&website().join("agents.md"));
+    let tools = tidepool_server::mcp_tools();
+    let Some(tools) = tools.as_array() else {
+        panic!("tools/list should be a list: {tools}")
+    };
+    for tool in tools {
+        let Some(name) = tool["name"].as_str() else {
+            panic!("a tool without a name: {tool}")
+        };
+        assert!(
+            page.contains(&format!("| `{name}` |")),
+            "website/agents.md has no row for the `{name}` tool"
+        );
+    }
+}

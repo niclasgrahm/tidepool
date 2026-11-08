@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: hierarchy `orders.tree` is over `orders`, an append table
-  --> model.ossie.yaml:18:15
+  --> model.ossie.yaml:20:15
    |
-18 |         data: '{"hierarchy": {"name": "tree", "parent": "status"}}'
+20 |         data: '{"hierarchy": {"name": "tree", "parent": "status"}}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: a hierarchy's nodes are rows of an upsert table keyed by one column
 

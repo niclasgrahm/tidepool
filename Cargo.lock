@@ -3491,6 +3491,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "serde_norway",
  "subtle",
  "tempfile",
  "tidepool-config",

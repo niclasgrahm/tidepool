@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: relationship `order_customer`: `orders.customer_id` is int64 but `customers.customer_id` is string
-  --> model.ossie.yaml:44:20
+  --> model.ossie.yaml:48:20
    |
-44 |     from_columns: [customer_id]
+48 |     from_columns: [customer_id]
    |                    ^^^^^^^^^^^
    = help: joined columns must have the same type
 

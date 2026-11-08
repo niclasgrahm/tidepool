@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: hierarchy `categories.tree`: parent `parent` is int64 but the key `category` is string
-  --> model.ossie.yaml:38:15
+  --> model.ossie.yaml:42:15
    |
-38 |         data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "level"}}'
+42 |         data: '{"hierarchy": {"name": "tree", "parent": "parent", "kind": "level"}}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: a parent holds a key, so it has the key's type
 
