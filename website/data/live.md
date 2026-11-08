@@ -17,6 +17,34 @@ Each message is a JSON object with a `type`.
 
 When the model changes, the server sends `model` again.
 
+## views
+
+A view is a dashboard that is only in the memory of the server. Make one
+with `POST /v1/views`: the body is a dashboard file as JSON. A visual
+without `at` gets a place. The answer has the id of the view, for example
+`~3f9c2a7d41b0e85c6d2f1a9b7e4c3d20`.
+
+```json
+{"name": "Revenue by region", "visuals": [
+  {"id": "regions", "type": "bar", "dimensions": ["customers.region"], "metrics": ["revenue"]}
+]}
+```
+
+Open a view with `open_dashboard` and its id, as a dashboard. Views are not
+in `model`, so the server sends `view` with what the view shows. Frames and
+selections are the same as for a dashboard. In the web UI, a view is at
+`#/v/<id>`.
+
+The server checks a view with the same rules as a dashboard file, and
+answers `422` with the problems if it is wrong. A view is never written to
+the config. Its YAML is in `GET /v1/views/{id}`; **Save as dashboard** in
+the UI writes it to `dashboards/` as a config change.
+
+When the config changes, the server checks the view again. If it no longer
+fits the model (for example, a metric it shows was removed), the session
+gets an `error`. The server forgets a view that nobody opens for 24 hours.
+It keeps 1000 views at most.
+
 ## the selection
 
 These messages change the selection. The server answers them at once, out of

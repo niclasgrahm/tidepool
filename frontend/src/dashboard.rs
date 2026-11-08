@@ -25,6 +25,67 @@ fn short(field: &str) -> String {
     field.split_once('.').map_or(field, |(_, f)| f).to_string()
 }
 
+/// Save view `id` as a dashboard file, under an id the person chooses
+/// (from its title, at first), through `/v1/config/apply` like every
+/// change; then open it. Saving needs the admin token.
+pub fn save_view(id: String, name: &str) {
+    let live = expect_context::<Live>();
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let chosen = window
+        .prompt_with_message_and_default(
+            "Save as dashboards/<id>.yaml. Its id:",
+            &crate::route::id_from(name),
+        )
+        .ok()
+        .flatten();
+    let Some(chosen) = chosen.filter(|c| !c.trim().is_empty()) else {
+        return;
+    };
+    let chosen = chosen.trim().to_string();
+    leptos::task::spawn_local(async move {
+        let view = crate::api::get_json::<Value>(&format!("/v1/views/{id}")).await;
+        let config = crate::api::get_json::<Value>("/v1/config").await;
+        let (view, config) = match (view, config) {
+            (Ok(view), Ok(config)) => (view, config),
+            (Err(err), _) | (_, Err(err)) => {
+                live.problem.set(Some(format!(
+                    "Can't save the view ({err}): saving needs the admin token."
+                )));
+                return;
+            }
+        };
+        let path = format!("dashboards/{chosen}.yaml");
+        let reply = crate::api::post_json(
+            "/v1/config/apply",
+            &json!({
+                "base_version": config["version"],
+                "files": { path: view["yaml"] },
+                "author": "saved from a view",
+            }),
+        )
+        .await;
+        match reply {
+            Ok((200, value)) if value["status"] == "queued" => live.problem.set(Some(format!(
+                "Proposed: change {} is waiting for approval.",
+                value["change"]
+            ))),
+            Ok((200, _)) => {
+                let _ = window
+                    .location()
+                    .set_hash(&crate::route::Route::Dashboard(chosen).href());
+            }
+            Ok((_, value)) => live.problem.set(Some(
+                value["error"]
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_string),
+            )),
+            Err(err) => live.problem.set(Some(err)),
+        }
+    });
+}
+
 #[component]
 pub fn Dashboard(slug: String) -> impl IntoView {
     let live = expect_context::<Live>();
@@ -37,10 +98,7 @@ pub fn Dashboard(slug: String) -> impl IntoView {
             }
         });
     }
-    let info = Memo::new(move |_| {
-        live.dashboards
-            .with(|all| all.iter().find(|d| d.id == slug).cloned())
-    });
+    let info = Memo::new(move |_| live.board_info(&slug));
     // the visual shown alone, as large as the grid; the rail and the
     // selection bar stay, and selections go on working
     let maximized = RwSignal::new(None::<String>);

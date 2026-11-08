@@ -1221,3 +1221,226 @@ async fn a_rows_visual_shows_new_rows_as_they_arrive() {
     assert_eq!(latest[0][1], "Bo");
     assert_eq!(latest.as_array().map(Vec::len), Some(3));
 }
+
+/// `POST /v1/views`: the status and the answer.
+async fn make_view(state: &Arc<AppState>, body: &Value) -> (StatusCode, Value) {
+    let reply = send(
+        Arc::clone(state),
+        request(
+            Method::POST,
+            "/v1/views",
+            &[("content-type", "application/json")],
+            body.to_string(),
+        ),
+    )
+    .await;
+    (reply.status, reply.json())
+}
+
+async fn get(state: &Arc<AppState>, path: &str) -> (StatusCode, Value) {
+    let reply = send(Arc::clone(state), request(Method::GET, path, &[], "")).await;
+    (reply.status, reply.json())
+}
+
+fn revenue_by_region() -> Value {
+    json!({"name": "Revenue by region", "visuals": [
+        {"id": "regions", "type": "bar", "dimensions": ["customers.region"],
+         "metrics": ["revenue"], "on_click": "select"}
+    ]})
+}
+
+#[tokio::test]
+async fn a_view_is_a_live_dashboard_that_is_never_written() {
+    let (state, url) = server_for(common::project_state().await).await;
+    let (_, before) = get(&state, "/v1/config").await;
+    let (status, view) = make_view(&state, &revenue_by_region()).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    let Some(id) = view["id"].as_str().map(str::to_string) else {
+        panic!("a view has an id: {view}")
+    };
+    assert!(id.starts_with('~'), "{id}");
+    // placed for us, and its YAML ready to save
+    assert_eq!(view["dashboard"]["visuals"][0]["at"]["w"], 12);
+    assert!(
+        view["yaml"]
+            .as_str()
+            .is_some_and(|y| y.contains("customers.region")),
+        "{view}"
+    );
+
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "open_dashboard", "id": id})).await;
+    let shown = next(&mut socket, "view").await;
+    assert_eq!(shown["dashboard"]["id"], id.as_str());
+    assert_eq!(shown["dashboard"]["name"], "Revenue by region");
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "regions"),
+        json!([["north", "10.00"], ["south", "5.00"]])
+    );
+
+    // live: new data arrives as a frame
+    post(
+        &state,
+        "/v1/tables/orders/rows",
+        &json!([order("o3", "c2", "paid", "7.50")]),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "regions"),
+        json!([["north", "10.00"], ["south", "12.50"]])
+    );
+    // and selections work as on any dashboard, with a sort of its own
+    say(
+        &mut socket,
+        json!({"type": "sort", "visual": "regions", "column": "revenue", "desc": true}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(
+        rows(&frame, "regions"),
+        json!([["south", "12.50"], ["north", "10.00"]])
+    );
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["north"]}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"][0]["field"], "customers.region");
+
+    // never in the config: same files, same version, no history
+    let (_, after) = get(&state, "/v1/config").await;
+    assert_eq!(after["version"], before["version"]);
+    assert_eq!(after["files"], before["files"]);
+    let (_, versions) = get(&state, "/v1/config/versions").await;
+    assert_eq!(versions.as_array().map(Vec::len), Some(1), "{versions}");
+    // and it reads back
+    let (status, again) = get(&state, &format!("/v1/views/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["dashboard"], view["dashboard"]);
+}
+
+#[tokio::test]
+async fn a_view_that_doesnt_compile_says_why_and_where() {
+    let state = common::project_state().await;
+    let (status, problems) = make_view(
+        &state,
+        &json!({"name": "v", "visuals": [
+            {"id": "a", "type": "bar", "dimensions": ["customers.region"], "metrics": ["revnue"]}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problems}");
+    let text = problems["problems_text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("revnue") && text.contains("revenue"),
+        "{text}"
+    );
+    // a bar with two dimensions breaks the same rule a file would
+    let (status, problems) = make_view(
+        &state,
+        &json!({"name": "v", "visuals": [
+            {"id": "a", "type": "bar", "dimensions": ["customers.region", "products.category"], "metrics": ["revenue"]}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problems}");
+    assert!(
+        problems["problems_text"]
+            .as_str()
+            .is_some_and(|t| t.contains("exactly one dimension")),
+        "{problems}"
+    );
+    // not a dashboard at all
+    let (status, _) = make_view(&state, &json!({"visuals": 3})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // and a server with no config files can't make views
+    let (status, refused) = make_view(&ready_state(), &revenue_by_region()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+}
+
+#[tokio::test]
+async fn a_view_follows_the_model_and_says_when_it_no_longer_fits() {
+    let (state, url) = server_for(common::project_state().await).await;
+    let (_, view) = make_view(
+        &state,
+        &json!({"name": "Customers", "visuals": [
+            {"id": "buyers", "type": "kpi", "metrics": ["customer_count"]}
+        ]}),
+    )
+    .await;
+    let id = view["id"].as_str().unwrap_or_default().to_string();
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "open_dashboard", "id": id})).await;
+    let _ = next(&mut socket, "view").await;
+    let _ = next(&mut socket, "frame").await;
+
+    // the metric it shows is removed: the view says so, once
+    let (_, config) = get(&state, "/v1/config").await;
+    let Some(model) = config["files"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["path"] == "model.ossie.yaml"))
+        .and_then(|f| f["text"].as_str())
+    else {
+        panic!("no model file in {config}")
+    };
+    let start = model.find("  - name: customer_count").unwrap_or(0);
+    let end = model[start..]
+        .find("  - name: avg_order_value")
+        .map_or(start, |e| start + e);
+    assert!(end > start, "the example's metrics moved");
+    let edited = format!("{}{}", &model[..start], &model[end..]);
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/v1/config/apply",
+            &[("content-type", "application/json")],
+            json!({"base_version": config["version"], "files": {"model.ossie.yaml": edited}})
+                .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no longer fits") && m.contains("customer_count")),
+        "{error}"
+    );
+    let (status, _) = get(&state, &format!("/v1/views/{id}")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_view_nobody_looks_at_for_a_day_is_forgotten() {
+    let state = common::project_state().await;
+    state.set_clock(Some(1_000_000));
+    let (_, view) = make_view(&state, &revenue_by_region()).await;
+    let path = format!("/v1/views/{}", view["id"].as_str().unwrap_or_default());
+    state.set_clock(Some(1_000_000 + 23 * 3_600_000_000));
+    assert_eq!(get(&state, &path).await.0, StatusCode::OK);
+    // looking at it kept it: a day from then, not from when it was made
+    state.set_clock(Some(1_000_000 + 46 * 3_600_000_000));
+    assert_eq!(get(&state, &path).await.0, StatusCode::OK);
+    state.set_clock(Some(1_000_000 + 71 * 3_600_000_000));
+    assert_eq!(get(&state, &path).await.0, StatusCode::NOT_FOUND);
+    // and a view that never was is no dashboard either
+    let (_, url) = server_for(state).await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "~nope"}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("~nope")),
+        "{error}"
+    );
+}

@@ -229,6 +229,11 @@ pub enum ServerMessage {
         epoch: u64,
         rows_per_second: f64,
     },
+    /// A view the session opened (views aren't in `Model`): what it shows.
+    /// Sent again when a config change changes it.
+    View {
+        dashboard: DashboardInfo,
+    },
     /// A message the server couldn't act on.
     Error {
         message: String,
@@ -237,6 +242,25 @@ pub enum ServerMessage {
     /// selection and frame, when there are any): a client counting what it
     /// sent knows when the dashboard has caught up with a click.
     Done,
+}
+
+/// A view (`POST /v1/views`): a dashboard that lives only in memory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ViewInfo {
+    /// What `open_dashboard` opens it by: `~` and 32 hex digits.
+    pub id: String,
+    pub dashboard: DashboardInfo,
+    /// Its dashboard file, as YAML: what saving it writes.
+    pub yaml: String,
+}
+
+/// Why a view couldn't be made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ViewProblems {
+    pub error: String,
+    pub problems: Vec<crate::config::ConfigProblem>,
+    /// The problems as the CLI prints them, with the lines they point at.
+    pub problems_text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -294,6 +294,50 @@
         "title": "ConfigVersion",
         "type": "object"
       },
+      "DashboardInfo": {
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/components/schemas/FilterInfo"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "The file name, and the dashboard's URL path.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "row_height": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "visuals": {
+            "items": {
+              "$ref": "#/components/schemas/VisualInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "columns",
+          "row_height",
+          "filters",
+          "visuals"
+        ],
+        "type": "object"
+      },
       "DatasetInfo": {
         "properties": {
           "ai_context": {
@@ -445,6 +489,88 @@
           "name",
           "type",
           "is_time"
+        ],
+        "type": "object"
+      },
+      "FilterInfo": {
+        "properties": {
+          "default": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelativeWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The window a `date_range` starts with when the dashboard is opened."
+          },
+          "field": {
+            "description": "`dataset.field`.",
+            "type": "string"
+          },
+          "measure": {
+            "description": "The metric shown beside each value instead of its rows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "measure_format": {
+            "description": "The measure's format (`currency:EUR compact`, …; see the metric's\n`format`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timed": {
+            "default": false,
+            "description": "Whether the field has a time of day, so windows of hours and\nminutes apply to it (a date has none).",
+            "type": "boolean"
+          },
+          "widget": {
+            "description": "`list`, `tree`, `date_range` or `search`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "widget"
+        ],
+        "type": "object"
+      },
+      "GridAt": {
+        "properties": {
+          "h": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "w": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "x": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "y": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
         ],
         "type": "object"
       },
@@ -1733,6 +1859,119 @@
           "summary"
         ],
         "title": "VersionInfo",
+        "type": "object"
+      },
+      "ViewInfo": {
+        "description": "A view (`POST /v1/views`): a dashboard that lives only in memory.",
+        "properties": {
+          "dashboard": {
+            "$ref": "#/components/schemas/DashboardInfo"
+          },
+          "id": {
+            "description": "What `open_dashboard` opens it by: `~` and 32 hex digits.",
+            "type": "string"
+          },
+          "yaml": {
+            "description": "Its dashboard file, as YAML: what saving it writes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "dashboard",
+          "yaml"
+        ],
+        "title": "ViewInfo",
+        "type": "object"
+      },
+      "ViewProblems": {
+        "description": "Why a view couldn't be made.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigProblem"
+            },
+            "type": "array"
+          },
+          "problems_text": {
+            "description": "The problems as the CLI prints them, with the lines they point at.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "problems",
+          "problems_text"
+        ],
+        "title": "ViewProblems",
+        "type": "object"
+      },
+      "VisualInfo": {
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/GridAt"
+          },
+          "compare": {
+            "description": "A KPI's comparison metric.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dimensions": {
+            "items": {
+              "$ref": "#/components/schemas/QueryDimension"
+            },
+            "type": "array"
+          },
+          "formats": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "How each metric reads here, by name: the visual's own format for it,\nelse the metric's. Metrics without one aren't listed.",
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "metrics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "on_brush": {
+            "description": "Brushing a range selects it.",
+            "type": "boolean"
+          },
+          "on_click": {
+            "description": "Clicking a value selects it.",
+            "type": "boolean"
+          },
+          "type": {
+            "description": "`kpi`, `bar`, `line`, `table`, `filter` or `rows`.",
+            "type": "string"
+          },
+          "widget": {
+            "description": "A `filter` visual's list: `list` or `tree`. Its frames are the\nfilter frames of its dimension's field.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "dimensions",
+          "metrics",
+          "on_click",
+          "on_brush",
+          "at"
+        ],
         "type": "object"
       }
     },
@@ -4224,6 +4463,125 @@
         "summary": "The newest rows of a table",
         "tags": [
           "tables"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/views": {
+      "post": {
+        "description": "A view is a dashboard that lives only in the server's memory: checked by the same rules as a dashboard file and shown live like one (`open_dashboard` with its id), but never written to the config, versioned or committed. For an answer an agent shows once; saving it as a dashboard is a config change like any other. The body is a dashboard file as JSON (the `dashboard` schema); a visual without `at` is placed for you. A view nobody opens for 24 hours is forgotten, and at most 1000 are kept.",
+        "operationId": "createView",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "A dashboard file, as JSON.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewInfo"
+                }
+              }
+            },
+            "description": "The view: its id, and what it shows."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewProblems"
+                }
+              }
+            },
+            "description": "The dashboard doesn't compile: its problems."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Make a view",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      }
+    },
+    "/v1/views/{id}": {
+      "get": {
+        "description": "A view made with `POST /v1/views`: what it shows, and its dashboard file as YAML, ready to save under `dashboards/`.",
+        "operationId": "getView",
+        "parameters": [
+          {
+            "description": "The view's id, as making it answered.",
+            "example": "~3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewInfo"
+                }
+              }
+            },
+            "description": "The view."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such view, or it was forgotten."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "A view",
+        "tags": [
+          "queries"
         ],
         "x-tidepool-access": "read"
       }

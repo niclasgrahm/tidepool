@@ -171,3 +171,25 @@ pub async fn send_on(state: Arc<AppState>, listener: Listener, request: Request<
 pub async fn call(state: Arc<AppState>, method: Method, path: &str) -> Reply {
     send(state, request(method, path, &[], Body::empty())).await
 }
+
+/// A server for the retail example's config files (not only its model), as
+/// `tidepool serve --config` runs it: what config changes and views need.
+pub async fn project_state() -> Arc<AppState> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/retail");
+    let files = match tidepool_server::config::read_dir(&dir) {
+        Ok(files) => files,
+        Err(err) => panic!("{err}"),
+    };
+    let writer = WriterConfig {
+        epoch_interval: std::time::Duration::from_millis(10),
+        ..WriterConfig::default()
+    };
+    let project = tidepool_server::Project { dir: None, files };
+    match AppState::open(project, writer, None, Tokens::default(), false).await {
+        Ok(state) => {
+            state.set_ready();
+            Arc::new(state)
+        }
+        Err(err) => panic!("{err:#}"),
+    }
+}

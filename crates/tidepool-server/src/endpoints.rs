@@ -23,7 +23,7 @@ use tidepool_protocol::api_docs::{Access, ApiDoc, Body, Method, Operation, endpo
 
 use crate::AppState;
 use crate::auth::Listener;
-use crate::{auth, config, handlers, live, mcp, metrics, model, query, tables};
+use crate::{auth, config, handlers, live, mcp, metrics, model, query, tables, views};
 
 /// The documented JSON surface, without the UI fallback, as one listener
 /// serving everything has it.
@@ -134,6 +134,8 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::Query => route_of(method, query::query),
         Operation::Rows => route_of(method, query::rows),
         Operation::Live => route_of(method, live::socket),
+        Operation::CreateView => route_of(method, views::create_view),
+        Operation::GetView => route_of(method, views::get_view),
         Operation::GetModel => route_of(method, model::model),
         Operation::GetStatus => route_of(method, model::status),
         Operation::GetConfig => route_of(method, config::get_config),

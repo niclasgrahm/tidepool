@@ -261,6 +261,12 @@ pub fn render(state: &AppState) -> String {
         "Live dashboard sessions.",
         state.hub.live_sessions() as f64,
     );
+    out.one(
+        "tidepool_views",
+        "gauge",
+        "Views kept in memory (dashboards made with POST /v1/views).",
+        state.views.len() as f64,
+    );
     out.timing(
         "tidepool_epoch_publish_seconds",
         "Time to publish an epoch: freezing new rows, sealing, snapshots.",

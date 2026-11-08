@@ -1030,7 +1030,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | Message | Purpose |
 |---|---|
 | `hello { session_id?, token? }` | resume or create session (session id stored in localStorage) |
-| `open_dashboard { id }` | subscribe all its visuals and filters |
+| `open_dashboard { id }` | subscribe all its visuals and filters; a view's id (`~…`) opens the view |
 | `select { field, values, mode: replace\|toggle\|add }` | change selection (click, list box) |
 | `select_range { field, lo, hi }` | brush on time axis / date range |
 | `select_relative { field, window: { unit, last, ago? } }` | a period relative to now ("Last 7 days", §5.5) |
@@ -1045,10 +1045,13 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 |---|---|
 | `welcome { session_id, model_version, epoch }` | |
 | `model { version, dashboards… }` | sent on connect and whenever the config version changes |
+| `view { dashboard }` | a view the session opened (views aren't in `model`); again when a config change changes it |
 | `selection { state, can_back, can_forward }` | authoritative selection state after each change |
 | `frame { epoch, visuals: [{ id, payload_idx \| error }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit |
 | `status { epoch, ingest_rate, lag_ms }` | for the live indicator, ~1 Hz |
 | `done` | one per client message, after everything it caused: the UI shows a selection as under way until its `done` arrives |
+
+**Views (2026-11-08).** A view is a dashboard that lives only in memory, for answers an agent shows once (`POST /v1/views`, MCP `show_view`). It is compiled as one more dashboard file of the applied config (`views.rs`: the config's files plus its YAML, through the one compiler, so every rule and located diagnostic applies), opened by its id (`~` and 128 random bits; no file name can start with `~`), and never written, versioned or committed. It is recompiled for a new config version the first time it is looked at after one; one that no longer compiles is an `error` to its sessions, once. Kept 24 h from last use, 1000 at most (least recently used first). Saving it (`save_view`, the UI's **Save as dashboard**) is an ordinary config change of its YAML. A server with no config files (a model given in code) can't make views. `ConfigStore::published` holds the applied version's files and catalog for this, readable without the config lock.
 
 ---
 
