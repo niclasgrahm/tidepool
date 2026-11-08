@@ -21,7 +21,7 @@ use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
     FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, OffsetUnit, TableId, TimeOffset,
-    Total, Type,
+    TimeWindow, Total, Type, WindowSpec,
 };
 
 pub(super) struct Metrics {
@@ -221,17 +221,31 @@ fn metric(
         }
     };
 
-    let time_offset = match (&ext.time_offset, &ext.time_field) {
-        (None, None) => None,
-        (Some(_), None) | (None, Some(_)) => {
+    let time_offset = match (&ext.time_offset, &ext.time_field, &ext.time_window) {
+        (None, None, _) | (None, Some(_), Some(_)) => None,
+        (Some(_), None, _) | (None, Some(_), None) => {
             cx.push(
-                Diagnostic::error(format!("{what}: time_offset and time_field go together"))
-                    .at(file, ext_path.clone())
-                    .help("e.g. {\"time_offset\": \"-1y\", \"time_field\": \"orders.ordered_at\"}"),
+                Diagnostic::error(format!(
+                    "{what}: time_field goes with time_offset or time_window"
+                ))
+                .at(file, ext_path.clone())
+                .help("e.g. {\"time_offset\": \"-1y\", \"time_field\": \"orders.ordered_at\"}"),
             );
             None
         }
-        (Some(offset), Some(field)) => time_offset(cx, &at, offset, field, &body, semantic),
+        (Some(offset), Some(field), _) => time_offset(cx, &at, offset, field, &body, semantic),
+    };
+    let time_window = match (&ext.time_window, &ext.time_field) {
+        (None, _) => None,
+        (Some(_), None) => {
+            cx.push(
+                Diagnostic::error(format!("{what}: time_window needs a time_field"))
+                    .at(file, ext_path.clone())
+                    .help("e.g. {\"time_window\": \"ytd\", \"time_field\": \"orders.ordered_at\"}"),
+            );
+            None
+        }
+        (Some(window), Some(field)) => time_window(cx, &at, window, field, &body, semantic),
     };
 
     if let Some(format) = &ext.format
@@ -254,6 +268,7 @@ fn metric(
         ignore_selection,
         time_offset,
         total,
+        time_window,
         ai_context: spec.ai_context.clone(),
     })
 }
@@ -564,6 +579,115 @@ fn resolve_reported(
             "write fields as `dataset.field` or `field`".to_string(),
         )),
     }
+}
+
+/// `ytd`, `qtd`, `mtd`, `wtd` or `last:<n><unit>`, read.
+fn window_spec(text: &str) -> Result<WindowSpec, &'static str> {
+    use tidepool_config::ossie::TimeGrain as G;
+    const HOW: &str = "write ytd, qtd, mtd or wtd, or last:<n><unit> with unit min, h, d, w, mo, q or y (last:12mo)";
+    match text {
+        "ytd" => return Ok(WindowSpec::ToDate(G::Year)),
+        "qtd" => return Ok(WindowSpec::ToDate(G::Quarter)),
+        "mtd" => return Ok(WindowSpec::ToDate(G::Month)),
+        "wtd" => return Ok(WindowSpec::ToDate(G::Week)),
+        _ => {}
+    }
+    let Some(rest) = text.strip_prefix("last:") else {
+        return Err(HOW);
+    };
+    let split = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (n, unit) = rest.split_at(split);
+    let grain = match unit {
+        "min" => G::Minute,
+        "h" => G::Hour,
+        "d" => G::Day,
+        "w" => G::Week,
+        "mo" => G::Month,
+        "q" => G::Quarter,
+        "y" => G::Year,
+        "m" => return Err("`m` could be months or minutes: write mo for months, min for minutes"),
+        _ => return Err(HOW),
+    };
+    match n.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(WindowSpec::Last(n, grain)),
+        _ => Err("the window is 1 or more periods: last:7d"),
+    }
+}
+
+fn time_window(
+    cx: &mut Cx,
+    at: &At,
+    window: &str,
+    field: &str,
+    body: &MetricBody,
+    semantic: &Semantic,
+) -> Option<TimeWindow> {
+    let (file, ext_path, what) = (at.file, &at.ext, &at.what);
+    let MetricBody::Base { anchor, .. } = body else {
+        cx.push(
+            Diagnostic::error(format!("{what}: time_window is for base metrics"))
+                .at(file, ext_path.clone())
+                .help("window the base metrics, and derive from them"),
+        );
+        return None;
+    };
+    let spec = match window_spec(window) {
+        Ok(spec) => spec,
+        Err(help) => {
+            cx.push(
+                Diagnostic::error(format!("{what}: `{window}` is not a time window"))
+                    .at(file, ext_path.clone())
+                    .help(help),
+            );
+            return None;
+        }
+    };
+    let (table, found) = match semantic.resolve_qualified(field) {
+        Ok(found) => found,
+        Err(None) => return None,
+        Err(Some(message)) => {
+            cx.push(
+                Diagnostic::error(format!("{what}: time_field: {message}"))
+                    .at(file, ext_path.clone()),
+            );
+            return None;
+        }
+    };
+    if !found.is_time {
+        cx.push(
+            Diagnostic::error(format!("{what}: time_field `{field}` is not a time field"))
+                .at(file, ext_path.clone()),
+        );
+        return None;
+    }
+    if spec.grain().is_sub_day() && found.ty == Type::Date {
+        cx.push(
+            Diagnostic::error(format!(
+                "{what}: `{field}` is a date, so it has no `{window}`: a date has no time of day"
+            ))
+            .at(file, ext_path.clone()),
+        );
+        return None;
+    }
+    if !semantic.maybe_reaches(*anchor, table) {
+        cx.push(
+            Diagnostic::error(format!(
+                "{what}: time_field `{field}` can't be reached from `{}`",
+                semantic.dataset_name(*anchor)
+            ))
+            .at(file, ext_path.clone()),
+        );
+        return None;
+    }
+    Some(TimeWindow {
+        spec,
+        field: FieldRef {
+            table,
+            field: found.name.clone(),
+        },
+    })
 }
 
 fn time_offset(

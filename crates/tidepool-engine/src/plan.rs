@@ -15,7 +15,7 @@ use tidepool_expr::temporal::{Part, Shift};
 use tidepool_expr::{AggCall, Expr, Scope, Type, check_aggregation, check_row};
 use tidepool_model::ir::{
     FieldRef, FieldSource, Hierarchy, IgnoreSelection, MetricBody, MetricId, Model, OffsetUnit,
-    TableId, Total, type_of,
+    TableId, Total, WindowSpec, type_of,
 };
 
 use crate::query::{Condition, Query, QueryError, Selection};
@@ -99,8 +99,44 @@ pub(crate) struct AnchorPlan {
     /// The query dimensions it groups by, by position: all of them, but
     /// for `total` metrics, whose value repeats across the others.
     pub keep: Vec<usize>,
+    /// For `time_window` metrics grouped by their time field: each row
+    /// counts in every group (of that dimension) whose window holds it.
+    pub window: Option<GroupWindow>,
     pub aggs: Vec<AggPlan>,
     pub metrics: Vec<MetricPlan>,
+}
+
+/// A window per group: the dimension (its position in `dims`), its grain,
+/// and the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GroupWindow {
+    pub dim: usize,
+    pub grain: Part,
+    pub spec: WindowSpec,
+}
+
+/// Groups a row can count in at most, through a window per group: past it,
+/// a query is refused rather than slow.
+const WINDOW_REACH: u64 = 1000;
+
+/// Whether `field` reads `time`'s column: it is the field, or a derived
+/// field of the same table over that column. A window replaces the
+/// selection on all of them.
+fn reads(model: &Model, field: &FieldRef, time: &FieldRef) -> bool {
+    if field == time {
+        return true;
+    }
+    if field.table != time.table {
+        return false;
+    }
+    let dataset = model.dataset(field.table);
+    let column = |f: &FieldRef| match dataset.and_then(|d| d.field(&f.field)).map(|f| &f.source) {
+        Some(FieldSource::Column(c)) => vec![*c],
+        Some(FieldSource::Derived { columns, .. }) => columns.clone(),
+        _ => Vec::new(),
+    };
+    let time_columns = column(time);
+    column(field).iter().any(|c| time_columns.contains(c))
 }
 
 #[derive(Clone, Debug)]
@@ -385,22 +421,23 @@ pub(crate) fn plan(
             None => None,
             Some(offset) => Some((shift_on(model, &offset.field)?, shift_of(offset))),
         };
-        let visible = Selection(
+        let mut visible = Selection(
             query
                 .selection
                 .0
                 .iter()
                 .filter(|(f, _)| !ignored(f))
+                .filter(|(f, _)| {
+                    metric
+                        .time_window
+                        .as_ref()
+                        .is_none_or(|w| !reads(model, f, &w.field))
+                })
                 .map(|(f, c)| (f.clone(), c.clone()))
                 .collect(),
         );
-        let seen = Query {
-            selection: selection_for(*anchor, &visible)?,
-            ..Query::default()
-        };
-        let mut fresh = anchor_plan(model, *anchor, &seen, &|_| false, shift)?;
         // the dimensions it groups by: a total's leaves its fields out
-        fresh.keep = query
+        let keep: Vec<usize> = query
             .dimensions
             .iter()
             .enumerate()
@@ -411,6 +448,55 @@ pub(crate) fn plan(
             })
             .map(|(i, _)| i)
             .collect();
+        // a window: per group of its time field, or one, in the selection
+        let mut window = None;
+        if let Some(w) = &metric.time_window {
+            let grouped = keep
+                .iter()
+                .position(|i| query.dimensions[*i].field == w.field);
+            if let Some(position) = grouped {
+                {
+                    let dim = &query.dimensions[keep[position]];
+                    let Some(grain) = dim.grain else {
+                        return Err(error(format!(
+                            "metric `{}` has a time window on `{}`: group by it at a grain (day, month, …)",
+                            metric.name,
+                            label(model, &w.field)
+                        )));
+                    };
+                    if crate::window::reach(w.spec, grain) > WINDOW_REACH {
+                        return Err(error(format!(
+                            "metric `{}`'s window is too long for groups of a {}: group by a coarser grain",
+                            metric.name,
+                            format!("{grain:?}").to_lowercase()
+                        )));
+                    }
+                    window = Some(GroupWindow {
+                        dim: position,
+                        grain: part_of(grain),
+                        spec: w.spec,
+                    });
+                }
+            } else {
+                {
+                    let (from, to) = window_range(model, query, w)?;
+                    visible.0.insert(
+                        w.field.clone(),
+                        Condition::Range {
+                            from: Some(from),
+                            to: Some(to),
+                        },
+                    );
+                }
+            }
+        }
+        let seen = Query {
+            selection: selection_for(*anchor, &visible)?,
+            ..Query::default()
+        };
+        let mut fresh = anchor_plan(model, *anchor, &seen, &|_| false, shift)?;
+        fresh.keep = keep;
+        fresh.window = window;
         let signature = |plan: &AnchorPlan| -> Vec<String> {
             plan.conditions
                 .iter()
@@ -421,6 +507,7 @@ pub(crate) fn plan(
             a.table == *anchor
                 && a.shift == fresh.shift
                 && a.keep == fresh.keep
+                && a.window == fresh.window
                 && signature(a) == signature(&fresh)
         }) {
             index
@@ -464,7 +551,9 @@ pub(crate) fn plan(
     // group with no rows under the selection isn't one. So too when every
     // metric is a total: something must say which groups there are.
     let every = (0..query.dimensions.len()).collect::<Vec<_>>();
-    let grouped = anchors.iter().any(|a| a.keep == every);
+    let grouped = anchors
+        .iter()
+        .any(|a| a.keep == every && a.window.is_none());
     if !query.dimensions.is_empty() && (query.metrics.is_empty() || !grouped) {
         let tables: Vec<TableId> = query.dimensions.iter().map(|d| d.field.table).collect();
         let anchor = rows_anchor(model, &tables)?;
@@ -580,6 +669,39 @@ pub(crate) fn plan(
         derived,
         dim_types,
     })
+}
+
+/// The range of `window`'s field a `time_window` metric not grouped by it
+/// reads: ending where the query's selection on the field ends, or with
+/// the current period.
+fn window_range(
+    model: &Model,
+    query: &Query,
+    window: &tidepool_model::ir::TimeWindow,
+) -> Result<(tidepool_expr::Scalar, tidepool_expr::Scalar), QueryError> {
+    let ty = model
+        .dataset(window.field.table)
+        .and_then(|d| d.field(&window.field.field))
+        .map(|f| f.ty)
+        .ok_or_else(|| error(format!("unknown field `{}`", label(model, &window.field))))?;
+    let to = match query.selection.0.get(&window.field) {
+        Some(Condition::Range { to: Some(to), .. }) => crate::window::micros(to),
+        _ => None,
+    };
+    let now = query.now;
+    if to.is_none() && now.is_none() {
+        return Err(error(
+            "a time window ending now needs the time: the query has no `now`",
+        ));
+    }
+    let span = crate::window::end(window.spec, to, now.unwrap_or(0)).and_then(|end| {
+        let start = crate::window::start(window.spec, end)?;
+        Some((
+            crate::window::value(ty, start)?,
+            crate::window::value(ty, end)?,
+        ))
+    });
+    span.ok_or_else(|| error("the time window falls outside the calendar"))
 }
 
 /// Stands for "rows" in a [`values`] plan: no model metric has it.
@@ -793,6 +915,7 @@ fn empty(table: TableId) -> AnchorPlan {
         conditions: Vec::new(),
         dims: Vec::new(),
         keep: Vec::new(),
+        window: None,
         aggs: Vec::new(),
         metrics: Vec::new(),
     }

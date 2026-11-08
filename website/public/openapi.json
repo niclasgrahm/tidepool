@@ -811,6 +811,13 @@
               "null"
             ]
           },
+          "time_window": {
+            "description": "E.g. `ytd on orders.ordered_at`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "totals": {
             "description": "The dimensions it is computed without (`*` for all): a total.",
             "items": {

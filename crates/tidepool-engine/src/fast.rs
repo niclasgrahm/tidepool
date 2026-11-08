@@ -238,7 +238,8 @@ pub(crate) fn prepare<'s>(
     plan: &AnchorPlan,
     caches: Option<&Caches>,
 ) -> Option<Prepared<'s>> {
-    if plan.dims.len() > MAX_DIMS {
+    // a row counting in several groups: the general path
+    if plan.dims.len() > MAX_DIMS || plan.window.is_some() {
         return None;
     }
     let mut reads = Vec::new();

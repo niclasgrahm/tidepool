@@ -28,7 +28,7 @@ fn validate_accepts_the_example_and_summarises_it() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(
         text(&output.stdout),
-        "ok: 4 tables, 3 relationships, 12 metrics, 3 dashboards\n"
+        "ok: 4 tables, 3 relationships, 14 metrics, 3 dashboards\n"
     );
 }
 

@@ -365,6 +365,9 @@ pub struct MetricInfo {
     /// E.g. `-1 year on orders.ordered_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_offset: Option<String>,
+    /// E.g. `ytd on orders.ordered_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<String>,
     /// How its value shows, when a visual does not set a different format:
     /// `currency:EUR compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

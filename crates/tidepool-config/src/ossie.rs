@@ -261,6 +261,14 @@ pub struct MetricExtension {
     /// Evaluate with the time selection on `time_field` shifted, e.g. `-1y`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_offset: Option<String>,
+    /// Evaluate over a window of `time_field` in place of its selection:
+    /// `ytd`, `qtd`, `mtd`, `wtd` (to date), or `last:<n><unit>` with unit
+    /// `min`, `h`, `d`, `w`, `mo`, `q` or `y` (`last:12mo`). It ends where
+    /// the time selection ends, or with the current period; in a visual
+    /// grouped by `time_field`, each group's window ends where the group
+    /// does (a running year to date, a rolling 12 months).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_field: Option<String>,
     /// How the value shows: a style (`int`, `decimal`, `percent` or

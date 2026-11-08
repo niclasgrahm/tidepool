@@ -28,7 +28,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -145,6 +145,29 @@ struct SessionState {
     allowed: Option<Arc<HashSet<String>>>,
     /// When its connection went: it can be resumed for [`RESUMABLE`].
     gone: Option<std::time::Instant>,
+    /// The epoch of the last frame sent: an older snapshot's frame never
+    /// follows a newer one.
+    epoch: u64,
+}
+
+/// Whether a computed frame may be sent ([`SessionState::fresh`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Fresh {
+    Yes,
+    No,
+    Again,
+}
+
+/// What a frame is computed from, read under the lock before the (slow,
+/// unlocked) queries: a frame is sent only if it's still what the session
+/// shows when they're done.
+#[derive(Clone, PartialEq)]
+struct Inputs {
+    dashboard: String,
+    chosen: Chosen,
+    windows: HashMap<String, Window>,
+    open: HashMap<String, BTreeSet<String>>,
+    sorts: HashMap<String, (String, bool)>,
 }
 
 /// How long a session without a connection can be resumed.
@@ -166,6 +189,37 @@ fn session_id(fallback: u64) -> String {
 impl SessionState {
     fn selection(&self) -> Chosen {
         self.history.get(self.at).cloned().unwrap_or_default()
+    }
+
+    /// What a frame would be computed from now; `None` without a
+    /// dashboard.
+    fn inputs(&self) -> Option<Inputs> {
+        Some(Inputs {
+            dashboard: self.dashboard.clone()?,
+            chosen: self.selection(),
+            windows: self.windows.clone(),
+            open: self.open.clone(),
+            sorts: self.sorts.clone(),
+        })
+    }
+
+    /// Whether a frame computed from `inputs` at `epoch` may be sent: not
+    /// when a newer epoch's frame went first, and not when a selection or
+    /// filter change came in meanwhile. Then the change's own refresh is
+    /// the newer answer, unless this epoch is newer than what was sent:
+    /// then it's computed again.
+    fn fresh(&self, inputs: &Inputs, epoch: u64) -> Fresh {
+        if epoch < self.epoch {
+            Fresh::No
+        } else if self.inputs().as_ref() != Some(inputs) {
+            if epoch > self.epoch {
+                Fresh::Again
+            } else {
+                Fresh::No
+            }
+        } else {
+            Fresh::Yes
+        }
     }
 
     /// Make `next` the current selection, dropping anything after it.
@@ -209,6 +263,9 @@ pub(crate) struct Hub {
     running: AtomicBool,
     /// The model sessions were last told about.
     model: Mutex<Option<Arc<Model>>>,
+    /// The minute (since 1970) sessions were last refreshed for the
+    /// clock: metrics with a time window move with it.
+    minute: AtomicI64,
 }
 
 impl Hub {
@@ -357,6 +414,7 @@ impl Hub {
     fn roll(&self, state: &AppState) {
         let snapshot = state.writer.snapshot();
         let now = state.clock.now();
+        let mut rolled = HashSet::new();
         for session in self.sessions() {
             let moved = {
                 let inner = session.lock();
@@ -373,6 +431,24 @@ impl Hub {
             if let Some(selection) = moved {
                 session.send(selection);
                 refresh(state, &session, &snapshot);
+                rolled.insert(session.id.clone());
+            }
+        }
+        // a metric's time window ending with the current period moves a
+        // minute at the finest: then every other open dashboard is brought
+        // up to date too (answers whose windows didn't move are cached)
+        let minute = now.div_euclid(60_000_000);
+        if self.minute.swap(minute, Ordering::Relaxed) != minute
+            && snapshot
+                .model
+                .metrics
+                .iter()
+                .any(|m| m.time_window.is_some())
+        {
+            for session in self.sessions() {
+                if !rolled.contains(&session.id) {
+                    refresh(state, &session, &snapshot);
+                }
             }
         }
     }
@@ -1092,27 +1168,28 @@ fn hash_of(value: &impl serde::Serialize) -> u64 {
 /// Send a session what changed on its dashboard as of `snapshot`, as one
 /// frame. Nothing when paused, without a dashboard, or when nothing changed.
 fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
-    let (dashboard, selection, windows, open, sorts) = {
+    let inputs = {
         let inner = session.lock();
         if inner.paused || inner.out.is_none() {
             return;
         }
-        let Some(dashboard) = inner.dashboard.clone() else {
+        let Some(inputs) = inner.inputs() else {
             return;
         };
-        (
-            dashboard,
-            inner.selection(),
-            inner.windows.clone(),
-            inner.open.clone(),
-            inner.sorts.clone(),
-        )
+        inputs
     };
+    let Inputs {
+        dashboard,
+        chosen,
+        windows,
+        open,
+        sorts,
+    } = &inputs;
     let model = &snapshot.model;
-    let selection = selection.resolve(model, state.clock.now());
+    let selection = chosen.resolve(model, state.clock.now());
     let view;
-    let dashboard: &Dashboard = if views::is_view(&dashboard) {
-        match state.views.get(state, snapshot, &dashboard) {
+    let dashboard: &Dashboard = if views::is_view(dashboard) {
+        match state.views.get(state, snapshot, dashboard) {
             Some(Ok(found)) => {
                 view = found;
                 &view
@@ -1129,7 +1206,7 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
             None => return,
         }
     } else {
-        let Some(found) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
+        let Some(found) = model.dashboards.iter().find(|d| d.slug == *dashboard) else {
             return;
         };
         found
@@ -1162,6 +1239,15 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
 
     // only what changed since this session's last frame
     let mut inner = session.lock();
+    match inner.fresh(&inputs, snapshot.epoch) {
+        Fresh::Yes => {}
+        Fresh::No => return,
+        Fresh::Again => {
+            drop(inner);
+            return refresh(state, session, snapshot);
+        }
+    }
+    inner.epoch = snapshot.epoch;
     inner.shown = Some(selection);
     let mut changed = |key: String, hash: u64| inner.sent.insert(key, hash) != Some(hash);
     let visuals: Vec<VisualFrame> = visuals
@@ -1462,6 +1548,41 @@ mod tests {
         // the same selection again isn't a step
         state.push(one(3));
         assert_eq!(state.history.len(), 3);
+    }
+
+    #[test]
+    fn a_frame_computed_before_a_change_is_never_sent_after_it() {
+        let mut state = SessionState {
+            history: vec![Chosen::default()],
+            dashboard: Some("sales".into()),
+            epoch: 5,
+            ..SessionState::default()
+        };
+        let Some(before) = state.inputs() else {
+            panic!("a session with a dashboard has inputs");
+        };
+        assert_eq!(state.fresh(&before, 5), Fresh::Yes);
+        // a newer epoch's frame went first
+        assert_eq!(state.fresh(&before, 4), Fresh::No);
+        // a tree was opened while the frame was computed: the opening's
+        // refresh answers, or this newer epoch is computed again
+        state
+            .open
+            .insert("categories.tree".into(), BTreeSet::from(["outdoor".into()]));
+        assert_eq!(state.fresh(&before, 5), Fresh::No);
+        assert_eq!(state.fresh(&before, 6), Fresh::Again);
+        let Some(after) = state.inputs() else {
+            panic!("a session with a dashboard has inputs");
+        };
+        assert_eq!(state.fresh(&after, 5), Fresh::Yes);
+        // a sort counts too, and so does closing the dashboard
+        state
+            .sorts
+            .insert("by_region".into(), ("revenue".into(), true));
+        assert_eq!(state.fresh(&after, 5), Fresh::No);
+        state.sorts.clear();
+        state.dashboard = None;
+        assert_eq!(state.fresh(&after, 5), Fresh::No);
     }
 
     #[test]

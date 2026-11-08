@@ -285,6 +285,10 @@ pub struct Metric {
     /// across them: the denominator of a share of total.
     #[serde(default)]
     pub total: Total,
+    /// A window of its time field it is evaluated over, in place of the
+    /// selection on that field.
+    #[serde(default)]
+    pub time_window: Option<TimeWindow>,
     /// The metric's Ossie `ai_context`, as written.
     #[serde(default)]
     pub ai_context: Option<serde_json::Value>,
@@ -312,6 +316,33 @@ pub enum IgnoreSelection {
     None,
     Fields(Vec<FieldRef>),
     All,
+}
+
+/// A `time_window`: which window, on which time field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeWindow {
+    pub spec: WindowSpec,
+    pub field: FieldRef,
+}
+
+/// The span of a time window, ending where its end is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WindowSpec {
+    /// From the start of the period of this grain (year, quarter, month,
+    /// week) the end is in: year to date and the like.
+    ToDate(TimeGrain),
+    /// `n` periods of a grain back from the end: the last 12 months.
+    Last(u32, TimeGrain),
+}
+
+impl WindowSpec {
+    /// The grain its periods are counted in.
+    #[must_use]
+    pub fn grain(self) -> TimeGrain {
+        match self {
+            Self::ToDate(grain) | Self::Last(_, grain) => grain,
+        }
+    }
 }
 
 /// The dimensions a `total` metric leaves out of its grouping.

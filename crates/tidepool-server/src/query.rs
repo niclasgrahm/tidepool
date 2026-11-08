@@ -328,6 +328,7 @@ pub(crate) fn resolve(model: &Model, request: &QueryRequest, now: i64) -> Result
         selection,
         order,
         limit: request.limit,
+        now: Some(now),
     })
 }
 

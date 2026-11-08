@@ -130,9 +130,29 @@ pub enum MetricKind {
         /// A `total`: the query's dimensions it is computed without
         /// (`table.field`), its value repeated across them.
         total: Ignore,
+        /// A `time_window`, in place of the selection on its column.
+        window: Option<Windowed>,
     },
     /// `sql` combines other metrics, written `{name}`.
     Derived { inputs: Vec<String>, sql: String },
+}
+
+/// A `time_window` on `table.column`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Windowed {
+    pub table: String,
+    pub column: String,
+    pub span: Span,
+}
+
+/// A window's span, in DuckDB's units (`year`, `quarter`, `month`,
+/// `week`, `day`, `hour`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Span {
+    /// From the start of the period of this unit the end is in.
+    ToDate(&'static str),
+    /// This many units back from the end.
+    Last(i64, &'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,6 +295,7 @@ fn base(
             ignore,
             shift: None,
             total: Ignore::None,
+            window: None,
         },
     }
 }
@@ -803,6 +824,51 @@ pub fn schema(rng: &mut Rng) -> Schema {
             ]);
             base("f0_latest", model, sql, "f0", None, Ignore::None)
         },
+        {
+            // over a window of a time field, in place of its selection;
+            // sometimes on a column a time_offset moves too
+            let (text, span) = *rng.pick(&[
+                ("ytd", Span::ToDate("year")),
+                ("qtd", Span::ToDate("quarter")),
+                ("mtd", Span::ToDate("month")),
+                ("wtd", Span::ToDate("week")),
+                ("last:7d", Span::Last(7, "day")),
+                ("last:2w", Span::Last(2, "week")),
+                ("last:1mo", Span::Last(1, "month")),
+            ]);
+            let column = *rng.pick(&["day", "seen_at"]);
+            let shifted = rng.chance(30);
+            let mut metric = base(
+                "f0_window",
+                "SUM(f0.amount)",
+                "SUM(f0.amount)",
+                "f0",
+                Some(if shifted {
+                    format!(
+                        r#"{{"time_window": "{text}", "time_offset": "-1m", "time_field": "f0.{column}"}}"#
+                    )
+                } else {
+                    format!(r#"{{"time_window": "{text}", "time_field": "f0.{column}"}}"#)
+                }),
+                Ignore::None,
+            );
+            if let MetricKind::Base { window, shift, .. } = &mut metric.kind {
+                *window = Some(Windowed {
+                    table: "f0".into(),
+                    column: column.into(),
+                    span,
+                });
+                if shifted {
+                    *shift = Some(Shifted {
+                        table: "f0".into(),
+                        column: column.into(),
+                        interval: "1 MONTH".into(),
+                        date: column == "day",
+                    });
+                }
+            }
+            metric
+        },
         derived(
             "f0_share",
             &["f0_amount", "f0_amount_total"],
@@ -1268,6 +1334,9 @@ pub struct Query {
     pub dims: Vec<(String, String, Option<&'static str>, Option<u32>)>,
     /// `table.column` → condition.
     pub selection: Vec<(String, String, Cond)>,
+    /// Now, in UTC microseconds (whole seconds): where windows end when
+    /// nothing on their field is selected.
+    pub now: i64,
 }
 
 /// A selection condition, values as JSON (as in the data).
@@ -1328,6 +1397,13 @@ fn metrics(rng: &mut Rng, schema: &Schema) -> (Vec<String>, Vec<String>, bool) {
             metrics.push(name);
         }
     }
+    // windows are few among many metrics: asked for more often
+    if rng.chance(25)
+        && names.iter().any(|n| n == "f0_window")
+        && !metrics.iter().any(|n| n == "f0_window")
+    {
+        metrics.push("f0_window".into());
+    }
     if rng.chance(15) {
         return (
             Vec::new(),
@@ -1341,6 +1417,7 @@ fn metrics(rng: &mut Rng, schema: &Schema) -> (Vec<String>, Vec<String>, bool) {
 
 /// A random query over `schema`, with selection values taken from `data`.
 #[must_use]
+#[allow(clippy::too_many_lines)] // the parts of a query, in order
 pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
     let (metrics, anchors, only_dims) = metrics(rng, schema);
     // tables every anchor reaches
@@ -1409,11 +1486,65 @@ pub fn query(rng: &mut Rng, schema: &Schema, data: &Data) -> Query {
     if let Some(subtrees) = subtrees(rng, schema, data) {
         selection.push(subtrees);
     }
+    // a window is about its time field: often group by it, often select
+    // a range of it (whose end is the window's)
+    let windowed = windows(schema, &metrics);
+    for (table, column) in &windowed {
+        if common.contains(table)
+            && rng.chance(50)
+            && !dims.iter().any(|(t, f, ..)| t == table && f == column)
+        {
+            dims.push((table.clone(), column.clone(), None, None));
+        }
+        if rng.chance(50) && !selection.iter().any(|(t, c, _)| t == table && c == column) {
+            let rows = data.tables.get(table).cloned().unwrap_or_default();
+            let values: Vec<Json> = rows
+                .iter()
+                .filter_map(|r| r.get(column).cloned())
+                .filter(|v| !v.is_null())
+                .collect();
+            if let (Some(def), false) = (
+                schema.table(table).and_then(|t| t.column(column)).cloned(),
+                values.is_empty(),
+            ) {
+                selection.push((table.clone(), column.clone(), condition(rng, &def, &values)));
+            }
+        }
+    }
+    // a window grouped by its time field needs a grain at most as fine as
+    // a day, or a row counts in too many groups
+    for (table, field, grain, _) in &mut dims {
+        if windowed.iter().any(|(t, c)| t == table && c == field)
+            && !matches!(*grain, Some("day" | "week" | "month" | "quarter" | "year"))
+        {
+            *grain = Some(*rng.pick(&["day", "week", "month"]));
+        }
+    }
+    let now = rng.range(20_290, 20_410) * 86_400_000_000 + rng.range(0, 86_399) * 1_000_000;
     Query {
         metrics,
         dims,
         selection,
+        now,
     }
+}
+
+/// The (table, column)s the windows of `metrics` (and what they're
+/// derived from) are on.
+#[must_use]
+pub fn windows(schema: &Schema, metrics: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<String> = metrics.to_vec();
+    while let Some(name) = stack.pop() {
+        match schema.metric(&name).map(|m| &m.kind) {
+            Some(MetricKind::Base {
+                window: Some(w), ..
+            }) => out.push((w.table.clone(), w.column.clone())),
+            Some(MetricKind::Derived { inputs, .. }) => stack.extend(inputs.iter().cloned()),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A condition on `column`, its values taken from `values` (stored ones).

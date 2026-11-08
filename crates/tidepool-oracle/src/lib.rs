@@ -144,6 +144,7 @@ fn engine_query(model: &Model, schema: &Schema, query: &generate::Query) -> Resu
         selection,
         order: Vec::new(),
         limit: None,
+        now: Some(query.now),
     })
 }
 

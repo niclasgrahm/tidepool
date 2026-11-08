@@ -330,7 +330,7 @@ pub(crate) const SEMANTICS: [&str; 6] = [
      does.",
     "A query without dimensions answers one row; groups are the combinations of dimension \
      values that have rows.",
-    "Metrics with Tidepool settings (ignore_selection, time_offset, total) mean something their plain \
+    "Metrics with Tidepool settings (ignore_selection, time_offset, total, time_window) mean something their plain \
      SQL expression doesn't: another tool reading the same Ossie file computes them without \
      the setting.",
 ];

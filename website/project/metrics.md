@@ -127,6 +127,40 @@ The selection still applies: a share of what is selected. To get a share of
 everything, also ignore the selection (`"ignore_selection": ["*"]`). A total
 goes on a base metric, not on a derived one.
 
+## a window of time
+
+`time_window` calculates a metric over a window of its time field, in place
+of the selection on that field: year to date, the last 7 days.
+
+```yaml
+# fragment
+  - name: revenue_ytd
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"time_window": "ytd", "time_field": "orders.ordered_at"}'
+```
+
+| window | from |
+| --- | --- |
+| `ytd`, `qtd`, `mtd`, `wtd` | the start of the year, quarter, month or week (Monday) that the end is in |
+| `last:<n><unit>` | `n` units before the end. The units are `min`, `h`, `d`, `w`, `mo`, `q` and `y`: `last:12mo`. |
+
+Where the window ends:
+
+- In a KPI or another visual that does not group by the time field: where
+  the selection on the time field ends. Without a selection: at the end of
+  the current period, so `ytd` is this year and `last:7d` is today and the
+  six days before it.
+- In a visual that groups by the time field at a grain: at the end of each
+  group. By month, `ytd` is a running year to date and `last:12mo` a rolling
+  12 months. A selection of March to June still counts January in March's
+  year to date.
+
+The other selections apply as usual. A window and `time_offset` go
+together: `"time_window": "ytd", "time_offset": "-1y"` is last year's year
+to date. Times are in UTC.
+
 ## compare with a period before
 
 `time_offset` calculates a metric with its time field moved. `-1y` reads the
@@ -153,6 +187,7 @@ The units are `d`, `w`, `m`, `q` and `y`.
 | `"ignore_selection": [...]` | calculates as if these fields (or `"*"`) had no selection |
 | `"total": [...]` | calculates without these dimensions of the visual (or `"*"`), the same value in each of their groups |
 | `"time_offset": "-1y"`, `"time_field": "orders.ordered_at"` | calculates with the time field moved |
+| `"time_window": "ytd"`, `"time_field": "orders.ordered_at"` | calculates over a window of the time field, in place of its selection |
 | `"format": "currency:EUR"` | how the value shows: `int`, `decimal`, `percent` or `currency:XXX`, with `compact` and `decimals:N`. A visual can change it. See [number formats](/project/dashboards#number-formats). |
 
 The [extensions reference](/reference/config/extensions#metrics) has the
