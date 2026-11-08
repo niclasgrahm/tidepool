@@ -150,6 +150,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::StartSession => route_of(method, auth::start_session),
         Operation::GetSession => route_of(method, auth::session),
         Operation::EndSession => route_of(method, auth::end_session),
+        Operation::StartEmbed => route_of(method, auth::start_embed),
         Operation::Mcp => route_of(method, mcp::mcp),
     }
 }

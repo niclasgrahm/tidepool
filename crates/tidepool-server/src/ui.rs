@@ -166,6 +166,20 @@ fn file(key: &str, bytes: Cow<'static, [u8]>) -> Response {
         HeaderValue::from_static(content_type(key)),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    // the pages may only be framed by the server's own: clickjacking is
+    // a click on someone's dashboard, under someone else's page
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'self'"),
+    );
+    // the hashed files are the same for everyone, and a view shown inside
+    // an AI app loads them from a page of another origin (an MCP App)
+    if key.starts_with("assets/") {
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+    }
     response
 }
 

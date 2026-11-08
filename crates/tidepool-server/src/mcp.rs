@@ -37,7 +37,8 @@ const INSTRUCTIONS: &str = "Tidepool is a live analytics server: tables of data,
 model (datasets, relationships, metrics) and dashboards. Start with describe_model to see \
 what exists, query_metrics to compute metrics grouped by fields under filters, \
 read_rows for the newest rows that pass filters (a `contains` filter searches text, as in \
-logs), and preview_table to look at rows. To change the model, get_config for the files and their \
+logs), and preview_table to look at rows. show_view shows an answer as a live view (drawn in \
+the conversation where the host shows MCP Apps); save_view keeps it as a dashboard. To change the model, get_config for the files and their \
 version, plan_change to see what an edit does, then apply_change: safe changes apply at \
 once, others wait for a person's approval.";
 
@@ -169,8 +170,9 @@ pub fn tools() -> Value {
                             (`id`, `type`, `dimensions`, `metrics`, …; see visual_types in \
                             describe_model; `at` is optional), filters as in one. The answer \
                             has the view's id, its path in the UI (`/#/v/<id>`), and each \
-                            visual's numbers as of now. The view is forgotten after a day \
-                            unused; save_view keeps it.",
+                            visual's numbers as of now. Hosts that show MCP Apps draw it \
+                            live in the conversation (ui://tidepool/view). The view is \
+                            forgotten after a day unused; save_view keeps it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -181,6 +183,7 @@ pub fn tools() -> Value {
                 "required": ["visuals"],
             },
             "annotations": { "readOnlyHint": true },
+            "_meta": { "ui": { "resourceUri": crate::apps::VIEW_URI } },
         },
         {
             "name": "save_view",
@@ -299,7 +302,9 @@ fn result(id: &Value, result: Value) -> Value {
 }
 
 /// A tool's answer: the JSON as text, and as structured content.
-fn answer(value: Value, is_error: bool) -> Value {
+fn answer(mut value: Value, is_error: bool) -> Value {
+    // what only the app showing the answer gets, not the model
+    let meta = value.as_object_mut().and_then(|o| o.remove("_meta"));
     let text = serde_json::to_string_pretty(&value).unwrap_or_default();
     let mut out = json!({
         "content": [{ "type": "text", "text": text }],
@@ -308,6 +313,9 @@ fn answer(value: Value, is_error: bool) -> Value {
     if value.is_object() {
         out["structuredContent"] = value;
     }
+    if let Some(meta) = meta {
+        out["_meta"] = meta;
+    }
     out
 }
 
@@ -315,6 +323,9 @@ fn answer(value: Value, is_error: bool) -> Value {
 /// which every call it makes goes through too.
 struct Asker<'a> {
     headers: &'a HeaderMap,
+    /// A `?token=` the request came with, for clients that can't set
+    /// headers: passed on as the bearer token.
+    token: Option<String>,
     listener: Listener,
 }
 
@@ -331,6 +342,11 @@ async fn api(
         if let Some(value) = caller.headers.get(&name) {
             request = request.header(name, value);
         }
+    }
+    if !caller.headers.contains_key(header::AUTHORIZATION)
+        && let Some(token) = &caller.token
+    {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
     if body.is_some() {
         request = request.header(header::CONTENT_TYPE, "application/json");
@@ -550,11 +566,22 @@ async fn show_view(
             answers.insert(visual.id.clone(), answer);
         }
     }
+    // for an MCP App to show it live: a token for this view alone
+    let body = json!({ "views": [id] });
+    let (status, embed) = api(state, caller, Method::POST, "/v1/auth/embed", Some(&body)).await;
+    let origin = crate::apps::origin(state, caller.headers);
     Ok(json!({
         "view": id,
         "path": format!("/#/v/{id}"),
         "dashboard": made["dashboard"],
         "answers": answers,
+        "_meta": {
+            "tidepool": {
+                "view": id,
+                "origin": origin,
+                "token": status.is_success().then(|| embed["token"].clone()),
+            }
+        },
     }))
 }
 
@@ -626,16 +653,21 @@ const SCHEMA_URI: &str = "tidepool://schemas/";
 /// The resources, as `resources/list` describes them: the JSON Schema of
 /// every kind of config file, for agents writing one.
 fn resources() -> Vec<Value> {
-    tidepool_config::schema::KINDS
-        .iter()
-        .map(|kind| {
+    let app = json!({
+        "uri": crate::apps::VIEW_URI,
+        "name": "Live view",
+        "description": "A view from show_view, drawn live: an MCP App.",
+        "mimeType": crate::apps::MIME,
+    });
+    std::iter::once(app)
+        .chain(tidepool_config::schema::KINDS.iter().map(|kind| {
             json!({
                 "uri": format!("{SCHEMA_URI}{kind}"),
                 "name": format!("{kind} schema"),
                 "description": format!("The JSON Schema of a `{kind}` config file or setting."),
                 "mimeType": "application/schema+json",
             })
-        })
+        }))
         .collect()
 }
 
@@ -645,6 +677,15 @@ async fn read_resource(
     caller: &Asker<'_>,
     uri: &str,
 ) -> Result<Vec<Value>, String> {
+    if uri == crate::apps::VIEW_URI {
+        let origin = crate::apps::origin(state, caller.headers);
+        return Ok(vec![json!({
+            "uri": uri,
+            "mimeType": crate::apps::MIME,
+            "text": crate::apps::view_html(state, &origin),
+            "_meta": crate::apps::view_meta(&origin),
+        })]);
+    }
     let Some(kind) = uri.strip_prefix(SCHEMA_URI) else {
         return Err(format!("no resource `{uri}`"));
     };
@@ -736,11 +777,18 @@ async fn handle(state: &Arc<AppState>, caller: &Asker<'_>, message: &Value) -> O
 pub async fn mcp(
     State(state): State<Arc<AppState>>,
     Extension(listener): Extension<Listener>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let token = uri.query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .map(str::to_string)
+    });
     let asker = Asker {
         headers: &headers,
+        token,
         listener,
     };
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {

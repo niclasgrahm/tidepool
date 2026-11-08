@@ -94,6 +94,28 @@ data arrives, and filters it when a person clicks. Open it at
 `/#/v/<id>` on the server. If the person wants to keep it, `save_view`
 makes it a dashboard. See [the live protocol](/data/live#views).
 
+### in the conversation
+
+AI apps that show MCP Apps (Claude, ChatGPT, VS Code and others) show the
+view in the conversation, live: `show_view` names the app
+`ui://tidepool/view`. The app is the web UI of tidepool. It loads from the
+server and connects to it with a token for that view only (see
+[embedded views](/operating/access#embedded-views)). Each selection that the
+person makes goes to the model of the AI app, in words and as data. If the
+AI app does not allow WebAssembly, the app shows the numbers of the view as
+tables.
+
+The AI app must reach the server at the address in the `public_url` setting
+of `tidepool.yaml`. Without it, tidepool uses the address of the MCP
+request.
+
+```yaml
+# fragment
+public_url: https://tidepool.example.com
+```
+
+A change to `public_url` is a `security` change: a person approves it.
+
 ## a good loop
 
 1. `describe_model` and `get_config`.

@@ -623,3 +623,111 @@ async fn an_agent_shows_a_live_view_and_saves_it_as_a_dashboard() {
         "{model}"
     );
 }
+
+#[tokio::test]
+async fn a_view_comes_with_an_app_to_show_it_live() {
+    let state = common::project_state_with(Tokens::default(), |files| {
+        if let Some(server) = files.get_mut("tidepool.yaml") {
+            server.push_str("public_url: https://tidepool.example.com/\n");
+        }
+    })
+    .await;
+    // the tool says which app shows its answer
+    let (_, listed) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    )
+    .await;
+    let show = listed["result"]["tools"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["name"] == "show_view"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(show["_meta"]["ui"]["resourceUri"], "ui://tidepool/view");
+    // the app: HTML for MCP Apps, loading from and connecting to the server
+    let (_, resources) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "resources/list"}),
+    )
+    .await;
+    assert!(
+        resources["result"]["resources"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|r| r["uri"] == "ui://tidepool/view"
+                && r["mimeType"] == "text/html;profile=mcp-app")),
+        "{resources}"
+    );
+    let (_, read) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+                "params": {"uri": "ui://tidepool/view"}}),
+    )
+    .await;
+    let app = &read["result"]["contents"][0];
+    assert_eq!(app["mimeType"], "text/html;profile=mcp-app");
+    let html = app["text"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("content=\"https://tidepool.example.com\"") && html.contains("ui/initialize"),
+        "{html}"
+    );
+    assert_eq!(
+        app["_meta"]["ui"]["csp"]["connectDomains"],
+        json!(["https://tidepool.example.com", "wss://tidepool.example.com"])
+    );
+    assert_eq!(
+        app["_meta"]["ui"]["csp"]["resourceDomains"],
+        json!(["https://tidepool.example.com"])
+    );
+    // the answer carries the view and a token for it, for the app alone
+    let (status, reply) = rpc(
+        &state,
+        None,
+        &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "show_view", "arguments": {"visuals": [
+            {"id": "total", "type": "kpi", "metrics": ["revenue"]}
+        ]}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result = &reply["result"];
+    let meta = &result["_meta"]["tidepool"];
+    assert_eq!(meta["view"], result["structuredContent"]["view"]);
+    assert_eq!(meta["origin"], "https://tidepool.example.com");
+    assert!(
+        meta["token"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("embed_")),
+        "{reply}"
+    );
+    assert!(result["structuredContent"].get("_meta").is_none());
+    assert!(
+        !result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("embed_"),
+        "the model doesn't see the token"
+    );
+}
+
+#[tokio::test]
+async fn a_token_in_the_mcp_address_is_the_tools_token_too() {
+    let state =
+        common::project_state_with(Tokens::levels(None, Some("read-secret"), None), |_| {}).await;
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "describe_model", "arguments": {}}});
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/mcp?token=read-secret",
+            &[("content-type", "application/json")],
+            body.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_ne!(reply.json()["result"]["isError"], true, "{}", reply.text());
+}

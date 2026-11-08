@@ -175,17 +175,26 @@ pub async fn call(state: Arc<AppState>, method: Method, path: &str) -> Reply {
 /// A server for the retail example's config files (not only its model), as
 /// `tidepool serve --config` runs it: what config changes and views need.
 pub async fn project_state() -> Arc<AppState> {
+    project_state_with(Tokens::default(), |_| {}).await
+}
+
+/// [`project_state`] with these tokens, its files edited first.
+pub async fn project_state_with(
+    tokens: Tokens,
+    edit: impl FnOnce(&mut tidepool_server::config::Files),
+) -> Arc<AppState> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/retail");
-    let files = match tidepool_server::config::read_dir(&dir) {
+    let mut files = match tidepool_server::config::read_dir(&dir) {
         Ok(files) => files,
         Err(err) => panic!("{err}"),
     };
+    edit(&mut files);
     let writer = WriterConfig {
         epoch_interval: std::time::Duration::from_millis(10),
         ..WriterConfig::default()
     };
     let project = tidepool_server::Project { dir: None, files };
-    match AppState::open(project, writer, None, Tokens::default(), false).await {
+    match AppState::open(project, writer, None, tokens, false).await {
         Ok(state) => {
             state.set_ready();
             Arc::new(state)

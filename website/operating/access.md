@@ -40,6 +40,24 @@ they need it.
 
 Sessions are in memory. A restart of the server ends them.
 
+A session cookie opens the live socket (`/v1/ws`) only from the pages of the
+server. A page of another site gets `403`, also when the browser sends the
+cookie. The pages of tidepool cannot be put in a frame on another site
+(`Content-Security-Policy: frame-ancestors 'self'`).
+
+## embedded views
+
+A view that an AI app shows (see [agents](/agents#show-an-answer)) connects
+with an embed token, not with the read token. `POST /v1/auth/embed` (read
+level) gives a token for the views that you name. The token:
+
+- opens the live socket (`/v1/ws?token=…`) and nothing else,
+- opens only its views there,
+- ends after one hour without use, or when the server stops.
+
+`show_view` gets one for its view, and gives it to the app only: the model
+does not see it.
+
 ## listeners
 
 The people who look at dashboards and the programs that write rows are

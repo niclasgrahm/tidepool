@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus, QueryRequest, QueryResult,
-    RowsRequest, ServerInfo, SessionInfo, StatusInfo, TableInfo, config,
+    EmbedRequest, EmbedToken, IngestError, IngestResponse, ModelInfo, Preview, ProbeStatus,
+    QueryRequest, QueryResult, RowsRequest, ServerInfo, SessionInfo, StatusInfo, TableInfo, config,
 };
 
 /// The error body every failing request comes back with.
@@ -107,11 +107,12 @@ pub enum Operation {
     StartSession,
     GetSession,
     EndSession,
+    StartEmbed,
     Mcp,
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 31] = [
+pub const OPERATIONS: [Operation; 32] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -142,6 +143,7 @@ pub const OPERATIONS: [Operation; 31] = [
     Operation::StartSession,
     Operation::GetSession,
     Operation::EndSession,
+    Operation::StartEmbed,
     Operation::Mcp,
 ];
 
@@ -180,6 +182,7 @@ impl Operation {
             Self::StartSession => "startSession",
             Self::GetSession => "getSession",
             Self::EndSession => "endSession",
+            Self::StartEmbed => "startEmbed",
             Self::Mcp => "mcp",
         }
     }
@@ -1081,6 +1084,37 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/v1/auth/embed",
+            method: Method::Post,
+            operation: Operation::StartEmbed,
+            summary: "A token for embedded views",
+            description: "A short-lived token that opens only the views named, over `/v1/ws` \
+                          (as `?token=`) and nowhere else: what a view shown inside another \
+                          app (an MCP App in Claude or ChatGPT) connects with, so the read \
+                          token never leaves the server. It ends after an hour unused, or \
+                          when the server stops.",
+            tag: Tag::Server,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "The views it may open.",
+                body: Body::Json("EmbedRequest"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The token.",
+                    body: Body::Json("EmbedToken"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "One of the views isn't there.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/v1/auth/session",
             method: Method::Post,
             operation: Operation::StartSession,
@@ -1349,6 +1383,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("PendingChange", of(schema_for!(config::PendingChange)));
     schemas.insert("SessionInfo", of(schema_for!(SessionInfo)));
     schemas.insert("ViewInfo", of(schema_for!(crate::live::ViewInfo)));
+    schemas.insert("EmbedRequest", of(schema_for!(EmbedRequest)));
+    schemas.insert("EmbedToken", of(schema_for!(EmbedToken)));
     schemas.insert("ViewProblems", of(schema_for!(crate::live::ViewProblems)));
     schemas
 }

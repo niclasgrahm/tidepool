@@ -350,6 +350,19 @@ Epoch, memory per table and for caches, live sessions, and the write-ahead log a
 | --- | --- | --- |
 | `200` | [`StatusInfo`](/reference/schemas#schema-statusinfo) | The status. |
 
+### `POST /v1/auth/embed` {#op-startembed}
+
+**A token for embedded views** · access: `read`
+
+A short-lived token that opens only the views named, over `/v1/ws` (as `?token=`) and nowhere else: what a view shown inside another app (an MCP App in Claude or ChatGPT) connects with, so the read token never leaves the server. It ends after an hour unused, or when the server stops.
+
+Request: [`EmbedRequest`](/reference/schemas#schema-embedrequest). The views it may open.
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`EmbedToken`](/reference/schemas#schema-embedtoken) | The token. |
+| `404` | [`ApiError`](/reference/schemas#schema-apierror) | One of the views isn't there. |
+
 ### `POST /v1/auth/session` {#op-startsession}
 
 **Start a browser session** · access: `public`

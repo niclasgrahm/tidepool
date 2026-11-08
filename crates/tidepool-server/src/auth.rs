@@ -20,10 +20,15 @@
 //! cookie it carries anyway. Sessions live in memory and end with the
 //! process, as Kayak's do: revoking one is removing it.
 //!
+//! A view shown inside another app (an MCP App) connects with an embed
+//! token (`POST /v1/auth/embed`): good on `/v1/ws` only, for the views it
+//! names ([`Scope`]), and gone after an hour unused, so the read token never
+//! leaves the server.
+//!
 //! Not here yet (after v0.1): Kayak's accounts with passwords, JWT from an
 //! identity provider, and the iframe handshake.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -36,8 +41,8 @@ use subtle::ConstantTimeEq;
 use tidepool_config::server::{
     AuthSettings, IngestCredential, IngestOperation, LEGACY_CREDENTIAL, Limits, Surface,
 };
-use tidepool_protocol::SessionInfo;
 use tidepool_protocol::api_docs::{Access, ApiError};
+use tidepool_protocol::{EmbedRequest, EmbedToken, SessionInfo};
 
 use crate::AppState;
 
@@ -462,16 +467,11 @@ impl Sessions {
 
     /// A new session good for `levels`; its id.
     fn start(&self, levels: Vec<Access>, caller: Option<Caller>) -> String {
-        let mut bytes = [0u8; 32];
         // a session id nobody can guess; an operating system without a
         // random source can't run a server that hands out sessions
-        if getrandom::fill(&mut bytes).is_err() {
+        let Some(id) = random_hex() else {
             return String::new();
-        }
-        let id = bytes.iter().fold(String::with_capacity(64), |mut id, b| {
-            let _ = std::fmt::Write::write_fmt(&mut id, format_args!("{b:02x}"));
-            id
-        });
+        };
         let mut open = self.lock();
         open.retain(|_, s| s.used.elapsed() < IDLE);
         open.insert(
@@ -501,6 +501,81 @@ impl Sessions {
 
     fn end(&self, id: &str) {
         self.lock().remove(id);
+    }
+}
+
+/// The views a connection may open, when it came with an embed token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Scope(pub Arc<HashSet<String>>);
+
+/// Put in a request authorized by a session cookie: a WebSocket must then
+/// come from this server's own pages (the cookie would ride along from any
+/// site's).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ByCookie;
+
+/// How long an embed token lasts without being used.
+const EMBED_IDLE: Duration = Duration::from_hours(1);
+
+/// Embed tokens at most; the least recently used goes first.
+const EMBEDS: usize = 10_000;
+
+struct Embed {
+    views: Arc<HashSet<String>>,
+    used: Instant,
+}
+
+/// Embed tokens, by their value.
+#[derive(Default)]
+pub struct Embeds {
+    open: Mutex<HashMap<String, Embed>>,
+}
+
+/// 32 random bytes as hex, or `None` without a random source.
+fn random_hex() -> Option<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(bytes.iter().fold(String::with_capacity(64), |mut id, b| {
+        let _ = std::fmt::Write::write_fmt(&mut id, format_args!("{b:02x}"));
+        id
+    }))
+}
+
+impl Embeds {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Embed>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn start(&self, views: HashSet<String>) -> Option<String> {
+        let token = format!("embed_{}", random_hex()?);
+        let mut open = self.lock();
+        open.retain(|_, e| e.used.elapsed() < EMBED_IDLE);
+        while open.len() >= EMBEDS {
+            let oldest = open
+                .iter()
+                .min_by_key(|(_, e)| e.used)
+                .map(|(t, _)| t.clone());
+            let Some(oldest) = oldest else { break };
+            open.remove(&oldest);
+        }
+        open.insert(
+            token.clone(),
+            Embed {
+                views: Arc::new(views),
+                used: Instant::now(),
+            },
+        );
+        Some(token)
+    }
+
+    /// The views a live token opens, refreshing its idle clock.
+    fn scope(&self, token: &str) -> Option<Scope> {
+        let mut open = self.lock();
+        let embed = open
+            .get_mut(token)
+            .filter(|e| e.used.elapsed() < EMBED_IDLE)?;
+        embed.used = Instant::now();
+        Some(Scope(Arc::clone(&embed.views)))
     }
 }
 
@@ -590,10 +665,20 @@ pub async fn authorize(
             None => unauthorized(true),
         };
     }
+    let presented = presented(&request);
+    // an embed token: the live socket, for its views, and nothing else
+    if let Some(scope) = presented.as_deref().and_then(|t| state.embeds.scope(t)) {
+        if access == Access::Read && request.uri().path() == "/v1/ws" {
+            request.extensions_mut().insert(scope);
+            return next.run(request).await;
+        }
+        if !tokens.open(access) {
+            return unauthorized(true);
+        }
+    }
     if tokens.open(access) {
         return next.run(request).await;
     }
-    let presented = presented(&request);
     let by_token = presented
         .as_deref()
         .is_some_and(|token| tokens.allows(token, access));
@@ -601,6 +686,9 @@ pub async fn authorize(
         && cookie(request.headers())
             .and_then(|id| state.sessions.levels(&id))
             .is_some_and(|levels| levels.contains(&access));
+    if by_session {
+        request.extensions_mut().insert(ByCookie);
+    }
     if by_token || by_session {
         return next.run(request).await;
     }
@@ -681,6 +769,27 @@ pub async fn start_session(State(state): State<Arc<AppState>>, headers: HeaderMa
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
+}
+
+/// `POST /v1/auth/embed`: a token for these views only.
+pub async fn start_embed(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EmbedRequest>,
+) -> Response {
+    if let Some(missing) = request.views.iter().find(|v| state.views.file(v).is_none()) {
+        return crate::handlers::api_error(StatusCode::NOT_FOUND, format!("no view `{missing}`"));
+    }
+    let Some(token) = state.embeds.start(request.views.into_iter().collect()) else {
+        return crate::handlers::api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no random source for a token",
+        );
+    };
+    Json(EmbedToken {
+        token,
+        idle_seconds: EMBED_IDLE.as_secs(),
+    })
+    .into_response()
 }
 
 /// `GET /v1/auth/session`: what this request may do.

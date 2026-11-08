@@ -48,6 +48,12 @@ pub struct ServerConfig {
     /// What agents may do over MCP.
     #[serde(default)]
     pub agents: Agents,
+    /// The address people reach the server at, such as
+    /// `https://tidepool.example.com`: where a view shown inside an AI app
+    /// (an MCP App) loads the UI from and connects to. When left out, the
+    /// address the MCP request came to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 impl ServerConfig {
@@ -430,6 +436,7 @@ impl Default for ServerConfig {
             config_writeback: Writeback::default(),
             auth: AuthSettings::default(),
             agents: Agents::default(),
+            public_url: None,
         }
     }
 }

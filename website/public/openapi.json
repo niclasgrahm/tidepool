@@ -409,6 +409,44 @@
         ],
         "type": "object"
       },
+      "EmbedRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/auth/embed`: the views a token may open.",
+        "properties": {
+          "views": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "views"
+        ],
+        "title": "EmbedRequest",
+        "type": "object"
+      },
+      "EmbedToken": {
+        "description": "A token for embedded views.",
+        "properties": {
+          "idle_seconds": {
+            "description": "How long it lasts unused.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "token": {
+            "description": "Send it as `?token=` on `/v1/ws`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "idle_seconds"
+        ],
+        "title": "EmbedToken",
+        "type": "object"
+      },
       "ExternalEdits": {
         "description": "Edits found in the config directory that the server hasn't applied.",
         "properties": {
@@ -2134,6 +2172,65 @@
           "server"
         ],
         "x-tidepool-access": "public"
+      }
+    },
+    "/v1/auth/embed": {
+      "post": {
+        "description": "A short-lived token that opens only the views named, over `/v1/ws` (as `?token=`) and nowhere else: what a view shown inside another app (an MCP App in Claude or ChatGPT) connects with, so the read token never leaves the server. It ends after an hour unused, or when the server stops.",
+        "operationId": "startEmbed",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbedRequest"
+              }
+            }
+          },
+          "description": "The views it may open.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbedToken"
+                }
+              }
+            },
+            "description": "The token."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "One of the views isn't there."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "A token for embedded views",
+        "tags": [
+          "server"
+        ],
+        "x-tidepool-access": "read"
       }
     },
     "/v1/auth/session": {
