@@ -215,6 +215,15 @@ The newest rows of a table that pass some filters (`POST /v1/rows`).
 | `limit` | integer |  | How many rows, newest first: 100 when not given, 1000 at most. |
 
 
+## `SelectionChange` {#schema-selectionchange}
+
+A session's new selection, whole: one condition per field, as a query's filters are written. One step in its history, so Back undoes it.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `fields` | list of [`QueryFilter`](#schema-queryfilter) | **required** |  |
+
+
 ## `ServerInfo` {#schema-serverinfo}
 
 What `GET /v1/info` answers: which server this is.
@@ -237,6 +246,19 @@ What a request may do: `GET`/`POST /v1/auth/session`. A level that needs no toke
 | `admin` | boolean | **required** |  |
 | `ingest` | boolean | **required** |  |
 | `read` | boolean | **required** |  |
+
+
+## `SessionSelection` {#schema-sessionselection}
+
+A live session's selection (`GET` and `PUT /v1/sessions/{id}/selection`).
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `can_back` | boolean | **required** |  |
+| `can_forward` | boolean | **required** |  |
+| `dashboard` | string |  | The dashboard or view it shows, if any. |
+| `fields` | list of [`SelectedField`](#schema-selectedfield) | **required** |  |
+| `session` | string | **required** |  |
 
 
 ## `StatusInfo` {#schema-statusinfo}
@@ -475,6 +497,20 @@ A result column to sort by, by its name in [`QueryResult::columns`].
 | `name` | string | **required** | `dataset.field` (with `:grain`) for dimensions, the metric's name for metrics. |
 | `role` | string | **required** | `dimension` or `metric`. |
 | `type` | string | **required** | `bool`, `int`, `float`, `decimal(s)`, `string`, `date`, `timestamp` or `timestamptz`. |
+
+
+## `SelectedField` {#schema-selectedfield}
+
+One field's selection.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `contains` | string |  | The text searched for. |
+| `field` | string | **required** |  |
+| `from` | any |  |  |
+| `relative` | [`RelativeWindow`](#schema-relativewindow) |  | A window relative to now; `from` and `to` are where it is now. |
+| `to` | any |  |  |
+| `values` | list of any |  | The values selected, for a value selection. |
 
 
 ## `DurabilityStatus` {#schema-durabilitystatus}

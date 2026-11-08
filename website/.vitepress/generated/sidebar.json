@@ -47,6 +47,14 @@
       "text": "save_view"
     },
     {
+      "link": "/reference/mcp#tool-get-selection",
+      "text": "get_selection"
+    },
+    {
+      "link": "/reference/mcp#tool-set-selection",
+      "text": "set_selection"
+    },
+    {
       "link": "/reference/mcp#tool-get-config",
       "text": "get_config"
     },

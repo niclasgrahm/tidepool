@@ -47,6 +47,15 @@ It keeps 1000 views at most.
 
 ## the selection
 
+`GET /v1/sessions/{id}/selection` gives the selection of a session, by the
+`session_id` of its `welcome`. `PUT` on the same path replaces it, with
+conditions written as the filters of a query. The session gets `selection`
+and a new frame at once. The change is one step in its history.
+
+A connection that closes can come back to its session for one hour: send
+`hello` with its `session_id`. The web UI does this when the connection
+drops.
+
 These messages change the selection. The server answers them at once, out of
 the epoch loop:
 

@@ -206,6 +206,39 @@ A view made with `POST /v1/views`: what it shows, and its dashboard file as YAML
 | `200` | [`ViewInfo`](/reference/schemas#schema-viewinfo) | The view. |
 | `404` | [`ApiError`](/reference/schemas#schema-apierror) | No such view, or it was forgotten. |
 
+### `GET /v1/sessions/{id}/selection` {#op-getselection}
+
+**A live session's selection** · access: `read`
+
+What a person looking at a dashboard or view has selected, by the session id `welcome` gave their connection (an MCP App tells the host's model the id with every selection): an agent reads what the person is looking at.
+
+| path parameter | description | example |
+| --- | --- | --- |
+| `id` | The session's id. | `s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20` |
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`SessionSelection`](/reference/schemas#schema-sessionselection) | The selection. |
+| `404` | [`ApiError`](/reference/schemas#schema-apierror) | No such session. |
+
+### `PUT /v1/sessions/{id}/selection` {#op-setselection}
+
+**Set a live session's selection** · access: `read`
+
+Replaces a session's selection, whole, with these conditions (written as a query's filters): an agent points the person at something. It is one step in the session's history, so Back undoes it, and the session's dashboard is refreshed at once.
+
+| path parameter | description | example |
+| --- | --- | --- |
+| `id` | The session's id. | `s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20` |
+
+Request: [`SelectionChange`](/reference/schemas#schema-selectionchange). The new selection.
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`SessionSelection`](/reference/schemas#schema-sessionselection) | The selection now. |
+| `400` | [`ApiError`](/reference/schemas#schema-apierror) | A field or value that isn't the model's. |
+| `404` | [`ApiError`](/reference/schemas#schema-apierror) | No such session. |
+
 ### `GET /v1/model` {#op-getmodel}
 
 **The semantic model** · access: `read`

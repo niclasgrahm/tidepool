@@ -123,6 +123,8 @@ async fn the_handshake_lists_the_tools() {
             "read_rows",
             "show_view",
             "save_view",
+            "get_selection",
+            "set_selection",
             "get_config",
             "plan_change",
             "apply_change",

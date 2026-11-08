@@ -191,7 +191,7 @@ pub(crate) fn window_condition(
         .map_err(|e| format!("`{name}` ({}): {e}", ty.a()))
 }
 
-fn condition(filter: &QueryFilter, ty: Type, now: i64) -> Result<Condition, String> {
+pub(crate) fn condition(filter: &QueryFilter, ty: Type, now: i64) -> Result<Condition, String> {
     let convert = |v: &Json_| {
         scalar(v, ty)
             .ok_or_else(|| format!("`{v}` isn't a value of `{}` ({})", filter.field, ty.a()))

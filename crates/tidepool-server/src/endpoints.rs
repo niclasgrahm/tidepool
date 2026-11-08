@@ -136,6 +136,8 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::Live => route_of(method, live::socket),
         Operation::CreateView => route_of(method, views::create_view),
         Operation::GetView => route_of(method, views::get_view),
+        Operation::GetSelection => route_of(method, live::get_selection),
+        Operation::SetSelection => route_of(method, live::set_selection),
         Operation::GetModel => route_of(method, model::model),
         Operation::GetStatus => route_of(method, model::status),
         Operation::GetConfig => route_of(method, config::get_config),

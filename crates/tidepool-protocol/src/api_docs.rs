@@ -93,6 +93,8 @@ pub enum Operation {
     Live,
     CreateView,
     GetView,
+    GetSelection,
+    SetSelection,
     GetModel,
     GetStatus,
     GetConfig,
@@ -112,7 +114,7 @@ pub enum Operation {
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 32] = [
+pub const OPERATIONS: [Operation; 34] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -129,6 +131,8 @@ pub const OPERATIONS: [Operation; 32] = [
     Operation::Live,
     Operation::CreateView,
     Operation::GetView,
+    Operation::GetSelection,
+    Operation::SetSelection,
     Operation::GetModel,
     Operation::GetStatus,
     Operation::GetConfig,
@@ -168,6 +172,8 @@ impl Operation {
             Self::Live => "live",
             Self::CreateView => "createView",
             Self::GetView => "getView",
+            Self::GetSelection => "getSelection",
+            Self::SetSelection => "setSelection",
             Self::GetModel => "getModel",
             Self::GetStatus => "getStatus",
             Self::GetConfig => "getConfig",
@@ -835,6 +841,76 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/v1/sessions/{id}/selection",
+            method: Method::Get,
+            operation: Operation::GetSelection,
+            summary: "A live session's selection",
+            description: "What a person looking at a dashboard or view has selected, by the \
+                          session id `welcome` gave their connection (an MCP App tells the \
+                          host's model the id with every selection): an agent reads what the \
+                          person is looking at.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "id",
+                description: "The session's id.",
+                example: "s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The selection.",
+                    body: Body::Json("SessionSelection"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such session.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/sessions/{id}/selection",
+            method: Method::Put,
+            operation: Operation::SetSelection,
+            summary: "Set a live session's selection",
+            description: "Replaces a session's selection, whole, with these conditions \
+                          (written as a query's filters): an agent points the person at \
+                          something. It is one step in the session's history, so Back \
+                          undoes it, and the session's dashboard is refreshed at once.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "id",
+                description: "The session's id.",
+                example: "s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            }],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "The new selection.",
+                body: Body::Json("SelectionChange"),
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The selection now.",
+                    body: Body::Json("SessionSelection"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "A field or value that isn't the model's.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such session.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/v1/model",
             method: Method::Get,
             operation: Operation::GetModel,
@@ -1383,6 +1459,14 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("PendingChange", of(schema_for!(config::PendingChange)));
     schemas.insert("SessionInfo", of(schema_for!(SessionInfo)));
     schemas.insert("ViewInfo", of(schema_for!(crate::live::ViewInfo)));
+    schemas.insert(
+        "SessionSelection",
+        of(schema_for!(crate::live::SessionSelection)),
+    );
+    schemas.insert(
+        "SelectionChange",
+        of(schema_for!(crate::live::SelectionChange)),
+    );
     schemas.insert("EmbedRequest", of(schema_for!(EmbedRequest)));
     schemas.insert("EmbedToken", of(schema_for!(EmbedToken)));
     schemas.insert("ViewProblems", of(schema_for!(crate::live::ViewProblems)));

@@ -1551,6 +1551,18 @@ async fn an_embed_token_opens_its_views_and_nothing_else() {
     // and a token is for views there are
     let (status, _) = embed_token(&state, &json!(["~nope"])).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // nor a session's selection: the token is for its views' pictures
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::GET,
+            &format!("/v1/sessions/{session}/selection?token={token}"),
+            &[],
+            "",
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
     // a made-up token is no token
     let attempt = tokio_tungstenite::connect_async(format!("{url}?token=embed_nope")).await;
     assert!(attempt.is_err(), "a made-up token opened the socket");
@@ -1610,4 +1622,142 @@ async fn a_session_cookie_opens_the_socket_from_this_servers_pages_only() {
             other.map(|_| ())
         ),
     }
+}
+
+async fn put(state: &Arc<AppState>, path: &str, body: &Value) -> (StatusCode, Value) {
+    let reply = send(
+        Arc::clone(state),
+        request(
+            Method::PUT,
+            path,
+            &[("content-type", "application/json")],
+            body.to_string(),
+        ),
+    )
+    .await;
+    (reply.status, reply.json())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one story: read, set, back, windows, mistakes, MCP
+async fn an_agent_reads_and_sets_what_a_person_has_selected() {
+    let (state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let welcome = next(&mut socket, "welcome").await;
+    let session = welcome["session_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let _ = next(&mut socket, "frame").await;
+    let path = format!("/v1/sessions/{session}/selection");
+
+    // the person selects; the agent reads it
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "customers.region", "values": ["south"]}),
+    )
+    .await;
+    let _ = next(&mut socket, "selection").await;
+    let (status, read) = get(&state, &path).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["dashboard"], "sales");
+    assert_eq!(
+        read["fields"],
+        json!([{"field": "customers.region", "values": ["south"]}])
+    );
+    assert_eq!(read["can_back"], true);
+
+    // the agent points the person at north: the dashboard follows at once
+    let (status, set) = put(
+        &state,
+        &path,
+        &json!({"fields": [{"field": "customers.region", "in": ["north"]}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["fields"][0]["values"], json!(["north"]));
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"][0]["values"], json!(["north"]));
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(rows(&frame, "by_region"), json!([["north", "10.00"]]));
+    // one step of the history: Back goes to the person's south
+    say(&mut socket, json!({"type": "back"})).await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"][0]["values"], json!(["south"]));
+
+    // a window relative to now stays one
+    let (status, set) = put(
+        &state,
+        &path,
+        &json!({"fields": [{"field": "orders.ordered_at", "relative": {"unit": "day", "last": 7}}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["fields"][0]["relative"]["last"], 7);
+    // mistakes are the model's words, and nothing changes
+    let (status, refused) = put(
+        &state,
+        &path,
+        &json!({"fields": [{"field": "customers.regoin", "in": ["north"]}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("region")),
+        "{refused}"
+    );
+    let (status, _) = get(&state, "/v1/sessions/snope/selection").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // the same over MCP
+    let call = |name: &str, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}})
+    };
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/mcp",
+            &[("content-type", "application/json")],
+            call(
+                "set_selection",
+                json!({"session": session, "fields": [
+                    {"field": "customers.region", "in": ["south"]}
+                ]}),
+            )
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        reply.json()["result"]["structuredContent"]["fields"][0]["values"],
+        json!(["south"]),
+        "{}",
+        reply.text()
+    );
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/mcp",
+            &[("content-type", "application/json")],
+            call("get_selection", json!({"session": session})).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        reply.json()["result"]["structuredContent"]["dashboard"],
+        "sales",
+        "{}",
+        reply.text()
+    );
 }
