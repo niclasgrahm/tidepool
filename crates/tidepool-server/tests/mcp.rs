@@ -216,7 +216,10 @@ async fn describe_model_says_what_an_agent_needs_to_ask_well() {
         .as_array()
         .map(|t| t.iter().filter_map(|t| t["type"].as_str()).collect())
         .unwrap_or_default();
-    assert_eq!(types, ["kpi", "bar", "line", "table", "filter", "rows"]);
+    assert_eq!(
+        types,
+        ["kpi", "bar", "line", "table", "pie", "filter", "rows"]
+    );
     assert!(model["visual_types"].as_array().is_some_and(|t| {
         t.iter()
             .all(|t| t["shape"].as_str().is_some_and(|s| !s.is_empty()))

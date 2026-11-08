@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::charts::{
-    BarLayout, Data, LineLayout, Rect, TWEEN_MS, area_path, ease, line_path, step_key,
+    BarLayout, Data, LineLayout, PieLayout, Rect, TWEEN_MS, area_path, ease, line_path, step_key,
 };
 
 /// The charts' text, as `style.css` sets it on `.plot`.
@@ -93,6 +93,15 @@ trait Blend: Clone + PartialEq + Send + Sync + 'static {
 impl Blend for BarLayout {
     fn blend(&self, to: &Self, t: f64) -> Self {
         BarLayout::blend(self, to, t)
+    }
+    fn size(&self) -> (f64, f64) {
+        (self.width, self.height)
+    }
+}
+
+impl Blend for PieLayout {
+    fn blend(&self, to: &Self, t: f64) -> Self {
+        PieLayout::blend(self, to, t)
     }
     fn size(&self) -> (f64, f64) {
         (self.width, self.height)
@@ -416,6 +425,141 @@ pub fn BarChart(
                     {interactive.then(|| view! { <g class="a11y">{options}</g> })}
                 </svg>
                 {move || tip(data, if press.get().is_some() { None } else { pointed() }, shown.with(|l| l.width))}
+            </div>
+        </div>
+    }
+}
+
+/// A pie (a ring) of one metric by one dimension.
+///
+/// - `selected` are the categories (as shown) the selection holds: their
+///   slices are edged in the selection colour, the others dimmed.
+/// - `whole` is the metric over everything, when the rest of it can be a
+///   slice (a sum or a count).
+/// - `on_select` makes it selectable: a click on a slice, or Enter on the
+///   keyboard's place, gives the category and whether Ctrl/Cmd was held.
+#[allow(clippy::too_many_lines)] // one chart: its state, its handlers, its drawing
+#[component]
+pub fn PieChart(
+    #[prop(into)] data: Memo<Data>,
+    #[prop(into, optional)] selected: Signal<Vec<String>>,
+    #[prop(into, optional)] whole: Signal<Option<f64>>,
+    #[prop(into, optional_no_strip)] on_select: Option<Callback<(Vec<usize>, bool)>>,
+    #[prop(into, optional)] label: String,
+) -> impl IntoView {
+    let node = NodeRef::<Div>::new();
+    let size = observe_size(node);
+    let target = Memo::new(move |_| {
+        let (w, h) = size.get();
+        if w <= 0.0 || h <= 0.0 {
+            return PieLayout::default();
+        }
+        data.with(|d| selected.with(|s| PieLayout::new(d, (w, h), s, whole.get(), &measure)))
+    });
+    let shown = tween(target);
+    let hover = RwSignal::new(None::<(usize, (f64, f64))>);
+    let active = RwSignal::new(None::<usize>);
+    let interactive = on_select.is_some();
+    let id = unique("slices");
+    let select = move |categories: Vec<usize>, add: bool| {
+        if let Some(on_select) = on_select {
+            on_select.run((categories, add));
+        }
+    };
+    let click = move |ev: web_sys::MouseEvent| {
+        if !interactive {
+            return;
+        }
+        let Some((x, y)) = local(node, &ev) else {
+            return;
+        };
+        if let Some(i) = target.with_untracked(|l| l.hit(x, y)) {
+            select(vec![i], additive(&ev));
+        }
+    };
+    let moved = move |ev: web_sys::PointerEvent| {
+        let Some((x, y)) = local(node, &ev) else {
+            return;
+        };
+        hover.set(target.with_untracked(|l| l.hit(x, y)).map(|i| (i, (x, y))));
+    };
+    let key = move |ev: web_sys::KeyboardEvent| {
+        let key = ev.key();
+        let n = data.with_untracked(Data::len);
+        match key.as_str() {
+            "Enter" | " " => {
+                if let Some(i) = active.get_untracked().filter(|&i| i < n) {
+                    ev.prevent_default();
+                    select(vec![i], ev.ctrl_key() || ev.meta_key());
+                }
+            }
+            "Escape" => active.set(None),
+            _ if navigation(&key) => {
+                ev.prevent_default();
+                active.set(step_key(&key, active.get_untracked().filter(|&i| i < n), n));
+            }
+            _ => {}
+        }
+    };
+    let pointed = move || match active.get() {
+        Some(i) => shown.with(|l| l.middle(i)).map(|at| (i, at)),
+        None => hover.get(),
+    };
+    let descendant = {
+        let id = id.clone();
+        move || active.get().map(|i| format!("{id}-{i}"))
+    };
+    let options = move || {
+        data.with(|d| {
+            selected.with(|s| {
+                (0..d.len())
+                    .map(|i| {
+                        view! {
+                            <g id=format!("{id}-{i}") role="option" aria-label=d.describe(i)
+                                aria-selected=s.contains(&d.keys[i]).to_string()></g>
+                        }
+                    })
+                    .collect_view()
+            })
+        })
+    };
+    view! {
+        <div class="plot-wrap">
+            <div class="plot-area" node_ref=node class:interactive=interactive
+                on:click=click on:pointermove=moved on:pointerleave=move |_| hover.set(None)>
+                <svg class="plot pie" class:has-selection=move || selected.with(|s| !s.is_empty())
+                    width=move || shown.with(|l| l.width) height=move || shown.with(|l| l.height)
+                    role=if interactive { "listbox" } else { "img" } aria-label=label
+                    aria-multiselectable=interactive.then_some("true")
+                    tabindex=interactive.then_some("0")
+                    aria-activedescendant=descendant
+                    on:keydown=key on:blur=move |_| active.set(None)>
+                    {move || shown.with(|l| {
+                        let on = pointed().map(|(i, _)| i);
+                        view! {
+                            <g class="slices">
+                                {l.slices.iter().map(|slice| view! {
+                                    <path class=format!("slice c{}", slice.colour)
+                                        class:selected=slice.selected
+                                        class:pointed=slice.category.is_some() && slice.category == on
+                                        d=l.path(slice) />
+                                }).collect_view()}
+                            </g>
+                            <g class="labels">
+                                {l.labels.iter().map(|t| view! {
+                                    <text x=t.x y=t.y + 4.0 text-anchor=t.anchor>{t.text.clone()}</text>
+                                }).collect_view()}
+                            </g>
+                            {(l.left_out > 0).then(|| view! {
+                                <text class="note" x=4.0 y=l.height - 4.0>
+                                    {format!("{} not shown: no value, or 0 or less", l.left_out)}
+                                </text>
+                            })}
+                        }
+                    })}
+                    {interactive.then(|| view! { <g class="a11y">{options}</g> })}
+                </svg>
+                {move || tip(data, pointed(), shown.with(|l| l.width))}
             </div>
         </div>
     }

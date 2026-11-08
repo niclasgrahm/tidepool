@@ -35,7 +35,7 @@ use crate::design::{
     size_of, title, type_label, visual_id,
 };
 use crate::layout::{cells, depth, free, moved, nudge, place, resized};
-use crate::plot::{BarChart, LineChart};
+use crate::plot::{BarChart, LineChart, PieChart};
 use crate::route::Route;
 
 /// The CSS gap between grid cells, in pixels (`.grid`).
@@ -904,6 +904,7 @@ fn why_not(t: VisualType) -> String {
         VisualType::Bar | VisualType::Line => "A chart shows metrics by one dimension",
         VisualType::Kpi => "A KPI shows metrics, without dimensions",
         VisualType::Rows => "Rows show fields of each row, without metrics or grains",
+        VisualType::Pie => "A pie shows one metric by one dimension",
     }
     .to_string()
 }
@@ -1170,6 +1171,7 @@ fn Preview(
         }
         match kind.get() {
             Some(VisualType::Bar) => view! { <div class="chart preview"><BarChart data=data /></div> }.into_any(),
+            Some(VisualType::Pie) => view! { <div class="chart preview"><PieChart data=data /></div> }.into_any(),
             Some(VisualType::Line) => view! { <div class="chart preview"><LineChart data=data grain=grain /></div> }.into_any(),
             Some(VisualType::Kpi) => view! {
                 <p class="kpi-value preview">{move || {

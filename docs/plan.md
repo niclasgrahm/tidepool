@@ -1285,6 +1285,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
   - bar (vertical/horizontal)
   - line/area with a time axis and grain; zoomed between grains (proposed, §5.8)
   - table (sortable, uses the server-side sort). Without metrics (2026-10-13): the distinct combinations of its dimensions, counted on one anchor (of the tables reaching every dimension, the one reaching fewest, ties by name); a group with no rows under the selection isn't one. Covered by the oracle (`SELECT DISTINCT` over the same anchor).
+  - pie (2026-11-08): one metric by one dimension, a ring of slices in a categorical palette (`--c0`…`--c7`, Radix step 9s without ruby, which means "selected"); its largest `limit` (8 unless set, 12 at most, by the metric descending unless sorted); for an additive metric (a plain `SUM` or `COUNT`, `Metric::additive`) the rest of its whole as a grey slice, the whole sent in the frame's `compare`. Values that can't be slices (NULL, 0 or less) are left out and counted under the ring. `PieLayout` (angles, label fitting, `hit` by angle and radius, blending by key) has plain tests; a click or Enter selects, selected slices edged in ruby and the rest dimmed
   - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
   - list box with selected/possible/excluded styling, search and a virtualized window

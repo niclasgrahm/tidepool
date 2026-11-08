@@ -123,6 +123,10 @@ pub enum VisualType {
     /// Rows of dimensions and metrics, sortable. Without metrics: the
     /// combinations of the dimensions there are.
     Table,
+    /// Slices of a whole: one dimension, one metric. The largest `limit`
+    /// slices (8 when not given, 12 at most); for a sum or a count, the
+    /// rest as one more slice. A click selects a slice.
+    Pie,
     /// The values of one dimension as a list on the grid. A click selects a
     /// value, as in a filter on the rail. It has no metrics.
     Filter,
@@ -134,11 +138,12 @@ pub enum VisualType {
 
 impl VisualType {
     /// Every type, in the order editors offer them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Kpi,
         Self::Bar,
         Self::Line,
         Self::Table,
+        Self::Pie,
         Self::Filter,
         Self::Rows,
     ];
@@ -151,6 +156,7 @@ impl VisualType {
             Self::Bar => "bar",
             Self::Line => "line",
             Self::Table => "table",
+            Self::Pie => "pie",
             Self::Filter => "filter",
             Self::Rows => "rows",
         }
@@ -170,6 +176,9 @@ impl VisualType {
             }
             Self::Table => {
                 "any dimensions and metrics, sortable; without metrics, the combinations of the dimensions there are"
+            }
+            Self::Pie => {
+                "exactly one dimension and one metric: the shares of a whole; the largest `limit` (8, 12 at most), the rest as one slice for a sum or count"
             }
             Self::Filter => {
                 "exactly one dimension and no metrics: its values as a list to select from"

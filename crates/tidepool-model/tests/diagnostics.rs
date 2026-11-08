@@ -455,6 +455,22 @@ case!(
     )]
 );
 case!(
+    pie_of_two_dimensions,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [products.category]\n    metrics: [revenue]\n    on_click: select\n",
+        "    dimensions: [products.category, customers.region]\n    metrics: [revenue]\n    on_click: select\n"
+    )]
+);
+case!(
+    pie_of_too_many_slices,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [products.category]\n    metrics: [revenue]\n    on_click: select\n",
+        "    dimensions: [products.category]\n    metrics: [revenue]\n    on_click: select\n    limit: 20\n"
+    )]
+);
+case!(
     total_of_an_unknown_field,
     [Replace(
         "model.ossie.yaml",

@@ -1030,3 +1030,31 @@ th.num button { text-align: right; }
   border-bottom: 1px solid var(--line);
   padding: 2px 10px 2px 0;
 }
+
+/* a categorical palette for slices: Radix step 9s; ruby, the selection's
+   colour, is left out, and the rest of a whole is grey */
+:root {
+  --c0: #12a594;
+  --c1: #0090ff;
+  --c2: #8e4ec6;
+  --c3: #ffc53d;
+  --c4: #30a46c;
+  --c5: #f76b15;
+  --c6: #00a2c7;
+  --c7: #d6409f;
+  --c8: var(--gray-8, #bbbbbb);
+}
+.plot .slice { stroke: var(--panel); stroke-width: 1.5; transition: opacity 120ms; }
+.plot .slice.c0 { fill: var(--c0); }
+.plot .slice.c1 { fill: var(--c1); }
+.plot .slice.c2 { fill: var(--c2); }
+.plot .slice.c3 { fill: var(--c3); }
+.plot .slice.c4 { fill: var(--c4); }
+.plot .slice.c5 { fill: var(--c5); }
+.plot .slice.c6 { fill: var(--c6); }
+.plot .slice.c7 { fill: var(--c7); }
+.plot .slice.c8 { fill: var(--c8); }
+.plot.pie.has-selection .slice:not(.selected) { opacity: 0.4; }
+.plot .slice.selected { stroke: var(--anemone); stroke-width: 2.5; }
+.plot .slice.pointed { opacity: 0.85; }
+.plot .note { fill: var(--ink-soft); font-size: 10px; }

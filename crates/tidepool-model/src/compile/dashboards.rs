@@ -260,6 +260,17 @@ fn visual(
         && reach_ok
         && sort_ok
         && formats_ok;
+    // a pie: its largest slices, unless it says otherwise
+    let pie = spec.visual_type == VisualType::Pie;
+    let sort = sort.or_else(|| {
+        pie.then(|| metric_ids.first().copied())
+            .flatten()
+            .map(|m| VisualSort {
+                key: SortKey::Metric(m),
+                desc: true,
+            })
+    });
+    let limit = spec.limit.or(pie.then_some(PIE_DEFAULT));
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -269,7 +280,7 @@ fn visual(
         metrics: metric_ids,
         compare,
         sort,
-        limit: spec.limit,
+        limit,
         on_click: spec.on_click.is_some(),
         on_brush: spec.on_brush.is_some(),
         formats,
@@ -425,19 +436,53 @@ fn visual_dimensions(
     (dimensions, index, ok)
 }
 
-/// Rules per visual type: how many dimensions, and which interactions.
-fn visual_shape(
-    cx: &mut Cx,
-    site: &Site,
-    spec: &VisualSpec,
-    semantic: &Semantic,
-    dimensions: &[Dimension],
-) -> bool {
-    let mut problems: Vec<(&str, &str)> = Vec::new();
+/// The most slices a pie shows, and how many when it doesn't say.
+pub(crate) const PIE_SLICES: u32 = 12;
+const PIE_DEFAULT: u32 = 8;
+
+/// Why a visual without metrics has nothing to show, and what to do.
+fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
+    let dims = spec.dimensions.len();
+    match spec.visual_type {
+        _ if !spec.metrics.is_empty() => None,
+        VisualType::Kpi => Some((
+            "a KPI shows metrics, and it has none",
+            "give it `metrics: [...]`",
+        )),
+        VisualType::Bar | VisualType::Line | VisualType::Pie => Some((
+            "a chart shows metrics, and it has none",
+            "give it `metrics: [...]`, or make it a `filter` or a `table` to list its dimension's values",
+        )),
+        VisualType::Table if dims == 0 => Some((
+            "it has no dimensions and no metrics, so there's nothing to show",
+            "give it `dimensions: [...]`, `metrics: [...]` or both",
+        )),
+        VisualType::Rows if dims == 0 => Some((
+            "a rows visual shows columns, and it has none",
+            "give it `dimensions: [...]`: the fields to show of each row",
+        )),
+        VisualType::Table | VisualType::Filter | VisualType::Rows => None,
+    }
+}
+
+/// How many dimensions and metrics each type takes, and its limit.
+fn counts(spec: &VisualSpec, problems: &mut Vec<(&str, &str)>) {
     let dims = spec.dimensions.len();
     match spec.visual_type {
         VisualType::Kpi if dims > 0 => {
             problems.push(("dimensions", "a KPI shows totals, so it has no dimensions"));
+        }
+        VisualType::Pie if dims != 1 || spec.metrics.len() > 1 => {
+            problems.push((
+                if dims == 1 { "metrics" } else { "dimensions" },
+                "a pie shows one metric by exactly one dimension",
+            ));
+        }
+        VisualType::Pie if spec.limit.is_some_and(|l| l > PIE_SLICES) => {
+            problems.push((
+                "limit",
+                "a pie reads up to 12 slices: show more as a bar chart",
+            ));
         }
         VisualType::Bar | VisualType::Line if dims != 1 => {
             problems.push((
@@ -453,6 +498,18 @@ fn visual_shape(
         }
         _ => {}
     }
+}
+
+/// Rules per visual type: how many dimensions, and which interactions.
+fn visual_shape(
+    cx: &mut Cx,
+    site: &Site,
+    spec: &VisualSpec,
+    semantic: &Semantic,
+    dimensions: &[Dimension],
+) -> bool {
+    let mut problems: Vec<(&str, &str)> = Vec::new();
+    counts(spec, &mut problems);
     let grained_rows =
         spec.visual_type == VisualType::Rows && !rows_shape(cx, site, spec, &mut problems);
     let grained = spec.visual_type == VisualType::Filter
@@ -474,8 +531,13 @@ fn visual_shape(
     if spec.compare.is_some() && spec.visual_type != VisualType::Kpi {
         problems.push(("compare", "only KPI tiles have a `compare`"));
     }
-    if spec.on_click.is_some() && !matches!(spec.visual_type, VisualType::Bar | VisualType::Table) {
-        problems.push(("on_click", "only bars and tables select on click"));
+    if spec.on_click.is_some()
+        && !matches!(
+            spec.visual_type,
+            VisualType::Bar | VisualType::Table | VisualType::Pie
+        )
+    {
+        problems.push(("on_click", "only bars, pies and tables select on click"));
     }
     // only checkable when the dimension resolved; otherwise that's the error
     if spec.on_brush.is_some() && dimensions.len() == spec.dimensions.len() {
@@ -495,26 +557,7 @@ fn visual_shape(
     }
     // without metrics, only a table (of its dimensions' values) and a
     // filter have anything to show: the type is what's wrong
-    let empty = match spec.visual_type {
-        _ if !spec.metrics.is_empty() => None,
-        VisualType::Kpi => Some((
-            "a KPI shows metrics, and it has none",
-            "give it `metrics: [...]`",
-        )),
-        VisualType::Bar | VisualType::Line => Some((
-            "a chart shows metrics, and it has none",
-            "give it `metrics: [...]`, or make it a `filter` or a `table` to list its dimension's values",
-        )),
-        VisualType::Table if dims == 0 => Some((
-            "it has no dimensions and no metrics, so there's nothing to show",
-            "give it `dimensions: [...]`, `metrics: [...]` or both",
-        )),
-        VisualType::Rows if dims == 0 => Some((
-            "a rows visual shows columns, and it has none",
-            "give it `dimensions: [...]`: the fields to show of each row",
-        )),
-        VisualType::Table | VisualType::Filter | VisualType::Rows => None,
-    };
+    let empty = nothing_to_show(spec);
     if let Some((message, help)) = empty {
         cx.push(
             Diagnostic::error(format!("{}: {message}", site.what))
