@@ -359,6 +359,9 @@ pub struct MetricInfo {
     pub anchor: Option<String>,
     /// Fields whose selection it ignores (`*` for all).
     pub ignores: Vec<String>,
+    /// The dimensions it is computed without (`*` for all): a total.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub totals: Vec<String>,
     /// E.g. `-1 year on orders.ordered_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_offset: Option<String>,

@@ -657,3 +657,41 @@ async fn rows_come_newest_first_under_their_filters() {
         assert!(reply.text().contains(says), "{}", reply.text());
     }
 }
+
+#[tokio::test]
+async fn a_share_of_the_total_repeats_the_total_across_the_groups() {
+    let state = loaded().await;
+    let query = |filters: Value| {
+        json!({"metrics": ["revenue", "revenue_total", "revenue_share"],
+               "dimensions": [{"field": "customers.region"}], "filters": filters})
+    };
+    let reply = post(&state, "/v1/query", &query(json!([]))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let rows = reply.json()["rows"].clone();
+    // every group sees the visual's whole revenue
+    assert_eq!(rows[0][2], "21.75", "{rows}");
+    assert_eq!(rows[1][2], "21.75", "{rows}");
+    let share = |row: usize| rows[row][3].as_f64().unwrap_or(f64::NAN);
+    assert!((share(0) - 14.5 / 21.75).abs() < 1e-9, "{rows}");
+    assert!((share(0) + share(1) - 1.0).abs() < 1e-9, "{rows}");
+    // the selection still applies: a share of what's selected
+    let reply = post(
+        &state,
+        "/v1/query",
+        &query(json!([{"field": "orders.status", "in": ["paid"]}])),
+    )
+    .await;
+    let rows = reply.json()["rows"].clone();
+    assert_eq!(rows[0][2], "17.75", "{rows}");
+    // alone, it is the combinations there are, each with the whole
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["revenue_total"], "dimensions": [{"field": "customers.region"}]}),
+    )
+    .await;
+    assert_eq!(
+        reply.json()["rows"],
+        json!([["north", "21.75"], ["south", "21.75"]])
+    );
+}

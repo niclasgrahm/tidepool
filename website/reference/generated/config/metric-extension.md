@@ -10,6 +10,7 @@ What a metric's Tidepool extension may say.
 | `table` | string |  | The dataset rows are counted on, for expressions that don't name one (`COUNT(*)`). |
 | `time_field` | string |  |  |
 | `time_offset` | string |  | Evaluate with the time selection on `time_field` shifted, e.g. `-1y`. |
+| `total` | list of string |  | Compute it without these of a visual's dimensions (`dataset.field`, or `*` for all of them), its value repeated across them: the denominator of a share of total (`revenue / revenue_total`). The selection still applies; a field the visual doesn't group by does nothing. |
 
 
 ## `MetricKind` {#metric-extension-metrickind}

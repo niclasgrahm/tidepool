@@ -406,6 +406,7 @@ One problem with a write.
 | `kind` | string | **required** | `base` (aggregates rows) or `derived` (combines other metrics). |
 | `name` | string | **required** |  |
 | `time_offset` | string |  | E.g. `-1 year on orders.ordered_at`. |
+| `totals` | list of string |  | The dimensions it is computed without (`*` for all): a total. |
 
 
 ## `RelationshipInfo` {#schema-relationshipinfo}

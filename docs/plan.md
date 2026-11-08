@@ -964,7 +964,7 @@ result(view, selection, epoch) =
 
 ### 6.8 Measure vocabulary (after v0.1)
 
-**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Nothing here is built.
+**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Built: item 1, `total` (2026-11-08).
 
 **Where we are.** A metric is one SQL aggregate expression (`SUM`, `COUNT`, `COUNT(DISTINCT …)`, `MIN`, `MAX`, `AVG`, with `FILTER (WHERE …)`), or a `derived` expression over other metrics. Four modifiers change what it sees: `table`, `ignore_selection`, `time_offset` and the model's `filter_direction`. That covers the simple half of what DAX's `CALCULATE` and Qlik's set analysis are used for. These are the gaps users will meet first:
 
@@ -990,7 +990,8 @@ Apache Ossie doesn't limit any of this. Its metric is a name, an expression and 
 
 #### The modifiers, in order of work
 
-1. **`total: [field…]`** (or `"*"`). The metric is computed without these of the visual's dimensions, and its value is repeated across them. Selections still apply, as with Qlik's `TOTAL` (to get DAX's `ALL`, combine it with `ignore_selection`). A total field the visual doesn't group by does nothing. Share of total is then a derived metric: `revenue / revenue_total`. It is one more anchor plan with fewer dimensions, joined back on the dimensions it kept. Incremental like any other plan. Oracle: the same aggregate grouped by the kept dimensions, joined.
+1. ✓ (2026-11-08) **`total: [field…]`** (or `["*"]`, as `ignore_selection` writes it). As built: an `AnchorPlan` has `keep`, the query dimensions it groups by, and is reused only by plans that keep the same; plans that keep every dimension make the rows, and a total plan's answers are looked up by each row's projection onto its `keep` (`exec::execute`). When every metric is a total, the rows are the combinations, counted as for a query without metrics (`rows_anchor`). The oracle groups its CTEs by kept dimensions the same way and joins each on those (`ON TRUE` for none); its `keys` come from full CTEs only, or `combinations_select`. Generated: `f0_amount_total` over `*` or random dimension fields, `f0_rows_total` with `ignore_selection`, and `f0_share`. Planted bugs (total plans keep every dimension; total plans make rows) both fail it.
+   Design: **`total: [field…]`** (or `"*"`). The metric is computed without these of the visual's dimensions, and its value is repeated across them. Selections still apply, as with Qlik's `TOTAL` (to get DAX's `ALL`, combine it with `ignore_selection`). A total field the visual doesn't group by does nothing. Share of total is then a derived metric: `revenue / revenue_total`. It is one more anchor plan with fewer dimensions, joined back on the dimensions it kept. Incremental like any other plan. Oracle: the same aggregate grouped by the kept dimensions, joined.
 
 2. **`set: {field: [values…]}`.** The metric sees these values on these fields *instead of* the session's selection on them. This is shorthand for `ignore_selection` plus a condition, but a condition on a dimension's field (`customers.region`), not only on the anchor's columns, as `FILTER` requires. A `set` field is never in `relevant` (§6.6), so changing it in the session costs nothing.
 

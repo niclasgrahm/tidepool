@@ -384,8 +384,9 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         return combinations_sql(schema, query, &dims);
     }
 
-    // group base metrics by (anchor, selections they see, time shift)
-    type Group = (String, Vec<usize>, Option<String>);
+    // group base metrics by (anchor, selections they see, time shift,
+    // dimensions they group by: all, but for totals)
+    type Group = (String, Vec<usize>, Option<String>, Vec<usize>);
     let mut groups: BTreeMap<Group, Vec<String>> = BTreeMap::new();
     let mut shifts: BTreeMap<String, crate::generate::Shifted> = BTreeMap::new();
     for name in &bases {
@@ -393,11 +394,23 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             anchor,
             ignore,
             shift,
+            total,
             ..
         }) = schema.metric(name).map(|m| &m.kind)
         else {
             continue;
         };
+        let kept: Vec<usize> = query
+            .dims
+            .iter()
+            .enumerate()
+            .filter(|(_, (table, field, ..))| match total {
+                Ignore::None => true,
+                Ignore::All => false,
+                Ignore::Fields(fields) => !fields.contains(&format!("{table}.{field}")),
+            })
+            .map(|(i, _)| i)
+            .collect();
         let shift_key = shift.as_ref().map(|s| {
             let key = format!("{}.{} {}", s.table, s.column, s.interval);
             shifts.insert(key.clone(), s.clone());
@@ -423,14 +436,14 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             .map(|(i, _)| i)
             .collect();
         groups
-            .entry((anchor.clone(), seen, shift_key))
+            .entry((anchor.clone(), seen, shift_key, kept))
             .or_default()
             .push(name.clone());
     }
 
     let mut ctes = Vec::new();
     let mut column_of: BTreeMap<String, String> = BTreeMap::new();
-    for (q, ((anchor, seen, shift), metrics)) in groups.iter().enumerate() {
+    for (q, ((anchor, seen, shift, kept), metrics)) in groups.iter().enumerate() {
         // a time-shifted metric reads its table with the column moved
         let shifted = shift.as_ref().and_then(|k| shifts.get(k));
         let source = |table: &str| match shifted.filter(|s| s.table == table) {
@@ -470,6 +483,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         let mut select: Vec<String> = dims
             .iter()
             .enumerate()
+            .filter(|(i, _)| kept.contains(i))
             .map(|(i, d)| format!("{d} AS d{i}"))
             .collect();
         for name in metrics {
@@ -495,7 +509,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         if !conditions.is_empty() {
             let _ = write!(cte, " WHERE {}", conditions.join(" AND "));
         }
-        if !dims.is_empty() {
+        if !kept.is_empty() {
             let _ = write!(cte, " GROUP BY ALL");
         }
         cte.push(')');
@@ -548,19 +562,40 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         );
     } else {
         let dim_names: Vec<String> = (0..dims.len()).map(|i| format!("d{i}")).collect();
-        let keys: Vec<String> = (0..n)
-            .map(|q| format!("SELECT {} FROM q{q}", dim_names.join(", ")))
+        // the groups: those of every query grouped by every dimension; a
+        // total's repeats across what it leaves out, so it makes none. With
+        // totals alone, the combinations there are, as with no metrics.
+        let keys: Vec<String> = groups
+            .keys()
+            .enumerate()
+            .filter(|(_, (.., kept))| kept.len() == dims.len())
+            .map(|(q, _)| format!("SELECT {} FROM q{q}", dim_names.join(", ")))
             .collect();
-        let _ = write!(sql, ", keys AS ({})", keys.join(" UNION "));
+        let keys = if keys.is_empty() {
+            let named: Vec<String> = dims
+                .iter()
+                .enumerate()
+                .map(|(i, d)| format!("{d} AS d{i}"))
+                .collect();
+            combinations_select(schema, query, &named)
+        } else {
+            keys.join(" UNION ")
+        };
+        let _ = write!(sql, ", keys AS ({keys})");
         let mut select: Vec<String> = dim_names.iter().map(|d| format!("keys.{d}")).collect();
         select.extend(outputs);
         let _ = write!(sql, " SELECT {} FROM keys", select.join(", "));
-        for q in 0..n {
-            let on: Vec<String> = dim_names
+        for (q, (.., kept)) in groups.keys().enumerate() {
+            let on: Vec<String> = kept
                 .iter()
-                .map(|d| format!("keys.{d} IS NOT DISTINCT FROM q{q}.{d}"))
+                .map(|i| format!("keys.d{i} IS NOT DISTINCT FROM q{q}.d{i}"))
                 .collect();
-            let _ = write!(sql, " LEFT JOIN q{q} ON {}", on.join(" AND "));
+            let on = if on.is_empty() {
+                "TRUE".to_string()
+            } else {
+                on.join(" AND ")
+            };
+            let _ = write!(sql, " LEFT JOIN q{q} ON {on}");
         }
     }
     sql
@@ -678,6 +713,18 @@ fn rows_anchor(schema: &Schema, tables: &[&str]) -> Option<String> {
 /// A query with dimensions and no metrics: the distinct combinations of
 /// the anchor's rows (and what they reach) under the selection.
 fn combinations_sql(schema: &Schema, query: &Query, dims: &[String]) -> String {
+    let mut sql = if schema.tree {
+        format!("WITH RECURSIVE {TREE_LEVELS} ")
+    } else {
+        String::new()
+    };
+    sql.push_str(&combinations_select(schema, query, dims));
+    sql
+}
+
+/// `SELECT DISTINCT select FROM` the table [`combinations_sql`] counts on,
+/// under the query's selection: which groups there are.
+fn combinations_select(schema: &Schema, query: &Query, select: &[String]) -> String {
     let tables: Vec<&str> = query.dims.iter().map(|(t, ..)| t.as_str()).collect();
     let Some(anchor) = rows_anchor(schema, &tables) else {
         return "SELECT 'no anchor' WHERE false".to_string();
@@ -694,15 +741,9 @@ fn combinations_sql(schema: &Schema, query: &Query, dims: &[String]) -> String {
         .map(|s| condition_sql(schema, s))
         .collect();
     conditions.extend(upward(schema, &anchor, None, &visible));
-    let mut sql = if schema.tree {
-        format!("WITH RECURSIVE {TREE_LEVELS} ")
-    } else {
-        String::new()
-    };
-    let _ = write!(
-        sql,
+    let mut sql = format!(
         "SELECT DISTINCT {} FROM {}",
-        dims.join(", "),
+        select.join(", "),
         joined(schema, &anchor, None)
     );
     if !conditions.is_empty() {

@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `revenue_total`: total: dataset `customers` has no field `regoin`; did you mean `region`?
+  --> model.ossie.yaml:97:15
+   |
+97 |         data: '{"total": ["customers.regoin"]}'
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

@@ -422,6 +422,22 @@ case!(
         "\"time_field\": \"orders.status\""
     )]
 );
+case!(
+    total_of_an_unknown_field,
+    [Replace(
+        "model.ossie.yaml",
+        "'{\"total\": [\"*\"]}'",
+        "'{\"total\": [\"customers.regoin\"]}'"
+    )]
+);
+case!(
+    total_on_a_derived_metric,
+    [Replace(
+        "model.ossie.yaml",
+        "'{\"kind\": \"derived\", \"format\": \"percent decimals:1\"}'",
+        "'{\"kind\": \"derived\", \"total\": [\"*\"]}'"
+    )]
+);
 
 case!(
     metric_sums_a_string,
@@ -797,7 +813,7 @@ case!(
     dashboard_table_shows_nothing,
     [Replace(
         "dashboards/sales.yaml",
-        "    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        "    dimensions: [products.name, products.category]\n    metrics: [revenue, revenue_share, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
         ""
     )]
 );
@@ -805,7 +821,7 @@ case!(
     dashboard_filter_of_two_dimensions,
     [Replace(
         "dashboards/sales.yaml",
-        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, revenue_share, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
         "    type: filter\n    dimensions: [products.name, products.category]\n"
     )]
 );
@@ -813,7 +829,7 @@ case!(
     dashboard_filter_with_metrics,
     [Replace(
         "dashboards/sales.yaml",
-        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+        "    type: table\n    dimensions: [products.name, products.category]\n    metrics: [revenue, revenue_share, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
         "    type: filter\n    dimensions: [products.category]\n    metrics: [revenue]\n"
     )]
 );
@@ -839,7 +855,7 @@ case!(
         ),
         Replace(
             "dashboards/sales.yaml",
-            "    dimensions: [products.name, products.category]\n    metrics: [revenue, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
+            "    dimensions: [products.name, products.category]\n    metrics: [revenue, revenue_share, order_count, avg_order_value]\n    sort: { by: revenue, desc: true }\n",
             "    dimensions: [products.category, stores.city]\n"
         ),
     ]

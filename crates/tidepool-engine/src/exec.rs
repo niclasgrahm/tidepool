@@ -612,6 +612,10 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// A total plan's answers: by the values of the dimensions it keeps, each
+/// metric's (position, value).
+type Answers = HashMap<Vec<Key>, Vec<(usize, Scalar)>>;
+
 /// Run `plan`: rows of dimension values and every planned metric's value
 /// (in `plan.metrics` order).
 pub(crate) fn execute(
@@ -646,6 +650,9 @@ pub(crate) fn execute(
 
     let mut rows: HashMap<Vec<Key>, (Vec<Scalar>, Vec<Scalar>)> = HashMap::new();
     let width = plan.metrics.len();
+    // `total` metrics' answers, by the dimensions they keep: they make no
+    // rows of their own, and are looked up by each row's
+    let mut totals: Vec<(&[usize], Answers)> = Vec::new();
     for (anchor, prepared) in plan.anchors.iter().zip(prepared) {
         let Some(table) = snapshot.table(anchor.table) else {
             continue;
@@ -666,6 +673,23 @@ pub(crate) fn execute(
             },
             None => slow(&reader, anchor, table),
         };
+        if anchor.keep.len() < plan.dim_types.len() {
+            let mut answers = HashMap::new();
+            for (dims, finished) in groups {
+                let values: Vec<(usize, Scalar)> = anchor
+                    .metrics
+                    .iter()
+                    .filter_map(|metric| {
+                        let position = plan.metrics.iter().position(|m| *m == metric.id)?;
+                        let inputs: Vec<Scalar> = finished[metric.aggs.clone()].to_vec();
+                        Some((position, eval(&metric.combine, &inputs)))
+                    })
+                    .collect();
+                answers.insert(dims.iter().map(key).collect::<Vec<Key>>(), values);
+            }
+            totals.push((&anchor.keep, answers));
+            continue;
+        }
         for (dims, finished) in groups {
             let group: Vec<Key> = dims.iter().map(key).collect();
             let row = rows
@@ -680,7 +704,15 @@ pub(crate) fn execute(
         }
     }
     let mut rows: Vec<(Vec<Scalar>, Vec<Scalar>)> = rows.into_values().collect();
-    for (_, metrics) in &mut rows {
+    for (dims, metrics) in &mut rows {
+        for (keep, answers) in &totals {
+            let projected: Vec<Key> = keep.iter().map(|i| key(&dims[*i])).collect();
+            if let Some(values) = answers.get(&projected) {
+                for (position, value) in values {
+                    metrics[*position] = value.clone();
+                }
+            }
+        }
         for (id, combine) in &plan.derived {
             let value = eval(combine, metrics);
             if let Some(position) = plan.metrics.iter().position(|m| m == id) {
