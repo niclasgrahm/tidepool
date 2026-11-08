@@ -555,6 +555,7 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
     }
     let dimensions = info.dimensions.iter().map(|d| short(&d.field));
     let title = match info.dimensions.first() {
+        _ if info.title.is_some() => info.title.clone().unwrap_or_default(),
         _ if info.metrics.is_empty() => dimensions.collect::<Vec<_>>().join(", "),
         Some(first) => format!("{} by {}", info.metrics.join(", "), short(&first.field)),
         None => info.metrics.join(", "),
@@ -624,8 +625,9 @@ fn visual_head(
     maximized: RwSignal<Option<String>>,
 ) -> impl IntoView + use<> {
     let tags = visual_tags(info);
+    let description = info.description.clone();
     view! {
-        <header class="visual-head">
+        <header class="visual-head" title=description.clone()>
             <h2>{title.to_string()}</h2>
             {tags.into_iter().map(|t| view! { <code class="tag">{t}</code> }).collect_view()}
             <span class="grow"></span>
@@ -700,7 +702,15 @@ fn body(live: Live, info: &VisualInfo, rows: Vec<Vec<Value>>, compare: Option<&V
     match info.visual_type.as_str() {
         "kpi" => kpi(live, info, &rows, compare),
         "rows" => view! { <RowsTable info=info.clone() rows=rows /> }.into_any(),
-        _ => view! { <Table info=info.clone() rows=rows /> }.into_any(),
+        "table" | "bar" | "line" => view! { <Table info=info.clone() rows=rows /> }.into_any(),
+        // a type this page doesn't know (a newer server): say so, rather
+        // than draw it as something it isn't
+        other => view! {
+            <p class="problem" role="alert">
+                {format!("This page can't show a `{other}` visual: reload it to get the newer UI.")}
+            </p>
+        }
+        .into_any(),
     }
 }
 

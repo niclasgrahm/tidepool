@@ -7,6 +7,7 @@ tidepool has three access levels:
 | read | dashboards, queries, the model, the status, the metrics |
 | ingest | writes and deletes of rows |
 | admin | the config and approvals, and every other level |
+| agent | what read gives, and changes to the config under the rules for [agents](/agents#the-agent-token). Never approvals. |
 
 The read and admin levels each have a bearer token, from an environment
 variable: `TIDEPOOL_READ_TOKEN` and `TIDEPOOL_ADMIN_TOKEN`. Ingest has one

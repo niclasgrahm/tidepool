@@ -80,13 +80,39 @@ or a visual. A change that joins tables with data, changes a type or removes
 something waits on **Config → Waiting for approval**. A person approves it or
 rejects it there.
 
+An agent also cannot change or remove a dashboard that a person wrote last:
+that change waits for approval too, with a warning that says why. An agent
+can change the dashboards that it made itself.
+
+The server applies these rules, not the agent: to each change that comes
+through MCP, and to each change made with the agent token.
+
 ```yaml
 # fragment
 agents:
   auto_apply: [safe, rebuild]    # also let agents start rebuilds in the background
 ```
 
-The history shows which changes an agent made (`an agent: …`).
+The history shows which changes an agent made (`by: agent`, and the
+author `an agent: …`).
+
+## the agent token
+
+Give an agent the agent token (`TIDEPOOL_AGENT_TOKEN`; `auth.agent_token_env`
+names another variable), not the admin token. With it, an agent can:
+
+- do what the read token can,
+- read the config, its versions and the changes that wait,
+- plan and submit changes, which the rules above apply to.
+
+It cannot approve or reject a change, also not its own: only a person with
+the admin token can. It cannot write rows: give an agent that writes rows an
+[ingest credential](/operating/access#ingest-credentials).
+
+```bash
+claude mcp add --transport http tidepool http://127.0.0.1:7070/mcp \
+  --header "Authorization: Bearer $TIDEPOOL_AGENT_TOKEN"
+```
 
 ## show an answer
 

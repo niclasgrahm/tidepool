@@ -11,9 +11,10 @@
 //! caller's credentials, so a tool does exactly what its endpoint does,
 //! checked the same way: `query_metrics` is `POST /v1/query`,
 //! `apply_change` is `POST /v1/config/apply`, and so on. The one rule of its
-//! own is the agents' policy: `apply_change` applies a change whose class
-//! `agents.auto_apply` lists, and proposes anything else for a person to
-//! approve. Resources are the config files' JSON Schemas
+//! own is that `apply_change` marks its change an agent's, so the config
+//! pipeline applies the agents' policy: applied when `agents.auto_apply`
+//! lists its class and it leaves dashboards people wrote alone, proposed
+//! for a person to approve otherwise. Resources are the config files' JSON Schemas
 //! (`tidepool://schemas/<kind>`), read through `GET /v1/schemas/{kind}`.
 
 use std::sync::Arc;
@@ -415,6 +416,62 @@ async fn api(
     (status, value)
 }
 
+/// `describe_model`: the model, the tables, the dashboards with their
+/// visuals, the visual types and how answers are computed.
+async fn describe_model(state: &Arc<AppState>, caller: &Asker<'_>) -> Result<Value, String> {
+    let ok = |(status, value): (StatusCode, Value)| {
+        if status.is_success() {
+            Ok(value)
+        } else {
+            Err(value["error"]
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string))
+        }
+    };
+    let model = ok(api(state, caller, Method::GET, "/v1/model", None).await)?;
+    let tables = ok(api(state, caller, Method::GET, "/v1/tables", None).await)?;
+    let snapshot = state.writer.snapshot();
+    let dashboards: Vec<Value> = snapshot
+        .model
+        .dashboards
+        .iter()
+        .map(|d| {
+            let info = crate::live::dashboard_info(&snapshot.model, d);
+            json!({
+                "id": info.id,
+                "name": info.name,
+                "visuals": info.visuals.iter().map(|v| json!({
+                    "id": v.id,
+                    "type": v.visual_type,
+                    "title": v.title,
+                    "description": v.description,
+                    "dimensions": v.dimensions,
+                    "metrics": v.metrics,
+                    "compare": v.compare,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let visual_types: Vec<Value> = tidepool_config::dashboard::VisualType::ALL
+        .iter()
+        .map(|t| json!({ "type": t.name(), "shape": t.shape() }))
+        .collect();
+    Ok(json!({
+        "name": model["name"],
+        "description": model["description"],
+        "ai_context": model["ai_context"],
+        "config_version": snapshot.version,
+        "filter_direction": model["filter_direction"],
+        "semantics": SEMANTICS,
+        "tables": tables,
+        "datasets": model["datasets"],
+        "relationships": model["relationships"],
+        "metrics": model["metrics"],
+        "dashboards": dashboards,
+        "visual_types": visual_types,
+    }))
+}
+
 /// Run a tool: its answer, or an error message for the agent.
 async fn call(
     state: &Arc<AppState>,
@@ -438,48 +495,7 @@ async fn call(
             .ok_or(format!("`{key}` is required"))
     };
     match name {
-        "describe_model" => {
-            let model = ok(api(state, caller, Method::GET, "/v1/model", None).await)?;
-            let tables = ok(api(state, caller, Method::GET, "/v1/tables", None).await)?;
-            let snapshot = state.writer.snapshot();
-            let dashboards: Vec<Value> = snapshot
-                .model
-                .dashboards
-                .iter()
-                .map(|d| {
-                    let info = crate::live::dashboard_info(&snapshot.model, d);
-                    json!({
-                        "id": info.id,
-                        "name": info.name,
-                        "visuals": info.visuals.iter().map(|v| json!({
-                            "id": v.id,
-                            "type": v.visual_type,
-                            "dimensions": v.dimensions,
-                            "metrics": v.metrics,
-                            "compare": v.compare,
-                        })).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            let visual_types: Vec<Value> = tidepool_config::dashboard::VisualType::ALL
-                .iter()
-                .map(|t| json!({ "type": t.name(), "shape": t.shape() }))
-                .collect();
-            Ok(json!({
-                "name": model["name"],
-                "description": model["description"],
-                "ai_context": model["ai_context"],
-                "config_version": snapshot.version,
-                "filter_direction": model["filter_direction"],
-                "semantics": SEMANTICS,
-                "tables": tables,
-                "datasets": model["datasets"],
-                "relationships": model["relationships"],
-                "metrics": model["metrics"],
-                "dashboards": dashboards,
-                "visual_types": visual_types,
-            }))
-        }
+        "describe_model" => describe_model(state, caller).await,
         "preview_table" => {
             let table = text("table")?;
             let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 1000);
@@ -665,31 +681,15 @@ async fn apply_change(
     if plan["valid"] != true {
         return Ok(json!({ "status": "invalid", "plan": plan }));
     }
-    let allowed = state
-        .writer
-        .snapshot()
-        .model
-        .server
-        .agents
-        .auto_apply
-        .clone();
-    let class = plan["class"].as_str().unwrap_or("safe");
-    let auto = allowed.iter().any(|c| {
-        serde_json::to_value(c)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .as_deref()
-            == Some(class)
-    });
     let author = args["summary"]
         .as_str()
         .map_or_else(|| "an agent".to_string(), |s| format!("an agent: {s}"));
+    // the server applies the agents' policy to a change marked an agent's
     let body = json!({
         "base_version": base,
         "files": args["files"],
-        "propose": !auto,
-        "approve": auto,
         "author": author,
+        "agent": true,
     });
     let (status, applied) = api(state, caller, Method::POST, "/v1/config/apply", Some(&body)).await;
     if status.is_success() {

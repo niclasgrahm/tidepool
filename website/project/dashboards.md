@@ -55,6 +55,11 @@ that no two visuals overlap and that no visual goes past the last column.
 
 ## visuals
 
+A visual can have a `title` for its header, and a `description`: one
+sentence about what it shows. The header shows the description when the
+pointer is on it, and `describe_model` gives both to agents. Without a
+`title`, the header names the metrics and the first dimension.
+
 | type | shows | a click |
 | --- | --- | --- |
 | `kpi` | one metric, large. With `compare`, the change from a second metric in percent. | |

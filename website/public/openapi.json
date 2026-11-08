@@ -84,6 +84,10 @@
       "ConfigChange": {
         "description": "A proposed change: files to set or remove (`null`), against\n`base_version`. Files not named stay as they are, unless `replace` is set:\nthen the named files are the whole config (a revert).",
         "properties": {
+          "agent": {
+            "description": "An agent makes it: the server applies it only as `agents.auto_apply`\nallows (never to a dashboard a person wrote last), and proposes it\notherwise. Always so with the agent token.",
+            "type": "boolean"
+          },
           "approve": {
             "default": false,
             "description": "Apply even if it destroys data (plan §8.2, destructive).",
@@ -882,6 +886,11 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "by": {
+            "default": "person",
+            "description": "`person` or `agent`, as in [`VersionInfo::by`].",
+            "type": "string"
           },
           "files": {
             "additionalProperties": {
@@ -1962,6 +1971,11 @@
           "author": {
             "type": "string"
           },
+          "by": {
+            "default": "person",
+            "description": "Who wrote it: `person`, `agent`, `files` (the config directory) or\n`startup`.",
+            "type": "string"
+          },
           "class": {
             "type": [
               "string",
@@ -2051,6 +2065,12 @@
               "null"
             ]
           },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "dimensions": {
             "items": {
               "$ref": "#/components/schemas/QueryDimension"
@@ -2080,6 +2100,13 @@
           "on_click": {
             "description": "Clicking a value selects it.",
             "type": "boolean"
+          },
+          "title": {
+            "description": "What its header says, when the file gives it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "type": {
             "description": "`kpi`, `bar`, `line`, `table`, `filter` or `rows`.",

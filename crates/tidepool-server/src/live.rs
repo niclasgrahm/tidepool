@@ -991,6 +991,8 @@ pub(crate) fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardI
             .map(|v| VisualInfo {
                 id: v.id.clone(),
                 visual_type: name(&serde_json::to_value(v.visual_type).unwrap_or_default()),
+                title: v.title.clone(),
+                description: v.description.clone(),
                 dimensions: request(model, v).dimensions,
                 metrics: request(model, v).metrics,
                 compare: v

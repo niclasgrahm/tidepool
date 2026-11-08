@@ -190,6 +190,10 @@ pub struct AuthSettings {
     /// Changing the config, approving changes.
     #[serde(default = "admin_env")]
     pub admin_token_env: String,
+    /// For agents (MCP): reading, and changing the config under
+    /// `agents.auto_apply`; it never approves a change, its own or another's.
+    #[serde(default = "agent_env")]
+    pub agent_token_env: String,
     /// Named ingest credentials, in place of `ingest_token_env`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingest: Vec<IngestCredential>,
@@ -201,6 +205,7 @@ impl Default for AuthSettings {
             read_token_env: read_env(),
             ingest_token_env: None,
             admin_token_env: admin_env(),
+            agent_token_env: agent_env(),
             ingest: Vec::new(),
         }
     }
@@ -225,6 +230,10 @@ fn read_env() -> String {
 }
 fn admin_env() -> String {
     "TIDEPOOL_ADMIN_TOKEN".into()
+}
+
+fn agent_env() -> String {
+    "TIDEPOOL_AGENT_TOKEN".into()
 }
 
 /// A producer allowed to write rows (plan §9.2): which tables, which

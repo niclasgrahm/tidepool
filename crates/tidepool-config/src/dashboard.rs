@@ -188,6 +188,13 @@ pub struct Visual {
     pub id: String,
     #[serde(rename = "type")]
     pub visual_type: VisualType,
+    /// What its header says; made from its metrics and dimensions when
+    /// left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What it shows, in a sentence: under its title, and for agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionRef>,
     /// Metrics by name. A filter has none. A table without metrics shows
@@ -323,6 +330,12 @@ impl DashboardFile {
         for visual in &self.visuals {
             let _ = writeln!(out, "  - id: {}", scalar(&visual.id));
             let _ = writeln!(out, "    type: {}", word(&visual.visual_type));
+            if let Some(title) = &visual.title {
+                let _ = writeln!(out, "    title: {}", scalar(title));
+            }
+            if let Some(description) = &visual.description {
+                let _ = writeln!(out, "    description: {}", scalar(description));
+            }
             if !visual.dimensions.is_empty() {
                 let dimensions: Vec<String> = visual
                     .dimensions
@@ -510,6 +523,8 @@ visuals:
                 visuals: vec![Visual {
                     id: "v".into(),
                     visual_type: VisualType::Table,
+                    title: None,
+                    description: None,
                     dimensions: vec![DimensionRef::Field(name.to_string())],
                     metrics: vec![name.to_string()],
                     compare: None,

@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `by_region` overlaps `kpi_revenue`
-  --> dashboards/sales.yaml:23:9
+  --> dashboards/sales.yaml:25:9
    |
-23 |     at: { x: 2, y: 0, w: 5, h: 4 }
+25 |     at: { x: 2, y: 0, w: 5, h: 4 }
    |         ^
 
 1 error, 0 warnings

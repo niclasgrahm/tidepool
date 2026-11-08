@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `by_region`: `customers.region` is not a time field, so it has no grain
-  --> dashboards/sales.yaml:19:52
+  --> dashboards/sales.yaml:21:52
    |
-19 |     dimensions: [{ field: customers.region, grain: month }]
+21 |     dimensions: [{ field: customers.region, grain: month }]
    |                                                    ^^^^^
 
 1 error, 0 warnings

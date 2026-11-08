@@ -27,6 +27,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tidepool_config::ConfigSet;
 use tidepool_config::diag::{Diagnostics, Severity, render, render_all, resolve};
+use tidepool_config::server::ChangeClassName;
 use tidepool_model::ir::Model;
 use tidepool_model::plan::{ChangeClass, Plan, diff};
 use tidepool_model::{Catalog, Compiled, compile};
@@ -489,6 +490,7 @@ impl ConfigStore {
                         source: "startup".into(),
                         summary: "the config the server started with".into(),
                         class: None,
+                        by: "startup".into(),
                     },
                     files: inner.files.clone(),
                 });
@@ -519,6 +521,7 @@ impl ConfigStore {
                         source: "startup".into(),
                         summary: summary(assessed.plan.as_ref()),
                         class: class.map(|c| class_label(c).to_string()),
+                        by: "startup".into(),
                     },
                     files: stored.clone(),
                 });
@@ -573,6 +576,7 @@ impl ConfigStore {
                     source: "startup".into(),
                     summary: "a model given in code, without config files".into(),
                     class: None,
+                    by: "startup".into(),
                 },
                 files: Files::new(),
             }],
@@ -673,16 +677,88 @@ pub async fn submit(
     change: ConfigChange,
     source: &str,
 ) -> Result<ApplyResult, Refused> {
+    let by = if change.agent {
+        "agent"
+    } else if source == "files" {
+        "files"
+    } else {
+        "person"
+    };
+    submit_by(state, change, source, by).await
+}
+
+/// The dashboard files `change` sets or removes that a person (or the
+/// config directory, or startup) wrote last: an agent may not change them
+/// without approval.
+fn written_by_people(inner: &Inner, change: &ConfigChange) -> Vec<String> {
+    change
+        .files
+        .keys()
+        .filter(|path| path.starts_with("dashboards/"))
+        .filter(|path| {
+            let now = inner.files.get(*path);
+            if now.is_none() {
+                return false;
+            }
+            // the version that wrote what the file holds now
+            let mut at = inner.history.len();
+            while at > 1 && inner.history[at - 2].files.get(*path) == now {
+                at -= 1;
+            }
+            inner
+                .history
+                .get(at.wrapping_sub(1))
+                .is_none_or(|v| v.info.by != "agent")
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`submit`], written by `by` (`person`, `agent`, `files`): an approved
+/// agent's change is still the agent's.
+#[allow(clippy::too_many_lines)]
+async fn submit_by(
+    state: &AppState,
+    mut change: ConfigChange,
+    source: &str,
+    by: &str,
+) -> Result<ApplyResult, Refused> {
     let mut inner = state.config.inner.lock().await;
     let current = inner.version;
     if change.base_version != current {
         return Err(Refused::Stale { current });
     }
     let files = merged(&inner.files, &change)?;
-    let assessed = assess(&inner, &files, current);
+    let mut assessed = assess(&inner, &files, current);
     let Some(compiled) = assessed.compiled else {
         return Err(Refused::Invalid(Box::new(assessed.info), current));
     };
+    // the agents' policy, here so that it holds however an agent calls:
+    // applied when `agents.auto_apply` (as the server runs now) has its
+    // class and it leaves people's dashboards alone; proposed otherwise
+    if change.agent {
+        let class = assessed.plan.as_ref().and_then(Plan::class);
+        let allowed = &inner.model.server.agents.auto_apply;
+        let listed = class.is_none_or(|c| {
+            allowed.iter().any(|a| {
+                matches!(
+                    (a, c),
+                    (ChangeClassName::Safe, ChangeClass::Safe)
+                        | (ChangeClassName::Rebuild, ChangeClass::Rebuild)
+                        | (ChangeClassName::Destructive, ChangeClass::Destructive)
+                )
+            })
+        });
+        let people = written_by_people(&inner, &change);
+        for path in &people {
+            assessed.info.warnings.push(format!(
+                "{path} was last written by a person: an agent's change to it waits for approval"
+            ));
+        }
+        let auto = listed && people.is_empty();
+        change.propose = change.propose || !auto;
+        change.approve = auto && class.is_some_and(ChangeClass::needs_approval);
+    }
     if files == inner.files {
         return Ok(ApplyResult {
             status: "unchanged".into(),
@@ -699,6 +775,7 @@ pub async fn submit(
             id,
             source: source.to_string(),
             author,
+            by: by.to_string(),
             at: now(),
             base_version: current,
             files: change.files.clone(),
@@ -750,6 +827,7 @@ pub async fn submit(
             source: source.to_string(),
             summary: summary.clone(),
             class: class.map(|c| class_label(c).to_string()),
+            by: by.to_string(),
         },
         files: stored.clone(),
     });
@@ -850,7 +928,7 @@ pub async fn approve(state: &AppState, id: u64) -> Result<ApplyResult, Refused> 
             .cloned()
             .ok_or(Refused::NoChange(id))?
     };
-    let result = submit(
+    let result = submit_by(
         state,
         ConfigChange {
             base_version: pending.base_version,
@@ -859,8 +937,10 @@ pub async fn approve(state: &AppState, id: u64) -> Result<ApplyResult, Refused> 
             approve: true,
             propose: false,
             author: Some(pending.author.clone()),
+            agent: false,
         },
         &pending.source,
+        &pending.by,
     )
     .await?;
     drop_pending(state, id).await?;
@@ -946,6 +1026,7 @@ pub async fn look(state: &AppState) {
             approve: false,
             propose: !safe,
             author: Some("config directory".into()),
+            agent: false,
         }
     };
     match submit(state, change, "files").await {
@@ -1031,9 +1112,14 @@ pub async fn plan_config(
 
 pub async fn apply_config(
     State(state): State<Arc<AppState>>,
-    Json(change): Json<ConfigChange>,
+    agent: Option<axum::Extension<crate::auth::AsAgent>>,
+    Json(mut change): Json<ConfigChange>,
 ) -> Result<Json<ApplyResult>, Refused> {
     let source = if change.replace { "revert" } else { "api" };
+    // the agent token's changes are an agent's, whatever the body says
+    if agent.is_some() {
+        change.agent = true;
+    }
     submit(&state, change, source).await.map(Json)
 }
 

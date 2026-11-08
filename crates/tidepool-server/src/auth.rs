@@ -41,7 +41,7 @@ use subtle::ConstantTimeEq;
 use tidepool_config::server::{
     AuthSettings, IngestCredential, IngestOperation, LEGACY_CREDENTIAL, Limits, Surface,
 };
-use tidepool_protocol::api_docs::{Access, ApiError};
+use tidepool_protocol::api_docs::{Access, ApiError, Operation};
 use tidepool_protocol::{EmbedRequest, EmbedToken, SessionInfo};
 
 use crate::AppState;
@@ -172,6 +172,9 @@ pub struct Tokens {
     pub admin: Option<String>,
     /// For `Access::Ingest`: writing rows.
     pub ingest: Vec<Arc<Credential>>,
+    /// For agents: what `read` may, and changing the config under the
+    /// agents' policy. Never approving.
+    pub agent: Option<String>,
 }
 
 impl Default for Tokens {
@@ -181,6 +184,7 @@ impl Default for Tokens {
             read: None,
             admin: None,
             ingest: vec![Arc::new(Credential::single(None))],
+            agent: None,
         }
     }
 }
@@ -194,7 +198,15 @@ impl Tokens {
             read: read.map(str::to_string),
             admin: admin.map(str::to_string),
             ingest: vec![Arc::new(Credential::single(ingest.map(str::to_string)))],
+            agent: None,
         }
+    }
+
+    /// These tokens and an agent token.
+    #[must_use]
+    pub fn with_agent(mut self, agent: &str) -> Self {
+        self.agent = Some(agent.to_string());
+        self
     }
 
     /// Read from `TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_READ_TOKEN` and
@@ -223,6 +235,7 @@ impl Tokens {
             read: get(&settings.read_token_env),
             admin: get(&settings.admin_token_env),
             ingest,
+            agent: get(&settings.agent_token_env),
         }
     }
 
@@ -261,6 +274,12 @@ impl Tokens {
         }
     }
 
+    fn is_agent(&self, presented: &str) -> bool {
+        self.agent
+            .as_deref()
+            .is_some_and(|a| bool::from(presented.as_bytes().ct_eq(a.as_bytes())))
+    }
+
     fn is_admin(&self, presented: &str) -> bool {
         self.admin
             .as_deref()
@@ -278,6 +297,10 @@ impl Tokens {
     pub fn allows(&self, presented: &str, access: Access) -> bool {
         if self.is_admin(presented) {
             return true;
+        }
+        // the agent token reads; what it may change, `authorize` says
+        if self.is_agent(presented) {
+            return matches!(access, Access::Public | Access::Read);
         }
         match access {
             Access::Public => true,
@@ -514,6 +537,23 @@ pub(crate) struct Scope(pub Arc<HashSet<String>>);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ByCookie;
 
+/// Put in a request made with the agent token: the config pipeline applies
+/// the agents' policy to what it changes.
+#[derive(Clone, Copy, Debug)]
+pub struct AsAgent;
+
+/// The admin endpoints the agent token may call: reading the config and
+/// changing it, which the agents' policy then governs. Not approving or
+/// rejecting changes: a person does that.
+const AGENT_ADMIN: [Operation; 6] = [
+    Operation::GetConfig,
+    Operation::PlanConfig,
+    Operation::ApplyConfig,
+    Operation::ListVersions,
+    Operation::GetVersion,
+    Operation::ListChanges,
+];
+
 /// How long an embed token lasts without being used.
 const EMBED_IDLE: Duration = Duration::from_hours(1);
 
@@ -651,6 +691,7 @@ fn caller(state: &AppState, request: &Request) -> Option<Caller> {
 /// the handler to decide about the table.
 pub async fn authorize(
     access: Access,
+    operation: Operation,
     state: &AppState,
     mut request: Request,
     next: Next,
@@ -675,6 +716,18 @@ pub async fn authorize(
         if !tokens.open(access) {
             return unauthorized(true);
         }
+    }
+    // the agent token: reading, and changes the agents' policy governs
+    if let Some(token) = presented.as_deref()
+        && tokens.is_agent(token)
+    {
+        let may = matches!(access, Access::Public | Access::Read)
+            || (access == Access::Admin && AGENT_ADMIN.contains(&operation));
+        if may {
+            request.extensions_mut().insert(AsAgent);
+            return next.run(request).await;
+        }
+        return unauthorized(true);
     }
     if tokens.open(access) {
         return next.run(request).await;

@@ -456,3 +456,13 @@ scenario!(
         "durability: fsync\npublic_url: https://tidepool.example.com\n"
     )]
 );
+
+// the agents' token: who can change the config, so a person approves it
+scenario!(
+    name_the_agent_token,
+    [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "durability: fsync\nauth: { agent_token_env: MY_AGENT_TOKEN }\n"
+    )]
+);

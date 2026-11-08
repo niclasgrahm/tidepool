@@ -398,6 +398,8 @@ mod tests {
         Visual {
             id: "v".into(),
             visual_type: t,
+            title: None,
+            description: None,
             dimensions: dims,
             metrics: metrics.iter().map(|m| (*m).to_string()).collect(),
             compare: None,

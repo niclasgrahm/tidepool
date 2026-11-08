@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: visual `by_region` uses unknown metric `revnue`
-  --> dashboards/sales.yaml:20:15
+  --> dashboards/sales.yaml:22:15
    |
-20 |     metrics: [revnue]
+22 |     metrics: [revnue]
    |               ^^^^^^
    = help: did you mean `revenue`?
 
