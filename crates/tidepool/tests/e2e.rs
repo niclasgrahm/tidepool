@@ -1691,3 +1691,75 @@ fn a_slice_of_the_pie_selects_its_category() {
         "a chip for camping",
     );
 }
+
+#[test]
+fn a_drag_across_the_scatter_selects_the_points_inside() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([
+            {"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"},
+            {"product_id": "p2", "name": "Tent", "category": "camping", "list_price": "90.00"},
+            {"product_id": "p3", "name": "Map", "category": "maps", "list_price": "9.00"},
+        ]),
+    );
+    let order = |id: &str, product: &str, amount: &str| {
+        json!({"order_id": id, "customer_id": "c1", "product_id": product, "status": "paid",
+               "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": amount, "note": null})
+    };
+    post(
+        address,
+        "orders",
+        &json!([
+            order("o1", "p1", "10.00"),
+            order("o2", "p2", "90.00"),
+            order("o3", "p2", "90.00"),
+            order("o4", "p3", "20.00"),
+        ]),
+    );
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    let points = "[...document.querySelectorAll('.visual.scatter .point')]";
+    browser.wait_for(&format!("{points}.length === 3"), "three points");
+    // the two cheap products sit low and left; a drag around them, not Tent
+    let corners = browser.wait_for(
+        &format!(
+            "(() => {{ document.querySelector('.visual.scatter svg.plot').scrollIntoView({{block: 'center'}}); \
+             const boxes = {points}.map(p => p.getBoundingClientRect()); \
+             const low = boxes.filter(b => b.y > Math.min(...boxes.map(b => b.y)) + 2); \
+             if (low.length !== 2) return null; \
+             const x0 = Math.min(...low.map(b => b.x)) - 6, y0 = Math.min(...low.map(b => b.y)) - 6; \
+             const x1 = Math.max(...low.map(b => b.right)) + 6, y1 = Math.max(...low.map(b => b.bottom)) + 6; \
+             return [x0, y0, x1, y1]; }})()"
+        ),
+        "the two low points",
+    );
+    let c: Vec<f64> = corners
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default();
+    assert_eq!(c.len(), 4, "corners: {corners}");
+    browser.drag((c[0], c[1]), (c[2], c[3]));
+    browser.wait_for(
+        &format!(
+            "{CHIPS}.includes('Kelp') && {CHIPS}.includes('Map') && !{CHIPS}.includes('Tent')"
+        ),
+        "a chip for Kelp and Map, not Tent",
+    );
+}

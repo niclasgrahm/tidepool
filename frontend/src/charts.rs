@@ -930,6 +930,165 @@ impl PieLayout {
     }
 }
 
+/// One point of a scatter: category `category` at `(x, y)`, `r` across.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Point {
+    pub category: usize,
+    pub key: String,
+    pub x: f64,
+    pub y: f64,
+    pub r: f64,
+    pub selected: bool,
+}
+
+/// A scatter of one dimension's values by two metrics (a third as size),
+/// laid out for a size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScatterLayout {
+    pub width: f64,
+    pub height: f64,
+    pub plot: Rect,
+    pub x_ticks: Vec<Tick>,
+    pub y_ticks: Vec<Tick>,
+    /// The metrics' names along the axes.
+    pub x_label: String,
+    pub y_label: String,
+    pub points: Vec<Point>,
+    /// Categories not drawn: an axis value missing.
+    pub left_out: usize,
+}
+
+impl ScatterLayout {
+    #[must_use]
+    pub fn new(
+        data: &Data,
+        (width, height): (f64, f64),
+        selected: &[String],
+        measure: Measure,
+    ) -> Self {
+        let column = |m: usize| data.values.get(m).cloned().unwrap_or_default();
+        let (xs, ys, sizes) = (column(0), column(1), column(2));
+        let both: Vec<(usize, f64, f64)> = xs
+            .iter()
+            .zip(&ys)
+            .enumerate()
+            .filter_map(|(i, (x, y))| Some((i, (*x)?, (*y)?)))
+            .filter(|(_, x, y)| x.is_finite() && y.is_finite())
+            .collect();
+        let rough_y = Linear::fit(both.iter().map(|p| p.2), (height - 28.0, 8.0), 5);
+        let left = widest(ticks(&rough_y).iter().map(|t| &t.text), measure) + 12.0;
+        let plot = Rect {
+            x: left,
+            y: 8.0,
+            w: (width - left - 12.0).max(1.0),
+            h: (height - 36.0).max(1.0),
+        };
+        let x = Linear::fit(
+            both.iter().map(|p| p.1),
+            (plot.x, plot.right()),
+            tick_count(plot.w, 70.0, 8),
+        );
+        let y = Linear::fit(
+            both.iter().map(|p| p.2),
+            (plot.bottom(), plot.y),
+            tick_count(plot.h, 40.0, 6),
+        );
+        // sizes by area: the radius grows with the square root
+        let largest = sizes.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let radius = |i: usize| match sizes.get(i).copied().flatten() {
+            Some(v) if largest > 0.0 => 3.0 + 9.0 * (v.abs() / largest).sqrt(),
+            _ => 4.0,
+        };
+        Self {
+            width,
+            height,
+            plot,
+            x_ticks: ticks(&x),
+            y_ticks: ticks(&y),
+            x_label: data.names.first().cloned().unwrap_or_default(),
+            y_label: data.names.get(1).cloned().unwrap_or_default(),
+            points: both
+                .iter()
+                .map(|(i, vx, vy)| Point {
+                    category: *i,
+                    key: data.keys[*i].clone(),
+                    x: x.at(*vx),
+                    y: y.at(*vy),
+                    r: radius(*i),
+                    selected: selected.contains(&data.keys[*i]),
+                })
+                .collect(),
+            left_out: data.len() - both.len(),
+        }
+    }
+
+    /// The point under `(x, y)`, the topmost (drawn last) when they
+    /// overlap; a few pixels of slack around small ones.
+    #[must_use]
+    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        self.points
+            .iter()
+            .rev()
+            .find(|p| (p.x - x).hypot(p.y - y) <= p.r + 3.0)
+            .map(|p| p.category)
+    }
+
+    /// The categories of the points inside a rectangle (a drag).
+    #[must_use]
+    pub fn within(&self, area: Rect) -> Vec<usize> {
+        self.points
+            .iter()
+            .filter(|p| {
+                p.x >= area.x && p.x <= area.right() && p.y >= area.y && p.y <= area.bottom()
+            })
+            .map(|p| p.category)
+            .collect()
+    }
+
+    /// The categories in the order the keyboard walks them: left to right.
+    #[must_use]
+    pub fn order(&self) -> Vec<usize> {
+        let mut points: Vec<&Point> = self.points.iter().collect();
+        points.sort_by(|a, b| a.x.total_cmp(&b.x));
+        points.iter().map(|p| p.category).collect()
+    }
+
+    /// Where category `i`'s point is.
+    #[must_use]
+    pub fn point(&self, i: usize) -> Option<(f64, f64)> {
+        self.points
+            .iter()
+            .find(|p| p.category == i)
+            .map(|p| (p.x, p.y))
+    }
+
+    /// Part of the way from `self` to `to`: points matched by key; new
+    /// ones grow from nothing where they'll be.
+    #[must_use]
+    pub fn blend(&self, to: &Self, t: f64) -> Self {
+        let points = to
+            .points
+            .iter()
+            .map(|p| match self.points.iter().find(|q| q.key == p.key) {
+                Some(q) => Point {
+                    x: lerp(q.x, p.x, t),
+                    y: lerp(q.y, p.y, t),
+                    r: lerp(q.r, p.r, t),
+                    ..p.clone()
+                },
+                None => Point {
+                    r: p.r * t,
+                    ..p.clone()
+                },
+            })
+            .collect();
+        Self {
+            points,
+            ..to.clone()
+        }
+    }
+}
+
 /// Where a key moves the keyboard's place among `n` categories.
 #[must_use]
 pub fn step_key(key: &str, at: Option<usize>, n: usize) -> Option<usize> {
@@ -1355,5 +1514,41 @@ mod tests {
                 < (alone.slices[0].end - alone.slices[0].start)
         );
         assert!(alone.path(&alone.slices[0]).starts_with('M'));
+    }
+
+    #[test]
+    fn a_scatter_places_points_by_two_metrics_and_selects_by_area() {
+        let rows = vec![
+            vec![json!("a"), json!(10), json!(100), json!(4)],
+            vec![json!("b"), json!(20), json!(300), json!(1)],
+            vec![json!("c"), json!(30), Value::Null, json!(9)],
+        ];
+        let data = Data::new(
+            &rows,
+            &["revenue".into(), "orders".into(), "customers".into()],
+        );
+        let s = ScatterLayout::new(&data, (400.0, 300.0), &["b".into()], &chars);
+        assert_eq!(s.points.len(), 2);
+        assert_eq!(s.left_out, 1);
+        let (a, b) = (&s.points[0], &s.points[1]);
+        assert!(a.x < b.x && a.y > b.y, "b is right of a and higher up");
+        assert!(a.r > b.r, "a larger third metric is a larger point");
+        assert!(b.selected && !a.selected);
+        assert_eq!(s.hit(a.x + 1.0, a.y), Some(0));
+        assert_eq!(s.hit(s.plot.x, s.plot.y), None);
+        let all = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        assert_eq!(s.within(all), vec![0, 1]);
+        assert_eq!(s.order(), vec![0, 1]);
+        assert_eq!(
+            (s.x_label.as_str(), s.y_label.as_str()),
+            ("revenue", "orders")
+        );
+        let grown = ScatterLayout::default().blend(&s, 0.5);
+        assert!(grown.points[0].r < s.points[0].r);
     }
 }

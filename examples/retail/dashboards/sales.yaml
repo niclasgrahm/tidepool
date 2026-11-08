@@ -48,3 +48,10 @@ visuals:
     metrics: [revenue]
     on_click: select
     at: { x: 3, y: 8, w: 5, h: 4 }
+  - id: products_map
+    type: scatter
+    title: Products by revenue and orders
+    dimensions: [products.name]
+    metrics: [revenue, order_count]
+    on_click: select
+    at: { x: 8, y: 8, w: 4, h: 4 }

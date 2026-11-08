@@ -270,7 +270,10 @@ fn visual(
                 desc: true,
             })
     });
-    let limit = spec.limit.or(pie.then_some(PIE_DEFAULT));
+    let limit = spec
+        .limit
+        .or(pie.then_some(PIE_DEFAULT))
+        .or((spec.visual_type == VisualType::Scatter).then_some(SCATTER_DEFAULT));
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -440,6 +443,10 @@ fn visual_dimensions(
 pub(crate) const PIE_SLICES: u32 = 12;
 const PIE_DEFAULT: u32 = 8;
 
+/// The most points a scatter draws, and how many when it doesn't say.
+pub(crate) const SCATTER_POINTS: u32 = 5000;
+const SCATTER_DEFAULT: u32 = 1000;
+
 /// Why a visual without metrics has nothing to show, and what to do.
 fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
     let dims = spec.dimensions.len();
@@ -449,7 +456,7 @@ fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
             "a KPI shows metrics, and it has none",
             "give it `metrics: [...]`",
         )),
-        VisualType::Bar | VisualType::Line | VisualType::Pie => Some((
+        VisualType::Bar | VisualType::Line | VisualType::Pie | VisualType::Scatter => Some((
             "a chart shows metrics, and it has none",
             "give it `metrics: [...]`, or make it a `filter` or a `table` to list its dimension's values",
         )),
@@ -483,6 +490,15 @@ fn counts(spec: &VisualSpec, problems: &mut Vec<(&str, &str)>) {
                 "limit",
                 "a pie reads up to 12 slices: show more as a bar chart",
             ));
+        }
+        VisualType::Scatter if dims != 1 || !(2..=3).contains(&spec.metrics.len()) => {
+            problems.push((
+                if dims == 1 { "metrics" } else { "dimensions" },
+                "a scatter plots one dimension's values by two metrics (across, up), and a third as their size",
+            ));
+        }
+        VisualType::Scatter if spec.limit.is_some_and(|l| l > SCATTER_POINTS) => {
+            problems.push(("limit", "a scatter draws up to 5000 points"));
         }
         VisualType::Bar | VisualType::Line if dims != 1 => {
             problems.push((
@@ -534,10 +550,13 @@ fn visual_shape(
     if spec.on_click.is_some()
         && !matches!(
             spec.visual_type,
-            VisualType::Bar | VisualType::Table | VisualType::Pie
+            VisualType::Bar | VisualType::Table | VisualType::Pie | VisualType::Scatter
         )
     {
-        problems.push(("on_click", "only bars, pies and tables select on click"));
+        problems.push((
+            "on_click",
+            "only bars, pies, scatters and tables select on click",
+        ));
     }
     // only checkable when the dimension resolved; otherwise that's the error
     if spec.on_brush.is_some() && dimensions.len() == spec.dimensions.len() {

@@ -15,7 +15,8 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::charts::{
-    BarLayout, Data, LineLayout, PieLayout, Rect, TWEEN_MS, area_path, ease, line_path, step_key,
+    BarLayout, Data, LineLayout, PieLayout, Rect, ScatterLayout, TWEEN_MS, area_path, ease,
+    line_path, step_key,
 };
 
 /// The charts' text, as `style.css` sets it on `.plot`.
@@ -102,6 +103,15 @@ impl Blend for BarLayout {
 impl Blend for PieLayout {
     fn blend(&self, to: &Self, t: f64) -> Self {
         PieLayout::blend(self, to, t)
+    }
+    fn size(&self) -> (f64, f64) {
+        (self.width, self.height)
+    }
+}
+
+impl Blend for ScatterLayout {
+    fn blend(&self, to: &Self, t: f64) -> Self {
+        ScatterLayout::blend(self, to, t)
     }
     fn size(&self) -> (f64, f64) {
         (self.width, self.height)
@@ -560,6 +570,183 @@ pub fn PieChart(
                     {interactive.then(|| view! { <g class="a11y">{options}</g> })}
                 </svg>
                 {move || tip(data, pointed(), shown.with(|l| l.width))}
+            </div>
+        </div>
+    }
+}
+
+/// A scatter: one dimension's values as points, by two metrics (across,
+/// up) and a third as size.
+///
+/// `on_select` makes it selectable: a click on a point, a drag across a
+/// rectangle (the points inside), or arrows (left to right) and Enter give
+/// the categories and whether Ctrl/Cmd was held.
+#[allow(clippy::too_many_lines)] // one chart: its state, its handlers, its drawing
+#[component]
+pub fn ScatterChart(
+    #[prop(into)] data: Memo<Data>,
+    #[prop(into, optional)] selected: Signal<Vec<String>>,
+    #[prop(into, optional_no_strip)] on_select: Option<Callback<(Vec<usize>, bool)>>,
+    #[prop(into, optional)] label: String,
+) -> impl IntoView {
+    let node = NodeRef::<Div>::new();
+    let size = observe_size(node);
+    let target = Memo::new(move |_| {
+        let (w, h) = size.get();
+        if w <= 0.0 || h <= 0.0 {
+            return ScatterLayout::default();
+        }
+        data.with(|d| selected.with(|s| ScatterLayout::new(d, (w, h), s, &measure)))
+    });
+    let shown = tween(target);
+    let hover = RwSignal::new(None::<(usize, (f64, f64))>);
+    let active = RwSignal::new(None::<usize>);
+    let press = RwSignal::new(None::<(f64, f64)>);
+    let drag = RwSignal::new(None::<Rect>);
+    let interactive = on_select.is_some();
+    let id = unique("points");
+    let select = move |categories: Vec<usize>, add: bool| {
+        if let Some(on_select) = on_select
+            && !categories.is_empty()
+        {
+            on_select.run((categories, add));
+        }
+    };
+    let area = |(x0, y0): (f64, f64), (x1, y1): (f64, f64)| Rect {
+        x: x0.min(x1),
+        y: y0.min(y1),
+        w: (x1 - x0).abs(),
+        h: (y1 - y0).abs(),
+    };
+    let down = move |ev: web_sys::PointerEvent| {
+        if !interactive || ev.button() != 0 {
+            return;
+        }
+        if let Some(at) = local(node, &ev) {
+            press.set(Some(at));
+            capture(node, &ev);
+        }
+    };
+    let moved = move |ev: web_sys::PointerEvent| {
+        let Some((x, y)) = local(node, &ev) else {
+            return;
+        };
+        if let Some(from) = press.get_untracked() {
+            let rect = area(from, (x, y));
+            if rect.w > 3.0 || rect.h > 3.0 {
+                drag.set(Some(rect));
+            }
+            hover.set(None);
+            return;
+        }
+        hover.set(target.with_untracked(|l| l.hit(x, y)).map(|i| (i, (x, y))));
+    };
+    let up = move |ev: web_sys::PointerEvent| {
+        let Some(from) = press.get_untracked() else {
+            return;
+        };
+        press.set(None);
+        match drag.get_untracked() {
+            Some(rect) => select(target.with_untracked(|l| l.within(rect)), additive(&ev)),
+            None => {
+                if let Some(i) = target.with_untracked(|l| l.hit(from.0, from.1)) {
+                    select(vec![i], additive(&ev));
+                }
+            }
+        }
+        drag.set(None);
+    };
+    let cancel = move |_| {
+        press.set(None);
+        drag.set(None);
+    };
+    let key = move |ev: web_sys::KeyboardEvent| {
+        let key = ev.key();
+        let order = target.with_untracked(ScatterLayout::order);
+        let place = active
+            .get_untracked()
+            .and_then(|i| order.iter().position(|c| *c == i));
+        match key.as_str() {
+            "Enter" | " " => {
+                if let Some(i) = active.get_untracked() {
+                    ev.prevent_default();
+                    select(vec![i], ev.ctrl_key() || ev.meta_key());
+                }
+            }
+            "Escape" => active.set(None),
+            _ if navigation(&key) => {
+                ev.prevent_default();
+                active.set(step_key(&key, place, order.len()).map(|p| order[p]));
+            }
+            _ => {}
+        }
+    };
+    let pointed = move || match active.get() {
+        Some(i) => shown.with(|l| l.point(i)).map(|at| (i, at)),
+        None => hover.get(),
+    };
+    let descendant = {
+        let id = id.clone();
+        move || active.get().map(|i| format!("{id}-{i}"))
+    };
+    let options = move || {
+        data.with(|d| {
+            selected.with(|s| {
+                (0..d.len())
+                    .map(|i| {
+                        view! {
+                            <g id=format!("{id}-{i}") role="option" aria-label=d.describe(i)
+                                aria-selected=s.contains(&d.keys[i]).to_string()></g>
+                        }
+                    })
+                    .collect_view()
+            })
+        })
+    };
+    view! {
+        <div class="plot-wrap">
+            <div class="plot-area" node_ref=node class:interactive=interactive
+                on:pointerdown=down on:pointermove=moved on:pointerup=up
+                on:pointercancel=cancel on:pointerleave=move |_| hover.set(None)>
+                <svg class="plot scatter" class:has-selection=move || selected.with(|s| !s.is_empty())
+                    width=move || shown.with(|l| l.width) height=move || shown.with(|l| l.height)
+                    role=if interactive { "listbox" } else { "img" } aria-label=label
+                    aria-multiselectable=interactive.then_some("true")
+                    tabindex=interactive.then_some("0")
+                    aria-activedescendant=descendant
+                    on:keydown=key on:blur=move |_| active.set(None)>
+                    {move || shown.with(|l| {
+                        let plot = l.plot;
+                        let on = pointed().map(|(i, _)| i);
+                        view! {
+                            <g class="grid">
+                                {l.y_ticks.iter().map(|t| view! { <line x1=plot.x x2=plot.right() y1=t.at y2=t.at /> }).collect_view()}
+                                {l.x_ticks.iter().map(|t| view! { <line x1=t.at x2=t.at y1=plot.y y2=plot.bottom() /> }).collect_view()}
+                            </g>
+                            {brush_rect(drag.get())}
+                            <g class="points">
+                                {l.points.iter().map(|p| view! {
+                                    <circle class="point" class:selected=p.selected class:pointed=on == Some(p.category)
+                                        cx=p.x cy=p.y r=p.r />
+                                }).collect_view()}
+                            </g>
+                            <g class="ticks">
+                                {l.y_ticks.iter().map(|t| view! {
+                                    <text x=plot.x - 6.0 y=t.at + 4.0 text-anchor="end">{t.text.clone()}</text>
+                                }).collect_view()}
+                                {l.x_ticks.iter().map(|t| view! {
+                                    <text x=t.at y=plot.bottom() + 15.0 text-anchor="middle">{t.text.clone()}</text>
+                                }).collect_view()}
+                            </g>
+                            <g class="labels">
+                                <text x=plot.right() y=plot.bottom() + 28.0 text-anchor="end">{format!("{} →", l.x_label)}</text>
+                                <text x=plot.x + 4.0 y=plot.y + 10.0 text-anchor="start">{format!("↑ {}", l.y_label)}</text>
+                            </g>
+                        }
+                    })}
+                    {interactive.then(|| view! { <g class="a11y">{options}</g> })}
+                </svg>
+                {move || tip(data, if press.get().is_some() { None } else { pointed() }, shown.with(|l| l.width))}
             </div>
         </div>
     }
