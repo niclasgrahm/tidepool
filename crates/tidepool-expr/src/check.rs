@@ -504,6 +504,29 @@ impl Checker<'_> {
             return Err("window functions aren't supported".to_string());
         }
         let (args, distinct, star) = function_args(function)?;
+        // what only some functions take, refused on the others rather than
+        // quietly ignored (`SUM(x) WITHIN GROUP (…)` isn't `SUM(x)`)
+        if !matches!(function.parameters, FunctionArguments::None) {
+            return Err(format!(
+                "{} takes no second list of arguments",
+                name.to_uppercase()
+            ));
+        }
+        if function.null_treatment.is_some() {
+            return Err(format!(
+                "{} takes no IGNORE or RESPECT NULLS",
+                name.to_uppercase()
+            ));
+        }
+        if !function.within_group.is_empty() && name != "percentile_cont" {
+            return Err(format!(
+                "{} takes no WITHIN GROUP: only PERCENTILE_CONT does",
+                name.to_uppercase()
+            ));
+        }
+        if name == "percentile_cont" {
+            return self.percentile(function, &args, distinct);
+        }
         if let Some(aggregate) = aggregate_func(&name) {
             return self.aggregate(aggregate, &args, distinct, star, function.filter.as_deref());
         }
@@ -629,12 +652,39 @@ impl Checker<'_> {
         if self.aggregates.is_none() {
             return Err("an aggregate can't be used here".to_string());
         }
+        if distinct
+            && !matches!(
+                func,
+                AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max
+            )
+        {
+            return Err(format!("{}(DISTINCT …) isn't supported", func.name()));
+        }
         // inside an aggregate, expressions are row-level again
-        let (func, arg) = match (func, star, args) {
-            (AggFunc::Count, true, []) => (AggFunc::CountStar, None),
-            (_, false, [arg]) => (func, Some(self.row().expr(arg)?)),
+        let (func, arg, by) = match (func, star, args) {
+            (AggFunc::Count, true, []) => (AggFunc::CountStar, None, None),
+            (AggFunc::ArgMax | AggFunc::ArgMin, false, [arg, by]) => (
+                func,
+                Some(self.row().expr(arg)?),
+                Some(self.row().expr(by)?),
+            ),
+            (AggFunc::ArgMax | AggFunc::ArgMin, _, _) => {
+                return Err(format!(
+                    "{} takes two arguments: the value, and what the row is chosen by",
+                    func.name()
+                ));
+            }
+            (_, false, [arg]) => (func, Some(self.row().expr(arg)?), None),
             _ => return Err(format!("{} takes one argument", func.name())),
         };
+        if let Some(by) = &by
+            && matches!(by.ty(), Type::Bool)
+        {
+            return Err(format!(
+                "{} chooses a row by a number, text or time, not a true/false",
+                func.name()
+            ));
+        }
         let filter = filter.map(|f| self.row().expr(f)).transpose()?;
         if let Some(filter) = &filter {
             expect_bool(filter, "FILTER")?;
@@ -647,7 +697,17 @@ impl Checker<'_> {
                 Type::Null => Type::Int,
                 t => t,
             },
-            AggFunc::Min | AggFunc::Max => arg_ty,
+            AggFunc::Min | AggFunc::Max | AggFunc::ArgMax | AggFunc::ArgMin => arg_ty,
+            AggFunc::Median
+            | AggFunc::Percentile
+            | AggFunc::StddevSamp
+            | AggFunc::StddevPop
+            | AggFunc::VarSamp
+            | AggFunc::VarPop
+                if arg_ty.is_numeric() =>
+            {
+                Type::Float
+            }
             _ => {
                 return Err(format!(
                     "{} needs a number, not {}",
@@ -664,10 +724,72 @@ impl Checker<'_> {
             func,
             distinct,
             arg,
+            by,
+            fraction: (func == AggFunc::Median).then_some(500_000),
             filter,
             ty,
         });
         Ok(Expr::Column { slot, ty })
+    }
+
+    /// `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`.
+    fn percentile(
+        &mut self,
+        function: &sqlparser::ast::Function,
+        args: &[&Ast],
+        distinct: bool,
+    ) -> Result<Expr, String> {
+        const HOW: &str = "PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY x)";
+        if distinct {
+            return Err("PERCENTILE_CONT(DISTINCT …) isn't supported".into());
+        }
+        let ([fraction], [order]) = (args, function.within_group.as_slice()) else {
+            return Err(format!("PERCENTILE_CONT is written {HOW}"));
+        };
+        if matches!(order.options.sort, Some(sqlparser::ast::OrderBySort::Desc)) {
+            return Err(format!(
+                "PERCENTILE_CONT orders ascending: for the top tenth, {HOW} rather than DESC"
+            ));
+        }
+        let fraction = match self.row().expr(fraction)? {
+            Expr::Literal(Scalar::Float(f), _) => f,
+            Expr::Literal(Scalar::Decimal(d, scale), _) => {
+                #[allow(clippy::cast_precision_loss)]
+                let f = d as f64 / 10f64.powi(i32::from(scale));
+                f
+            }
+            Expr::Literal(Scalar::Int(i), _) => {
+                #[allow(clippy::cast_precision_loss)]
+                let f = i as f64;
+                f
+            }
+            _ => {
+                return Err(format!(
+                    "PERCENTILE_CONT's fraction is a number from 0 to 1: {HOW}"
+                ));
+            }
+        };
+        if !(0.0..=1.0).contains(&fraction) {
+            return Err(format!(
+                "PERCENTILE_CONT's fraction is from 0 to 1, not {fraction}"
+            ));
+        }
+        let index = self.aggregate(
+            AggFunc::Percentile,
+            &[&order.expr],
+            false,
+            false,
+            function.filter.as_deref(),
+        )?;
+        if let (Some(calls), Expr::Column { slot, .. }) = (self.aggregates.as_mut(), &index)
+            && let Some(call) = calls.get_mut(*slot as usize)
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                call.fraction = Some((fraction * 1_000_000.0).round() as u32);
+            }
+        }
+        Ok(index)
     }
 }
 
@@ -678,6 +800,13 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "min" => AggFunc::Min,
         "max" => AggFunc::Max,
         "avg" => AggFunc::Avg,
+        "median" => AggFunc::Median,
+        "stddev_samp" | "stddev" => AggFunc::StddevSamp,
+        "stddev_pop" => AggFunc::StddevPop,
+        "var_samp" | "variance" => AggFunc::VarSamp,
+        "var_pop" => AggFunc::VarPop,
+        "arg_max" | "max_by" => AggFunc::ArgMax,
+        "arg_min" | "min_by" => AggFunc::ArgMin,
         _ => return None,
     })
 }
@@ -733,6 +862,60 @@ mod tests {
 
     fn metric(text: &str) -> Result<Aggregation, String> {
         check_aggregation(&parse(text).map_err(|e| e.0)?, &Orders)
+    }
+
+    #[test]
+    fn statistics_are_typed_and_written_as_sql_writes_them() {
+        let call = |text: &str| match metric(text) {
+            Ok(a) => a.calls[0].clone(),
+            Err(e) => panic!("`{text}` should check: {e}"),
+        };
+        let median = call("MEDIAN(amount)");
+        assert_eq!(
+            (median.func, median.ty, median.fraction),
+            (AggFunc::Median, Type::Float, Some(500_000))
+        );
+        let p90 = call("PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY qty)");
+        assert_eq!(
+            (p90.func, p90.fraction),
+            (AggFunc::Percentile, Some(900_000))
+        );
+        assert!(p90.arg.is_some());
+        assert_eq!(call("STDDEV(amount)").func, AggFunc::StddevSamp);
+        assert_eq!(call("VAR_POP(qty)").ty, Type::Float);
+        let latest = call("ARG_MAX(status, at)");
+        assert_eq!((latest.func, latest.ty), (AggFunc::ArgMax, Type::String));
+        assert!(latest.by.is_some());
+        // their mistakes
+        let wrong = |text: &str, says: &str| {
+            assert!(
+                metric(text).is_err_and(|e| e.contains(says)),
+                "`{text}` should say `{says}`: {:?}",
+                metric(text)
+            );
+        };
+        wrong("MEDIAN(status)", "number");
+        wrong("MEDIAN(DISTINCT amount)", "DISTINCT");
+        wrong(
+            "PERCENTILE_CONT(1.5) WITHIN GROUP (ORDER BY qty)",
+            "from 0 to 1",
+        );
+        wrong("PERCENTILE_CONT(0.5)", "WITHIN GROUP");
+        wrong(
+            "PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY qty DESC)",
+            "ascending",
+        );
+        wrong("ARG_MAX(status)", "two arguments");
+    }
+
+    #[test]
+    fn within_group_and_the_like_are_refused_where_they_mean_nothing() {
+        // these used to check as plain SUM(qty), quietly
+        assert!(
+            metric("SUM(qty) WITHIN GROUP (ORDER BY amount)")
+                .is_err_and(|e| e.contains("WITHIN GROUP"))
+        );
+        assert!(metric("MAX(qty) IGNORE NULLS").is_err());
     }
 
     #[test]

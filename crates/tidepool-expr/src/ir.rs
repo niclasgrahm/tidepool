@@ -198,6 +198,14 @@ impl AggFunc {
             Self::Min => "MIN",
             Self::Max => "MAX",
             Self::Avg => "AVG",
+            Self::Median => "MEDIAN",
+            Self::Percentile => "PERCENTILE_CONT",
+            Self::StddevSamp => "STDDEV_SAMP",
+            Self::StddevPop => "STDDEV_POP",
+            Self::VarSamp => "VAR_SAMP",
+            Self::VarPop => "VAR_POP",
+            Self::ArgMax => "ARG_MAX",
+            Self::ArgMin => "ARG_MIN",
         }
     }
 }
@@ -211,6 +219,29 @@ pub enum AggFunc {
     Min,
     Max,
     Avg,
+    /// The middle value: `PERCENTILE_CONT(0.5)`.
+    Median,
+    /// `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`: interpolated between
+    /// the two values around rank `p · (n − 1)`.
+    Percentile,
+    StddevSamp,
+    StddevPop,
+    VarSamp,
+    VarPop,
+    /// `ARG_MAX(x, t)`: `x` on the row with the largest `t` (of rows where
+    /// neither is NULL; of those with that `t`, the largest `x`).
+    ArgMax,
+    /// `ARG_MIN(x, t)`: `x` on the row with the smallest `t` (ties: the
+    /// smallest `x`).
+    ArgMin,
+}
+
+impl AggFunc {
+    /// Whether its state can take a row back out (deleted rows).
+    #[must_use]
+    pub fn subtracts(self) -> bool {
+        matches!(self, Self::CountStar | Self::Count | Self::Sum | Self::Avg)
+    }
 }
 
 /// One aggregate call inside a metric.
@@ -220,6 +251,10 @@ pub struct AggCall {
     pub distinct: bool,
     /// The row-level argument; `None` for `COUNT(*)`.
     pub arg: Option<Expr>,
+    /// `ARG_MAX`/`ARG_MIN`'s second argument: what the row is chosen by.
+    pub by: Option<Expr>,
+    /// `PERCENTILE_CONT`'s fraction, in millionths (`MEDIAN`: 500 000).
+    pub fraction: Option<u32>,
     /// `FILTER (WHERE …)`.
     pub filter: Option<Expr>,
     /// The type of the aggregate's result.

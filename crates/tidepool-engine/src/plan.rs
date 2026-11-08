@@ -658,6 +658,8 @@ fn count_rows(plan: &mut AnchorPlan) {
             func: tidepool_expr::ir::AggFunc::CountStar,
             distinct: false,
             arg: None,
+            by: None,
+            fraction: None,
             filter: None,
             ty: Type::Int,
         },

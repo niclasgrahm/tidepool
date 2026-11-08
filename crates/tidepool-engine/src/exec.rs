@@ -255,6 +255,12 @@ enum State {
     },
     /// DISTINCT aggregates collect their values first.
     Distinct(HashMap<Key, Scalar>),
+    /// `MEDIAN` and `PERCENTILE_CONT`: every value, counted.
+    Quantile(crate::stats::Counted),
+    /// Standard deviations and variances.
+    Moments(crate::stats::Moments),
+    /// `ARG_MAX` (`true`) and `ARG_MIN`: the best (by, value) so far.
+    Arg(bool, Option<(Scalar, Scalar)>),
 }
 
 fn new_state(call: &tidepool_expr::AggCall) -> State {
@@ -271,6 +277,23 @@ fn new_state(call: &tidepool_expr::AggCall) -> State {
         AggFunc::Min => State::Min(Scalar::Null),
         AggFunc::Max => State::Max(Scalar::Null),
         AggFunc::Avg => State::Avg { sum: 0.0, count: 0 },
+        AggFunc::Median | AggFunc::Percentile => State::Quantile(crate::stats::Counted::default()),
+        AggFunc::StddevSamp | AggFunc::StddevPop | AggFunc::VarSamp | AggFunc::VarPop => {
+            State::Moments(crate::stats::Moments::default())
+        }
+        AggFunc::ArgMax => State::Arg(true, None),
+        AggFunc::ArgMin => State::Arg(false, None),
+    }
+}
+
+/// Whether (by, value) `a` beats `b` for `ARG_MAX` (`max`) or `ARG_MIN`: by
+/// `by` first, then by the value, so ties have one answer.
+fn beats(a: (&Scalar, &Scalar), b: (&Scalar, &Scalar), max: bool) -> bool {
+    let order = a.0.sort_cmp(b.0).then_with(|| a.1.sort_cmp(b.1));
+    if max {
+        order == std::cmp::Ordering::Greater
+    } else {
+        order == std::cmp::Ordering::Less
     }
 }
 
@@ -282,12 +305,32 @@ fn sum_scale(ty: Type) -> u8 {
     }
 }
 
-fn update(state: &mut State, ty: Type, value: Scalar) {
-    if value.is_null() {
+fn update(state: &mut State, ty: Type, value: Scalar, by: Option<Scalar>) {
+    if value.is_null() || by.as_ref().is_some_and(Scalar::is_null) {
         // aggregates skip NULLs; COUNT(*) is fed a non-null marker
         return;
     }
     match state {
+        State::Quantile(counted) => {
+            if let Some(v) = value.as_f64() {
+                counted.add(v);
+            }
+        }
+        State::Moments(moments) => {
+            if let Some(v) = value.as_f64() {
+                moments.add(v);
+            }
+        }
+        State::Arg(max, best) => {
+            if let Some(by) = by {
+                let better = best
+                    .as_ref()
+                    .is_none_or(|(b, v)| beats((&by, &value), (b, v), *max));
+                if better {
+                    *best = Some((by, value));
+                }
+            }
+        }
         State::Count(n) => *n += 1,
         State::Sum { int, float, any } => {
             *any = true;
@@ -346,6 +389,16 @@ fn merge(into: &mut State, from: State) {
             *count += c;
         }
         (State::Distinct(a), State::Distinct(b)) => a.extend(b),
+        (State::Quantile(a), State::Quantile(b)) => a.merge(b),
+        (State::Moments(a), State::Moments(b)) => a.merge(b),
+        (State::Arg(max, a), State::Arg(_, b)) => {
+            if let Some((by, value)) = b
+                && a.as_ref()
+                    .is_none_or(|(x, y)| beats((&by, &value), (x, y), *max))
+            {
+                *a = Some((by, value));
+            }
+        }
         _ => {}
     }
 }
@@ -365,6 +418,7 @@ fn finish(state: State, call: &tidepool_expr::AggCall) -> Scalar {
                     &mut plain,
                     call.arg.as_ref().map_or(Type::Null, Expr::ty),
                     value,
+                    None,
                 );
             }
             plain
@@ -383,6 +437,13 @@ fn finish(state: State, call: &tidepool_expr::AggCall) -> Scalar {
         State::Avg { count: 0, .. } => Scalar::Null,
         State::Avg { sum, count } => Scalar::Float(sum / count as f64),
         State::Distinct(_) => Scalar::Null,
+        State::Quantile(counted) => counted
+            .quantile(call.fraction.unwrap_or(500_000))
+            .map_or(Scalar::Null, Scalar::Float),
+        State::Moments(moments) => moments
+            .finish(call.func)
+            .map_or(Scalar::Null, Scalar::Float),
+        State::Arg(_, best) => best.map_or(Scalar::Null, |(_, value)| value),
     }
 }
 
@@ -463,7 +524,8 @@ fn scan(reader: &Reader, plan: &AnchorPlan, anchor: &TableSnapshot, segment: usi
                 Some(arg) => eval(arg, &values),
                 None => Scalar::Bool(true),
             };
-            update(&mut entry.1[i], types[i], value);
+            let by = agg.call.by.as_ref().map(|by| eval(by, &values));
+            update(&mut entry.1[i], types[i], value, by);
         }
     }
     partial

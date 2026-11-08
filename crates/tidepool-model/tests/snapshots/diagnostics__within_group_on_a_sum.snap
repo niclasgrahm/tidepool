@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `order_value_p90`: SUM takes no WITHIN GROUP: only PERCENTILE_CONT does
+   --> model.ossie.yaml:110:63
+    |
+110 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount) WITHIN GROUP (ORDER BY orders.amount)" }] }
+    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

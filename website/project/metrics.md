@@ -17,8 +17,36 @@ metrics:
 The SQL can use:
 
 - the aggregates `SUM`, `COUNT`, `COUNT(DISTINCT …)`, `AVG`, `MIN` and `MAX`;
+- the statistics below;
 - `FILTER (WHERE …)` on an aggregate;
 - arithmetic, `CASE`, `COALESCE` and date functions.
+
+## statistics
+
+| aggregate | what it gives |
+| --- | --- |
+| `MEDIAN(x)` | the middle value |
+| `PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY x)` | the value that nine values in ten are under, between the two values next to it |
+| `STDDEV_SAMP(x)`, `STDDEV_POP(x)` | the standard deviation, of a sample or of all the values |
+| `VAR_SAMP(x)`, `VAR_POP(x)` | the variance, the same two ways |
+| `ARG_MAX(x, t)`, `ARG_MIN(x, t)` | `x` on the row with the largest (or smallest) `t`: the latest status, the first price |
+
+The statistics of `x` need a number. Each answer is a float, except
+`ARG_MAX` and `ARG_MIN`, which give a value of the type of `x`. The answers
+are exact: tidepool keeps each value of each group, and counts the values
+that repeat. A group with very many different values (a metric over a
+measurement in each row) uses that much memory. A median over 10 million
+orders by 120 groups takes about 0.2 to 0.7 s, where a sum takes about
+0.01 s.
+
+`ARG_MAX` and `ARG_MIN` skip rows where `x` or `t` is NULL. When two rows
+have the same `t`, the larger (or smaller) `x` wins.
+
+```yaml
+# fragment
+  - name: latest_status
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "ARG_MAX(orders.status, orders.ordered_at)" }] }
+```
 
 ## the anchor
 
