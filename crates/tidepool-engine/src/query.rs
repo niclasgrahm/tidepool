@@ -224,6 +224,9 @@ pub struct Query {
     /// Defaults to the dimensions, ascending.
     pub order: Vec<Order>,
     pub limit: Option<usize>,
+    /// Now, in UTC microseconds: where a `time_window` metric's window ends
+    /// when nothing on its time field is selected. Only those need it.
+    pub now: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

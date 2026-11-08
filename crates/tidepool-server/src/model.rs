@@ -11,6 +11,7 @@ use tidepool_config::server::Durability;
 use tidepool_expr::Type;
 use tidepool_model::ir::{
     Direction, FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId, Total,
+    WindowSpec,
 };
 use tidepool_protocol::{
     DatasetInfo, DurabilityStatus, FieldInfo, HierarchyInfo, MetricInfo, ModelInfo,
@@ -19,6 +20,14 @@ use tidepool_protocol::{
 
 use crate::AppState;
 use crate::query::type_name;
+
+/// A grain as a word: `month`.
+fn word(grain: TimeGrain) -> String {
+    match serde_json::to_value(grain) {
+        Ok(serde_json::Value::String(word)) => word,
+        _ => format!("{grain:?}").to_lowercase(),
+    }
+}
 
 /// `dataset.field`, or `table.column` for a table without a dataset.
 fn label(model: &Model, table: tidepool_model::ir::TableId, field: &str) -> String {
@@ -190,6 +199,13 @@ fn metric_info(model: &Model, m: &tidepool_model::ir::Metric) -> MetricInfo {
                 label(model, t.field.table, &t.field.field)
             )
             .to_lowercase()
+        }),
+        time_window: m.time_window.as_ref().map(|w| {
+            let span = match w.spec {
+                WindowSpec::ToDate(grain) => format!("{} to date", word(grain)),
+                WindowSpec::Last(n, grain) => format!("last {n} {}", word(grain)),
+            };
+            format!("{span} on {}", label(model, w.field.table, &w.field.field))
         }),
         format: m.format.clone(),
         ai_context: m.ai_context.clone(),

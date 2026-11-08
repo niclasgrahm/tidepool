@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `revenue_ytd`: time_window needs a time_field
+   --> model.ossie.yaml:120:15
+    |
+120 |         data: '{"time_window": "ytd"}'
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: e.g. {"time_window": "ytd", "time_field": "orders.ordered_at"}
+
+1 error, 0 warnings

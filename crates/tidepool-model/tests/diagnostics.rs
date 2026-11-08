@@ -418,8 +418,8 @@ case!(
     time_offset_on_non_time_field,
     [Replace(
         "model.ossie.yaml",
-        "\"time_field\": \"orders.ordered_at\"",
-        "\"time_field\": \"orders.status\""
+        "\"time_offset\": \"-1y\", \"time_field\": \"orders.ordered_at\"",
+        "\"time_offset\": \"-1y\", \"time_field\": \"orders.status\""
     )]
 );
 case!(
@@ -436,6 +436,22 @@ case!(
         "model.ossie.yaml",
         "\"PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY orders.amount)\"",
         "\"SUM(orders.amount) WITHIN GROUP (ORDER BY orders.amount)\""
+    )]
+);
+case!(
+    time_window_in_minutes_or_months,
+    [Replace(
+        "model.ossie.yaml",
+        "\"time_window\": \"last:7d\"",
+        "\"time_window\": \"last:7m\""
+    )]
+);
+case!(
+    time_window_without_a_field,
+    [Replace(
+        "model.ossie.yaml",
+        "'{\"time_window\": \"ytd\", \"time_field\": \"orders.ordered_at\"}'",
+        "'{\"time_window\": \"ytd\"}'"
     )]
 );
 case!(

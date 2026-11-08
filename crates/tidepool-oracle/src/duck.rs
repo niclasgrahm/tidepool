@@ -385,8 +385,15 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
     }
 
     // group base metrics by (anchor, selections they see, time shift,
-    // dimensions they group by: all, but for totals)
-    type Group = (String, Vec<usize>, Option<String>, Vec<usize>);
+    // dimensions they group by: all, but for totals, and window)
+    type Group = (
+        String,
+        Vec<usize>,
+        Option<String>,
+        Vec<usize>,
+        Option<String>,
+    );
+    let mut windows: BTreeMap<String, crate::generate::Windowed> = BTreeMap::new();
     let mut groups: BTreeMap<Group, Vec<String>> = BTreeMap::new();
     let mut shifts: BTreeMap<String, crate::generate::Shifted> = BTreeMap::new();
     for name in &bases {
@@ -395,11 +402,17 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             ignore,
             shift,
             total,
+            window,
             ..
         }) = schema.metric(name).map(|m| &m.kind)
         else {
             continue;
         };
+        let window_key = window.as_ref().map(|w| {
+            let key = format!("{w:?}");
+            windows.insert(key.clone(), w.clone());
+            key
+        });
         let kept: Vec<usize> = query
             .dims
             .iter()
@@ -432,18 +445,33 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
                         Ignore::All => false,
                         Ignore::Fields(fields) => !fields.contains(&format!("{table}.{column}")),
                     }
+                    // a window replaces the selection on its column
+                    && window
+                        .as_ref()
+                        .is_none_or(|w| !(w.table == *table && w.column == *column))
             })
             .map(|(i, _)| i)
             .collect();
         groups
-            .entry((anchor.clone(), seen, shift_key, kept))
+            .entry((anchor.clone(), seen, shift_key, kept, window_key))
             .or_default()
             .push(name.clone());
     }
 
     let mut ctes = Vec::new();
+    // windows per group: after `keys`, whose groups they look up
+    let mut deferred = Vec::new();
+    let mut per_group: Vec<bool> = Vec::new();
     let mut column_of: BTreeMap<String, String> = BTreeMap::new();
-    for (q, ((anchor, seen, shift, kept), metrics)) in groups.iter().enumerate() {
+    for (q, ((anchor, seen, shift, kept, window), metrics)) in groups.iter().enumerate() {
+        let window = window.as_ref().and_then(|k| windows.get(k));
+        // grouped by the window's field: a window per group
+        let grouped = window.and_then(|w| {
+            kept.iter()
+                .copied()
+                .find(|i| query.dims[*i].0 == w.table && query.dims[*i].1 == w.column)
+        });
+        per_group.push(grouped.is_some());
         // a time-shifted metric reads its table with the column moved
         let shifted = shift.as_ref().and_then(|k| shifts.get(k));
         let source = |table: &str| match shifted.filter(|s| s.table == table) {
@@ -484,7 +512,13 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             .iter()
             .enumerate()
             .filter(|(i, _)| kept.contains(i))
-            .map(|(i, d)| format!("{d} AS d{i}"))
+            .map(|(i, d)| {
+                if Some(i) == grouped {
+                    format!("g.gs AS d{i}")
+                } else {
+                    format!("{d} AS d{i}")
+                }
+            })
             .collect();
         for name in metrics {
             if let Some(MetricKind::Base { sql, .. }) = schema.metric(name).map(|m| &m.kind) {
@@ -505,6 +539,32 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             .map(|s| condition_sql(schema, s))
             .collect();
         conditions.extend(upward(schema, anchor, None, &visible));
+        if let Some(w) = window {
+            let t = field_sql(schema, &w.table, &w.column);
+            // each group's window ends where the group does
+            if let Some(i) = grouped {
+                {
+                    let end = format!(
+                        "(CAST(g.gs AS TIMESTAMP) + {})",
+                        interval(1, query.dims[i].2.unwrap_or("day"))
+                    );
+                    conditions.push("g.gs IS NOT NULL".to_string());
+                    conditions.push(format!(
+                        "{t} >= {} AND {t} < {end}",
+                        window_start(w.span, &end)
+                    ));
+                    from = format!("(SELECT DISTINCT d{i} AS gs FROM keys) AS g, {from}");
+                }
+            } else {
+                {
+                    let end = window_end(schema, query, w);
+                    conditions.push(format!(
+                        "{t} >= {} AND {t} < {end}",
+                        window_start(w.span, &end)
+                    ));
+                }
+            }
+        }
         let mut cte = format!("q{q} AS (SELECT {} FROM {from}", select.join(", "));
         if !conditions.is_empty() {
             let _ = write!(cte, " WHERE {}", conditions.join(" AND "));
@@ -513,7 +573,11 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
             let _ = write!(cte, " GROUP BY ALL");
         }
         cte.push(')');
-        ctes.push(cte);
+        if grouped.is_some() {
+            deferred.push(cte);
+        } else {
+            ctes.push(cte);
+        }
     }
 
     // a metric's value in the outer query: a column, or a derived expression
@@ -568,7 +632,7 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         let keys: Vec<String> = groups
             .keys()
             .enumerate()
-            .filter(|(_, (.., kept))| kept.len() == dims.len())
+            .filter(|(q, (.., kept, _))| kept.len() == dims.len() && !per_group[*q])
             .map(|(q, _)| format!("SELECT {} FROM q{q}", dim_names.join(", ")))
             .collect();
         let keys = if keys.is_empty() {
@@ -581,11 +645,15 @@ pub fn sql(schema: &Schema, query: &Query) -> String {
         } else {
             keys.join(" UNION ")
         };
-        let _ = write!(sql, ", keys AS ({keys})");
+        let comma = if ctes.is_empty() { "" } else { ", " };
+        let _ = write!(sql, "{comma}keys AS ({keys})");
+        for cte in &deferred {
+            let _ = write!(sql, ", {cte}");
+        }
         let mut select: Vec<String> = dim_names.iter().map(|d| format!("keys.{d}")).collect();
         select.extend(outputs);
         let _ = write!(sql, " SELECT {} FROM keys", select.join(", "));
-        for (q, (.., kept)) in groups.keys().enumerate() {
+        for (q, (.., kept, _)) in groups.keys().enumerate() {
             let on: Vec<String> = kept
                 .iter()
                 .map(|i| format!("keys.d{i} IS NOT DISTINCT FROM q{q}.d{i}"))
@@ -750,6 +818,60 @@ fn combinations_select(schema: &Schema, query: &Query, select: &[String]) -> Str
         let _ = write!(sql, " WHERE {}", conditions.join(" AND "));
     }
     sql
+}
+
+/// `n` of a DuckDB unit as an interval (weeks in days, quarters in months).
+fn interval(n: i64, unit: &str) -> String {
+    match unit {
+        "quarter" => format!("INTERVAL ({}) MONTH", 3 * n),
+        "week" => format!("INTERVAL ({}) DAY", 7 * n),
+        other => format!("INTERVAL ({n}) {}", other.to_uppercase()),
+    }
+}
+
+/// Where a window ending at `end` (SQL) starts.
+fn window_start(span: crate::generate::Span, end: &str) -> String {
+    match span {
+        crate::generate::Span::ToDate(unit) => {
+            format!("date_trunc('{unit}', {end} - INTERVAL 1 MICROSECOND)")
+        }
+        crate::generate::Span::Last(n, unit) => format!("({end} - {})", interval(n, unit)),
+    }
+}
+
+/// Where a window not grouped by its field ends: where the selection on
+/// the field ends, or with the period of the window's unit `now` is in.
+fn window_end(schema: &Schema, query: &Query, w: &crate::generate::Windowed) -> String {
+    let unit = match w.span {
+        crate::generate::Span::ToDate(unit) | crate::generate::Span::Last(_, unit) => unit,
+    };
+    let at = |micros: i64| {
+        tidepool_expr::temporal::datetime_from_micros(micros)
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+            .unwrap_or_default()
+    };
+    let selected = query
+        .selection
+        .iter()
+        .find(|(t, c, _)| *t == w.table && *c == w.column)
+        .map(|(_, _, cond)| cond);
+    match selected {
+        Some(Cond::Range(_, to)) => {
+            let source = gen_of(schema, &w.table, &w.column)
+                .cloned()
+                .unwrap_or(Gen::Float);
+            format!("CAST({} AS TIMESTAMP)", literal(to, &source))
+        }
+        Some(Cond::Relative { now, unit, ago, .. }) => {
+            let start = format!("date_trunc('{unit}', TIMESTAMP '{}')", at(*now));
+            format!("({start} + {})", interval(1 - i64::from(*ago), unit))
+        }
+        _ => format!(
+            "(date_trunc('{unit}', TIMESTAMP '{}') + {})",
+            at(query.now),
+            interval(1, unit)
+        ),
+    }
 }
 
 /// SQL for a filter list: the rows of `table` per value of `field`, under

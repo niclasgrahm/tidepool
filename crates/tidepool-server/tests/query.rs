@@ -728,3 +728,60 @@ async fn medians_percentiles_and_the_latest_value_are_exact() {
         json!([["north", 7.25, "returned"], ["south", 7.25, "paid"]])
     );
 }
+
+#[tokio::test]
+async fn windows_end_with_the_selection_or_the_period_and_run_per_group() {
+    let state = loaded().await;
+    let query = |body: Value| {
+        let state = Arc::clone(&state);
+        async move {
+            let reply = post(&state, "/v1/query", &body).await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+            reply.json()["rows"].clone()
+        }
+    };
+    // orders: 10.50 on 15 January, 4.00 on 1 February, 7.25 on 20 February
+    state.set_clock(Some(at("2026-02-21T12:00:00Z")));
+    // nothing selected: this year, and the last seven days (15 to 21 Feb)
+    assert_eq!(
+        query(json!({"metrics": ["revenue_ytd", "revenue_7d"]})).await,
+        json!([["21.75", "7.25"]])
+    );
+    // a selection ending 5 February ends the year to date there too
+    let to_5th = json!([{"field": "orders.ordered_at",
+                         "from": "2026-01-20T00:00:00Z", "to": "2026-02-05T00:00:00Z"}]);
+    assert_eq!(
+        query(json!({"metrics": ["revenue", "revenue_ytd"], "filters": to_5th})).await,
+        json!([["4.00", "14.50"]])
+    );
+    // by month: each month's year so far; February alone still reads January
+    let february = json!([{"field": "orders.ordered_at",
+                           "from": "2026-02-01T00:00:00Z", "to": "2026-03-01T00:00:00Z"}]);
+    assert_eq!(
+        query(json!({"metrics": ["revenue", "revenue_ytd"],
+                     "dimensions": [{"field": "orders.ordered_at", "grain": "month"}],
+                     "filters": february}))
+        .await,
+        json!([["2026-02-01", "11.25", "21.75"]])
+    );
+    // by day: each day's own seven days
+    assert_eq!(
+        query(json!({"metrics": ["revenue", "revenue_7d"],
+                     "dimensions": [{"field": "orders.ordered_at", "grain": "day"}]}))
+        .await,
+        json!([
+            ["2026-01-15", "10.50", "10.50"],
+            ["2026-02-01", "4.00", "4.00"],
+            ["2026-02-20", "7.25", "7.25"]
+        ])
+    );
+    // grouped by the time field without a grain: a window needs one
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["revenue_7d"], "dimensions": [{"field": "orders.ordered_at"}]}),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert!(reply.text().contains("grain"), "{}", reply.text());
+}

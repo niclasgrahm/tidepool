@@ -193,7 +193,7 @@ const REFUNDS_VISUAL: &str = "  - id: refunds_by_region
     type: bar
     dimensions: [customers.region]
     metrics: [refunds]
-    at: { x: 0, y: 8, w: 6, h: 3 }
+    at: { x: 0, y: 20, w: 6, h: 3 }
 ";
 
 #[tokio::test]

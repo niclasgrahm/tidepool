@@ -314,6 +314,7 @@ fn measures(
         }],
         metrics: vec![metric],
         selection: others.clone(),
+        now: Some(state.clock.now()),
         ..Query::default()
     };
     // only what can change the answer: sessions that differ elsewhere

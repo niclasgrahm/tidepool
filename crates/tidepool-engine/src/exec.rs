@@ -507,28 +507,72 @@ fn scan(reader: &Reader, plan: &AnchorPlan, anchor: &TableSnapshot, segment: usi
                 }
             })
             .collect();
-        let group_key: Vec<Key> = dims.iter().map(key).collect();
-        let entry = partial
-            .entry(group_key)
-            .or_insert_with(|| (dims, plan.aggs.iter().map(|a| new_state(&a.call)).collect()));
-        for (i, agg) in plan.aggs.iter().enumerate() {
-            if !agg.conditions.iter().all(|c| passed[*c]) {
-                continue;
+        // what each aggregate is fed from this row, if anything
+        let fed: Vec<Option<(Scalar, Option<Scalar>)>> = plan
+            .aggs
+            .iter()
+            .map(|agg| {
+                if !agg.conditions.iter().all(|c| passed[*c]) {
+                    return None;
+                }
+                if let Some(filter) = &agg.call.filter
+                    && eval(filter, &values) != Scalar::Bool(true)
+                {
+                    return None;
+                }
+                let value = match &agg.call.arg {
+                    Some(arg) => eval(arg, &values),
+                    None => Scalar::Bool(true),
+                };
+                Some((value, agg.call.by.as_ref().map(|by| eval(by, &values))))
+            })
+            .collect();
+        for dims in window_groups(plan, &values, dims) {
+            let group_key: Vec<Key> = dims.iter().map(key).collect();
+            let entry = partial
+                .entry(group_key)
+                .or_insert_with(|| (dims, plan.aggs.iter().map(|a| new_state(&a.call)).collect()));
+            for (i, fed) in fed.iter().enumerate() {
+                if let Some((value, by)) = fed {
+                    update(&mut entry.1[i], types[i], value.clone(), by.clone());
+                }
             }
-            if let Some(filter) = &agg.call.filter
-                && eval(filter, &values) != Scalar::Bool(true)
-            {
-                continue;
-            }
-            let value = match &agg.call.arg {
-                Some(arg) => eval(arg, &values),
-                None => Scalar::Bool(true),
-            };
-            let by = agg.call.by.as_ref().map(|by| eval(by, &values));
-            update(&mut entry.1[i], types[i], value, by);
         }
     }
     partial
+}
+
+/// The groups a row is in: its own, or with a window per group, each
+/// group (of the window's dimension) whose window holds the row.
+fn window_groups(plan: &AnchorPlan, values: &[Scalar], dims: Vec<Scalar>) -> Vec<Vec<Scalar>> {
+    let Some(window) = plan.window else {
+        return vec![dims];
+    };
+    let Some(t) = plan
+        .dims
+        .get(window.dim)
+        .and_then(|(access, _)| crate::window::micros(&values[*access]))
+    else {
+        // no time, no window holds it
+        return Vec::new();
+    };
+    let kind = &dims[window.dim];
+    crate::window::groups(window.spec, window.grain, t, 1000)
+        .into_iter()
+        .filter_map(|group| {
+            let value = match kind {
+                Scalar::Date(_) => {
+                    Scalar::Date(i32::try_from(group.div_euclid(crate::window::DAY)).ok()?)
+                }
+                Scalar::Timestamp(_) => Scalar::Timestamp(group),
+                Scalar::TimestampTz(_) => Scalar::TimestampTz(group),
+                _ => return None,
+            };
+            let mut dims = dims.clone();
+            dims[window.dim] = value;
+            Some(dims)
+        })
+        .collect()
 }
 
 fn merge_partials(mut a: Partial, b: Partial) -> Partial {
@@ -735,7 +779,8 @@ pub(crate) fn execute(
             },
             None => slow(&reader, anchor, table),
         };
-        if anchor.keep.len() < plan.dim_types.len() {
+        // totals and windows per group make no rows of their own
+        if anchor.keep.len() < plan.dim_types.len() || anchor.window.is_some() {
             let mut answers = HashMap::new();
             for (dims, finished) in groups {
                 let values: Vec<(usize, Scalar)> = anchor

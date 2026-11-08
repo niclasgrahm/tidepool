@@ -693,6 +693,7 @@ mod tests {
             ignores: Vec::new(),
             totals: Vec::new(),
             time_offset: None,
+            time_window: None,
             ai_context: None,
             dashboards: Vec::new(),
         };

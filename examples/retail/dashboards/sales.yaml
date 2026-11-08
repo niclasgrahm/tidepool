@@ -36,3 +36,8 @@ visuals:
     sort: { by: revenue, desc: true }
     limit: 50
     at: { x: 8, y: 0, w: 4, h: 4 }
+  - id: kpi_ytd
+    type: kpi
+    title: Year to date
+    metrics: [revenue_ytd]
+    at: { x: 0, y: 8, w: 3, h: 2 }

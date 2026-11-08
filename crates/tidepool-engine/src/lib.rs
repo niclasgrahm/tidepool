@@ -16,6 +16,7 @@ pub mod query;
 mod rows;
 mod stats;
 mod text;
+mod window;
 
 use std::sync::Arc;
 
@@ -78,7 +79,27 @@ impl Engine {
     /// # Errors
     /// As [`run`].
     pub fn run(&self, snapshot: &Snapshot, query: &Query) -> Result<ResultSet, QueryError> {
-        let key = format!("{:p} {query:?}", std::sync::Arc::as_ptr(&snapshot.model));
+        // `now` matters only to windows ending with the current period, which
+        // move a minute at the finest: keyed by the minute, so a cached answer
+        // is still found the next second
+        let windowed = query.metrics.iter().any(|id| {
+            snapshot
+                .model
+                .metric(*id)
+                .is_some_and(|m| m.time_window.is_some())
+        }) || snapshot
+            .model
+            .metrics
+            .iter()
+            .any(|m| m.time_window.is_some());
+        let keyed = Query {
+            now: query
+                .now
+                .filter(|_| windowed)
+                .map(|now| now.div_euclid(60_000_000)),
+            ..query.clone()
+        };
+        let key = format!("{:p} {keyed:?}", std::sync::Arc::as_ptr(&snapshot.model));
         if let Some(result) = self.caches.result(snapshot.epoch, &key) {
             return Ok(result);
         }

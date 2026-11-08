@@ -111,6 +111,20 @@ metrics:
   - name: latest_status                  # the status of the newest order
     description: The status of the newest order
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "ARG_MAX(orders.status, orders.ordered_at)" }] }
+  - name: revenue_ytd                    # from 1 January to where the time selection ends
+    description: Revenue from the start of the year
+    ai_context: { synonyms: [year to date, YTD] }
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"time_window": "ytd", "time_field": "orders.ordered_at"}'
+  - name: revenue_7d                     # by day: each day's last seven days
+    description: Revenue of the last seven days
+    ai_context: { synonyms: [rolling week, last 7 days] }
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"time_window": "last:7d", "time_field": "orders.ordered_at"}'
 
 custom_extensions:
   - vendor_name: TIDEPOOL

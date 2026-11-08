@@ -10,6 +10,7 @@ What a metric's Tidepool extension may say.
 | `table` | string |  | The dataset rows are counted on, for expressions that don't name one (`COUNT(*)`). |
 | `time_field` | string |  |  |
 | `time_offset` | string |  | Evaluate with the time selection on `time_field` shifted, e.g. `-1y`. |
+| `time_window` | string |  | Evaluate over a window of `time_field` in place of its selection: `ytd`, `qtd`, `mtd`, `wtd` (to date), or `last:<n><unit>` with unit `min`, `h`, `d`, `w`, `mo`, `q` or `y` (`last:12mo`). It ends where the time selection ends, or with the current period; in a visual grouped by `time_field`, each group's window ends where the group does (a running year to date, a rolling 12 months). |
 | `total` | list of string |  | Compute it without these of a visual's dimensions (`dataset.field`, or `*` for all of them), its value repeated across them: the denominator of a share of total (`revenue / revenue_total`). The selection still applies; a field the visual doesn't group by does nothing. |
 
 

@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `revenue_7d`: `last:7m` is not a time window
+   --> model.ossie.yaml:127:15
+    |
+127 |         data: '{"time_window": "last:7m", "time_field": "orders.ordered_at"}'
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: `m` could be months or minutes: write mo for months, min for minutes
+
+1 error, 0 warnings
