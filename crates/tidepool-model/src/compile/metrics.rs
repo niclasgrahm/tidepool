@@ -151,10 +151,20 @@ fn metric(
         base(cx, &at, text, &analysis, &ext, semantic, names)?
     };
     // a base metric is typed now; a derived one once its inputs are
+    let mut additive = false;
     let ty = match &body {
         MetricBody::Base { .. } => {
             match tidepool_expr::check_aggregation(&ast, &FieldScope { semantic }) {
-                Ok(aggregation) => aggregation.combine.ty(),
+                Ok(aggregation) => {
+                    use tidepool_expr::ir::AggFunc;
+                    additive = matches!(
+                        (aggregation.calls.as_slice(), &aggregation.combine),
+                        ([call], tidepool_expr::Expr::Column { .. })
+                            if !call.distinct
+                                && matches!(call.func, AggFunc::Sum | AggFunc::Count | AggFunc::CountStar)
+                    );
+                    aggregation.combine.ty()
+                }
                 Err(message) => {
                     cx.push(
                         Diagnostic::error(format!("{what}: {message}")).at(file, at.expr.clone()),
@@ -265,6 +275,7 @@ fn metric(
         description: spec.description.clone(),
         format: ext.format,
         body,
+        additive: additive && ext.total.is_empty() && ext.time_window.is_none(),
         ignore_selection,
         time_offset,
         total,

@@ -383,7 +383,9 @@ pub struct VisualFrame {
     /// Why the visual has no result (a metric the engine can't run yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// A KPI's comparison value, when its metric can be computed.
+    /// A KPI's comparison value, when its metric can be computed; a pie's
+    /// whole (its metric without the dimension), when the rest of it can be
+    /// a slice (a sum or a count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compare: Option<Value>,
 }

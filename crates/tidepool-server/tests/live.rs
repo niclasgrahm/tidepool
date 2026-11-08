@@ -1764,3 +1764,45 @@ async fn an_agent_reads_and_sets_what_a_person_has_selected() {
         reply.text()
     );
 }
+
+#[tokio::test]
+async fn a_pie_comes_with_its_whole_when_its_metric_adds_up() {
+    let (state, url) = server().await;
+    post(
+        &state,
+        "/v1/tables/products/rows?wait=visible",
+        &json!([{"product_id": "p2", "name": "Tent", "category": "camping", "list_price": "90.00"}]),
+    )
+    .await;
+    let mut tent = order("o3", "c2", "paid", "2.50");
+    tent["product_id"] = json!("p2");
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([tent]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    // the largest first, and the whole beside them: what a rest slice needs
+    let pie = visual(&frame, "category_share");
+    assert_eq!(
+        pie["result"]["rows"],
+        json!([["boats", "15.00"], ["camping", "2.50"]]),
+        "{pie}"
+    );
+    assert_eq!(pie["compare"], "17.50", "{pie}");
+    // a click on a slice selects its category
+    say(
+        &mut socket,
+        json!({"type": "select", "field": "products.category", "values": ["camping"]}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    assert_eq!(visual(&frame, "category_share")["compare"], "2.50");
+}

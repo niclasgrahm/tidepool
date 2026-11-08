@@ -1349,9 +1349,15 @@ fn visual_frame(
                 )
             })
     };
-    // a KPI's comparison: shown when its metric can be computed
+    // a KPI's comparison: shown when its metric can be computed; a pie's
+    // whole, when its metric adds up
+    let whole = (visual.visual_type == VisualType::Pie)
+        .then(|| visual.metrics.first().copied())
+        .flatten()
+        .filter(|id| snapshot.model.metric(*id).is_some_and(|m| m.additive));
     let compare = visual
         .compare
+        .or(whole)
         .and_then(|id| snapshot.model.metric(id))
         .and_then(|metric| {
             let answer = run(&QueryRequest {

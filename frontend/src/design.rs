@@ -11,12 +11,13 @@ use tidepool_config::format::NumberFormat;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
-pub const TYPES: [VisualType; 6] = [
+pub const TYPES: [VisualType; 7] = [
     VisualType::Table,
     VisualType::Rows,
     VisualType::Filter,
     VisualType::Bar,
     VisualType::Line,
+    VisualType::Pie,
     VisualType::Kpi,
 ];
 
@@ -30,6 +31,7 @@ pub fn type_label(t: VisualType) -> &'static str {
         VisualType::Line => "Line",
         VisualType::Kpi => "KPI",
         VisualType::Rows => "Rows",
+        VisualType::Pie => "Pie",
     }
 }
 
@@ -44,6 +46,7 @@ pub fn fits(t: VisualType, dimensions: &[DimensionRef], metrics: usize) -> bool 
             dims == 1 && metrics == 0 && dimensions.iter().all(|d| d.grain().is_none())
         }
         VisualType::Bar | VisualType::Line => dims == 1 && metrics > 0,
+        VisualType::Pie => dims == 1 && metrics == 1,
         VisualType::Kpi => dims == 0 && metrics > 0,
         VisualType::Rows => {
             dims > 0 && metrics == 0 && dimensions.iter().all(|d| d.grain().is_none())
@@ -69,6 +72,7 @@ pub fn size_of(t: VisualType) -> (u16, u16) {
         VisualType::Kpi => (3, 2),
         VisualType::Filter => (3, 4),
         VisualType::Rows => (12, 5),
+        VisualType::Pie => (4, 4),
         VisualType::Table | VisualType::Bar | VisualType::Line => (6, 4),
     }
 }
@@ -165,7 +169,7 @@ pub fn set_fields(
 /// sort only by something it still shows.
 pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool) {
     visual.visual_type = t;
-    visual.on_click = matches!(t, VisualType::Bar | VisualType::Table)
+    visual.on_click = matches!(t, VisualType::Bar | VisualType::Table | VisualType::Pie)
         .then_some(ClickAction::Select)
         .filter(|_| !visual.dimensions.is_empty());
     visual.on_brush = (t == VisualType::Line

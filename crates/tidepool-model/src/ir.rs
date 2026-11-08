@@ -277,6 +277,11 @@ pub struct Metric {
     pub description: Option<String>,
     pub format: Option<String>,
     pub body: MetricBody,
+    /// Whether its value over a whole is the sum of its values over parts:
+    /// a plain `SUM` or `COUNT` (not `COUNT(DISTINCT …)`). A pie shows the
+    /// rest of such a metric as one slice.
+    #[serde(default)]
+    pub additive: bool,
     /// Fields whose selection this metric ignores; `None` means it ignores
     /// none, `Some(empty)`… is never produced: `IgnoreSelection::All` is `*`.
     pub ignore_selection: IgnoreSelection,

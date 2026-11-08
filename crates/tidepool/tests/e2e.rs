@@ -1614,3 +1614,80 @@ fn an_ai_app_that_allows_no_webassembly_still_shows_the_numbers() {
         "the tool's numbers as a table",
     );
 }
+
+#[test]
+fn a_slice_of_the_pie_selects_its_category() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    post(
+        address,
+        "customers",
+        &json!([{"customer_id": "c1", "name": "Nora", "region": "north", "segment": null}]),
+    );
+    post(
+        address,
+        "products",
+        &json!([
+            {"product_id": "p1", "name": "Kelp", "category": "food", "list_price": "5.00"},
+            {"product_id": "p2", "name": "Tent", "category": "camping", "list_price": "90.00"},
+        ]),
+    );
+    let order = |id: &str, product: &str, amount: &str| {
+        json!({"order_id": id, "customer_id": "c1", "product_id": product, "status": "paid",
+               "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": amount, "note": null})
+    };
+    post(
+        address,
+        "orders",
+        &json!([order("o1", "p1", "30.00"), order("o2", "p2", "90.00")]),
+    );
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    let slices = "[...document.querySelectorAll('.visual.pie .slice')]";
+    browser.wait_for(&format!("{slices}.length === 2"), "two slices");
+    // a point inside food's slice: along its outer edge, a little inward
+    let food = browser.wait_for(
+        &format!(
+            "(() => {{ const svg = document.querySelector('.visual.pie svg.plot'); svg.scrollIntoView({{block: 'center'}}); \
+             const box = svg.getBoundingClientRect(); \
+             const c = [box.width / 2, box.height / 2]; \
+             const paths = {slices}; const i = [...document.querySelectorAll('.visual.pie .labels text')] \
+               .findIndex(t => t.textContent === 'food'); const path = paths[i]; if (!path) return null; \
+             const p = path.getPointAtLength(path.getTotalLength() * 0.2); \
+             const x = p.x + (c[0] - p.x) * 0.1, y = p.y + (c[1] - p.y) * 0.1; \
+             return [box.x + x, box.y + y]; }})()"
+        ),
+        "a point on food's slice",
+    );
+    let (Some(x), Some(y)) = (food[0].as_f64(), food[1].as_f64()) else {
+        panic!("no point on food's slice: {food}");
+    };
+    browser.click(x, y);
+    browser.wait_for(&format!("{CHIPS}.includes('food')"), "a chip for food");
+    browser.wait_for(
+        "document.querySelectorAll('.visual.pie .slice.selected').length === 1",
+        "food's slice edged as selected",
+    );
+    // the pie now shows food alone (it reads its own selection); cleared,
+    // both again, and from the keyboard: the first (the largest, camping)
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Clear all')",
+    );
+    browser.wait_for(&format!("{slices}.length === 2"), "both slices again");
+    browser.eval("document.querySelector('.visual.pie svg.plot').focus()");
+    browser.press("ArrowRight", 39, false);
+    browser.press("Enter", 13, false);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('camping')"),
+        "a chip for camping",
+    );
+}

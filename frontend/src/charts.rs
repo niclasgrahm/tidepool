@@ -719,6 +719,217 @@ pub fn ease(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Colours a pie cycles through (`.c0` … in `style.css`).
+pub const COLOURS: usize = 8;
+
+/// The angle a pie starts at: twelve o'clock, going clockwise.
+const TOP: f64 = -std::f64::consts::FRAC_PI_2;
+
+/// One slice of a pie: category `category`, or (`None`) the rest of a
+/// whole that the visual's largest categories don't show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slice {
+    pub category: Option<usize>,
+    pub key: String,
+    /// Angles in radians, clockwise from twelve o'clock's `TOP`.
+    pub start: f64,
+    pub end: f64,
+    pub colour: usize,
+    pub selected: bool,
+}
+
+/// A pie (a ring) of one metric by one dimension, laid out for a size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PieLayout {
+    pub width: f64,
+    pub height: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub radius: f64,
+    /// The hole's radius: a ring reads better than a disc.
+    pub hole: f64,
+    pub slices: Vec<Slice>,
+    pub labels: Vec<Label>,
+    /// Categories not drawn: no value, or one a slice can't be (0 or less).
+    pub left_out: usize,
+}
+
+impl PieLayout {
+    /// `selected` are the categories (as shown) the selection holds; `whole`
+    /// the metric over everything, when the rest can be a slice.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn new(
+        data: &Data,
+        (width, height): (f64, f64),
+        selected: &[String],
+        whole: Option<f64>,
+        measure: Measure,
+    ) -> Self {
+        let values = data.values.first().cloned().unwrap_or_default();
+        let shown: Vec<(usize, f64)> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| v.filter(|v| v.is_finite() && *v > 0.0).map(|v| (i, v)))
+            .collect();
+        let left_out = values.len() - shown.len();
+        let sum: f64 = shown.iter().map(|(_, v)| v).sum();
+        let listed: f64 = values.iter().flatten().filter(|v| v.is_finite()).sum();
+        let rest = whole
+            .map(|w| w - listed)
+            .filter(|r| *r > sum.abs().max(1.0) * 1e-9);
+        let total = sum + rest.unwrap_or(0.0);
+        let mut layout = Self {
+            width,
+            height,
+            cx: width / 2.0,
+            cy: height / 2.0,
+            left_out,
+            ..Self::default()
+        };
+        if total <= 0.0 || width <= 0.0 || height <= 0.0 {
+            return layout;
+        }
+        // room beside the ring for labels, a quarter of the width at most
+        let room = widest(data.keys.iter(), measure).min(width * 0.25) + 10.0;
+        layout.radius = (height / 2.0 - 8.0).min(width / 2.0 - room).max(10.0);
+        layout.hole = layout.radius * 0.55;
+        let full = std::f64::consts::TAU;
+        let mut at = TOP;
+        let mut slices: Vec<Slice> = shown
+            .iter()
+            .map(|(i, v)| {
+                let start = at;
+                at += full * v / total;
+                Slice {
+                    category: Some(*i),
+                    key: data.keys[*i].clone(),
+                    start,
+                    end: at,
+                    colour: i % COLOURS,
+                    selected: selected.contains(&data.keys[*i]),
+                }
+            })
+            .collect();
+        if let Some(rest) = rest {
+            slices.push(Slice {
+                category: None,
+                key: "Other".into(),
+                start: at,
+                end: at + full * rest / total,
+                colour: COLOURS,
+                selected: false,
+            });
+        }
+        // a label beside each slice big enough to name, on its side
+        for slice in &slices {
+            if slice.end - slice.start < full * 0.04 {
+                continue;
+            }
+            let mid = f64::midpoint(slice.start, slice.end);
+            let (x, y) = (
+                layout.cx + (layout.radius + 6.0) * mid.cos(),
+                layout.cy + (layout.radius + 6.0) * mid.sin(),
+            );
+            let right = mid.cos() >= 0.0;
+            let space = if right { width - x } else { x };
+            layout.labels.push(Label {
+                x,
+                y,
+                text: fit(&slice.key, space - 2.0, measure),
+                full: slice.key.clone(),
+                anchor: if right { "start" } else { "end" },
+            });
+        }
+        layout.slices = slices;
+        layout
+    }
+
+    /// The category at `(x, y)`, if the pointer is on a slice of one.
+    #[must_use]
+    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        let (dx, dy) = (x - self.cx, y - self.cy);
+        let distance = dx.hypot(dy);
+        if distance > self.radius || distance < self.hole * 0.5 {
+            return None;
+        }
+        let mut angle = dy.atan2(dx);
+        if angle < TOP {
+            angle += std::f64::consts::TAU;
+        }
+        self.slices
+            .iter()
+            .find(|s| s.start <= angle && angle < s.end)
+            .and_then(|s| s.category)
+    }
+
+    /// Where category `i`'s slice is: its middle, for the tooltip and the
+    /// keyboard.
+    #[must_use]
+    pub fn middle(&self, i: usize) -> Option<(f64, f64)> {
+        let slice = self.slices.iter().find(|s| s.category == Some(i))?;
+        let mid = f64::midpoint(slice.start, slice.end);
+        let r = f64::midpoint(self.radius, self.hole);
+        Some((self.cx + r * mid.cos(), self.cy + r * mid.sin()))
+    }
+
+    /// The SVG path of a slice: a piece of the ring.
+    #[must_use]
+    pub fn path(&self, slice: &Slice) -> String {
+        let (outer, inner) = (self.radius, self.hole);
+        // a whole ring can't be one arc: stop just short of the start
+        let end = if slice.end - slice.start >= std::f64::consts::TAU - 1e-9 {
+            slice.start + std::f64::consts::TAU - 1e-6
+        } else {
+            slice.end
+        };
+        let large = u8::from(end - slice.start > std::f64::consts::PI);
+        let point = |radius: f64, angle: f64| {
+            (
+                self.cx + radius * angle.cos(),
+                self.cy + radius * angle.sin(),
+            )
+        };
+        let (from, to) = (point(outer, slice.start), point(outer, end));
+        let (back, home) = (point(inner, end), point(inner, slice.start));
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "M{:.2},{:.2}A{outer:.2},{outer:.2} 0 {large} 1 {:.2},{:.2}L{:.2},{:.2}A{inner:.2},{inner:.2} 0 {large} 0 {:.2},{:.2}Z",
+            from.0, from.1, to.0, to.1, back.0, back.1, home.0, home.1
+        );
+        out
+    }
+
+    /// Part of the way (`t`, 0 to 1) from `self` to `to`: slices matched by
+    /// key; new ones grow from nothing where they'll be.
+    #[must_use]
+    pub fn blend(&self, to: &Self, t: f64) -> Self {
+        let slices = to
+            .slices
+            .iter()
+            .map(|slice| {
+                let (start, end) = self
+                    .slices
+                    .iter()
+                    .find(|s| s.key == slice.key)
+                    .map_or((slice.start, slice.start), |s| (s.start, s.end));
+                Slice {
+                    start: lerp(start, slice.start, t),
+                    end: lerp(end, slice.end, t),
+                    ..slice.clone()
+                }
+            })
+            .collect();
+        Self {
+            slices,
+            radius: lerp(self.radius, to.radius, t),
+            hole: lerp(self.hole, to.hole, t),
+            ..to.clone()
+        }
+    }
+}
+
 /// Where a key moves the keyboard's place among `n` categories.
 #[must_use]
 pub fn step_key(key: &str, at: Option<usize>, n: usize) -> Option<usize> {
@@ -1103,5 +1314,46 @@ mod tests {
     fn easing_ends_where_it_should() {
         assert!(close(ease(0.0), 0.0) && close(ease(1.0), 1.0) && close(ease(2.0), 1.0));
         assert!(ease(0.5) > 0.5, "more than half way at half time");
+    }
+
+    #[test]
+    fn a_pie_shares_out_the_whole_and_leaves_out_what_cant_be_a_slice() {
+        let rows = vec![
+            vec![json!("north"), json!(30)],
+            vec![json!("south"), json!(10)],
+            vec![json!("east"), json!(0)],
+            vec![json!("west"), Value::Null],
+        ];
+        let data = Data::new(&rows, &["revenue".into()]);
+        // the whole is 50: 10 more than the slices shown, as one more slice
+        let pie = PieLayout::new(&data, (400.0, 300.0), &["south".into()], Some(50.0), &chars);
+        assert_eq!(pie.left_out, 2);
+        assert_eq!(pie.slices.len(), 3);
+        let turn = |s: &Slice| (s.end - s.start) / std::f64::consts::TAU;
+        assert!((turn(&pie.slices[0]) - 0.6).abs() < 1e-9);
+        assert!((turn(&pie.slices[1]) - 0.2).abs() < 1e-9);
+        assert_eq!(pie.slices[2].category, None);
+        assert!(pie.slices[1].selected && !pie.slices[0].selected);
+        // twelve o'clock and a little clockwise is north's; the hole is nothing
+        let (x, y) = (pie.cx + 5.0, pie.cy - pie.radius * 0.9);
+        assert_eq!(pie.hit(x, y), Some(0));
+        assert_eq!(pie.hit(pie.cx, pie.cy), None);
+        assert_eq!(
+            pie.hit(pie.cx - 1.0, pie.cy - pie.radius * 0.9),
+            None,
+            "the rest selects nothing"
+        );
+        let (mx, my) = pie.middle(1).unwrap_or_default();
+        assert_eq!(pie.hit(mx, my), Some(1));
+        // without a whole (an average, say), no rest
+        let alone = PieLayout::new(&data, (400.0, 300.0), &[], None, &chars);
+        assert_eq!(alone.slices.len(), 2);
+        // new slices grow from where they'll be
+        let half = PieLayout::default().blend(&alone, 0.5);
+        assert!(
+            (half.slices[0].end - half.slices[0].start)
+                < (alone.slices[0].end - alone.slices[0].start)
+        );
+        assert!(alone.path(&alone.slices[0]).starts_with('M'));
     }
 }

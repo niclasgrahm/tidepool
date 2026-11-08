@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `category_share`: a pie reads up to 12 slices: show more as a bar chart
+  --> dashboards/sales.yaml:50:5
+   |
+50 |     limit: 20
+   |     ^^^^^
+
+1 error, 0 warnings
