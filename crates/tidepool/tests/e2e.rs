@@ -1309,3 +1309,64 @@ fn the_relationship_diagram_counts_live_and_opens_a_table() {
         "the customers table",
     );
 }
+
+#[test]
+fn a_view_an_agent_made_goes_live_and_is_saved_as_a_dashboard() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+    let view = json!({"name": "Regions now", "visuals": [
+        {"id": "regions", "type": "bar", "dimensions": ["customers.region"],
+         "metrics": ["revenue"], "on_click": "select"}
+    ]});
+    let id = match http(address, "POST", "/v1/views", &view.to_string()) {
+        Some((200, body)) => match serde_json::from_str::<Value>(&body) {
+            Ok(made) => made["id"].as_str().unwrap_or_default().to_string(),
+            Err(err) => panic!("the view's answer: {err}: {body}"),
+        },
+        other => panic!("making a view: {other:?}"),
+    };
+
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/v/{id}") }),
+    );
+    browser.wait_for(&format!("{BARS}.length === 2"), "the view's two bars");
+    browser.wait_for(
+        "document.querySelector('.toolbar h1')?.textContent === 'Regions now'",
+        "the view's name in the toolbar",
+    );
+    browser.wait_for(
+        "document.querySelector('.toolbar .tag')?.textContent === 'view'",
+        "the toolbar to say it's a view",
+    );
+    // it selects like a dashboard
+    browser.click_element(&bar_labelled("north"));
+    browser.wait_for(
+        &format!("{CHIPS}.includes('north')"),
+        "a chip for region north",
+    );
+    // and saving it makes a dashboard file of it
+    browser.eval("window.prompt = () => 'regions_now'");
+    browser.click_element("document.querySelector('.save-view')");
+    browser.wait_for(
+        "location.hash === '#/d/regions_now'",
+        "the saved dashboard to open",
+    );
+    // the session's selection goes with it: north alone
+    browser.wait_for(
+        &format!("{BARS}.length === 1"),
+        "the saved dashboard's bar, under the selection",
+    );
+    assert!(
+        config.path().join("dashboards/regions_now.yaml").exists(),
+        "the view written to the config directory"
+    );
+}

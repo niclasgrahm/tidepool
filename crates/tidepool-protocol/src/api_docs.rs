@@ -91,6 +91,8 @@ pub enum Operation {
     Query,
     Rows,
     Live,
+    CreateView,
+    GetView,
     GetModel,
     GetStatus,
     GetConfig,
@@ -109,7 +111,7 @@ pub enum Operation {
 }
 
 /// Every operation, for tests that need to walk them all.
-pub const OPERATIONS: [Operation; 29] = [
+pub const OPERATIONS: [Operation; 31] = [
     Operation::Health,
     Operation::Ready,
     Operation::GetInfo,
@@ -124,6 +126,8 @@ pub const OPERATIONS: [Operation; 29] = [
     Operation::Query,
     Operation::Rows,
     Operation::Live,
+    Operation::CreateView,
+    Operation::GetView,
     Operation::GetModel,
     Operation::GetStatus,
     Operation::GetConfig,
@@ -160,6 +164,8 @@ impl Operation {
             Self::Query => "query",
             Self::Rows => "rows",
             Self::Live => "live",
+            Self::CreateView => "createView",
+            Self::GetView => "getView",
             Self::GetModel => "getModel",
             Self::GetStatus => "getStatus",
             Self::GetConfig => "getConfig",
@@ -763,6 +769,69 @@ pub fn endpoints() -> Vec<ApiDoc> {
             }],
         },
         ApiDoc {
+            path: "/v1/views",
+            method: Method::Post,
+            operation: Operation::CreateView,
+            summary: "Make a view",
+            description: "A view is a dashboard that lives only in the server's memory: \
+                          checked by the same rules as a dashboard file and shown live like \
+                          one (`open_dashboard` with its id), but never written to the \
+                          config, versioned or committed. For an answer an agent shows once; \
+                          saving it as a dashboard is a config change like any other. The \
+                          body is a dashboard file as JSON (the `dashboard` schema); a visual \
+                          without `at` is placed for you. A view nobody opens for 24 hours \
+                          is forgotten, and at most 1000 are kept.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                description: "A dashboard file, as JSON.",
+                body: Body::AnyJson,
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The view: its id, and what it shows.",
+                    body: Body::Json("ViewInfo"),
+                },
+                ResponseDoc {
+                    status: 422,
+                    description: "The dashboard doesn't compile: its problems.",
+                    body: Body::Json("ViewProblems"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/v1/views/{id}",
+            method: Method::Get,
+            operation: Operation::GetView,
+            summary: "A view",
+            description: "A view made with `POST /v1/views`: what it shows, and its \
+                          dashboard file as YAML, ready to save under `dashboards/`.",
+            tag: Tag::Queries,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "id",
+                description: "The view's id, as making it answered.",
+                example: "~3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            }],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The view.",
+                    body: Body::Json("ViewInfo"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No such view, or it was forgotten.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/v1/model",
             method: Method::Get,
             operation: Operation::GetModel,
@@ -1279,6 +1348,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("ConfigVersion", of(schema_for!(config::ConfigVersion)));
     schemas.insert("PendingChange", of(schema_for!(config::PendingChange)));
     schemas.insert("SessionInfo", of(schema_for!(SessionInfo)));
+    schemas.insert("ViewInfo", of(schema_for!(crate::live::ViewInfo)));
+    schemas.insert("ViewProblems", of(schema_for!(crate::live::ViewProblems)));
     schemas
 }
 

@@ -39,6 +39,14 @@
       "text": "read_rows"
     },
     {
+      "link": "/reference/mcp#tool-show-view",
+      "text": "show_view"
+    },
+    {
+      "link": "/reference/mcp#tool-save-view",
+      "text": "save_view"
+    },
+    {
       "link": "/reference/mcp#tool-get-config",
       "text": "get_config"
     },

@@ -66,16 +66,15 @@ fn App() -> impl IntoView {
             window.add_event_listener_with_callback("hashchange", on_hash.as_ref().unchecked_ref());
         on_hash.forget(); // lives as long as the page
     }
-    let on_dashboard = move || matches!(route.get(), Route::Dashboard(_));
+    let on_dashboard = move || route.with(Route::shows_a_board);
+    let on_view = move || matches!(route.get(), Route::View(_));
     let slug = move || match route.get() {
-        Route::Dashboard(slug) => slug,
+        Route::Dashboard(slug) | Route::View(slug) => slug,
         _ => String::new(),
     };
     let dashboard_name = move || {
         let slug = slug();
-        live.dashboards
-            .with(|d| d.iter().find(|d| d.id == slug).map(|d| d.name.clone()))
-            .unwrap_or(slug)
+        live.board_info(&slug).map_or(slug, |d| d.name)
     };
 
     view! {
@@ -89,7 +88,7 @@ fn App() -> impl IntoView {
                 "tidepool"
             </a>
             <nav class="main-nav" aria-label="Sections">
-                <a href=Route::Home.href() class:current=move || matches!(route.get(), Route::Home | Route::Dashboard(_) | Route::Edit(_) | Route::NewDashboard)>"Dashboards"</a>
+                <a href=Route::Home.href() class:current=move || matches!(route.get(), Route::Home | Route::Dashboard(_) | Route::View(_) | Route::Edit(_) | Route::NewDashboard)>"Dashboards"</a>
                 <a href=Route::Model(Tab::Tables).href() class:current=move || matches!(route.get(), Route::Model(_) | Route::Table(_))>"Model"</a>
                 <a href=Route::Config(ConfigTab::Edit).href() class:current=move || matches!(route.get(), Route::Config(_))>"Config"</a>
                 <a href=Route::Status.href() class:current=move || route.get() == Route::Status>"Status"</a>
@@ -104,7 +103,7 @@ fn App() -> impl IntoView {
                     <a href=Route::Home.href()>"Dashboards"</a>
                     <span class="crumb-sep" aria-hidden="true">"/"</span>
                     <h1>{dashboard_name}</h1>
-                    <code class="tag">{move || format!("{}.yaml", slug())}</code>
+                    <code class="tag">{move || if on_view() { "view".to_string() } else { format!("{}.yaml", slug()) }}</code>
                 </div>
                 <span class="divider" aria-hidden="true"></span>
                 <Selection />
@@ -113,10 +112,23 @@ fn App() -> impl IntoView {
                         "answered in "<code>{millis(ms)}</code>
                     </span>
                 })}
-                <a class="button edit-link" href=move || Route::Edit(slug()).href()>
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11 2.5l2.5 2.5L6 12.5H3.5V10z" /></svg>
-                    "Edit"
-                </a>
+                <Show
+                    when=on_view
+                    fallback=move || view! {
+                        <a class="button edit-link" href=move || Route::Edit(slug()).href()>
+                            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11 2.5l2.5 2.5L6 12.5H3.5V10z" /></svg>
+                            "Edit"
+                        </a>
+                    }
+                >
+                    <button
+                        class="button save-view"
+                        title="Write this view to the config as a dashboard file"
+                        on:click=move |_| dashboard::save_view(slug(), &dashboard_name())
+                    >
+                        "Save as dashboard"
+                    </button>
+                </Show>
             </div>
         </Show>
         {move || live.problem.get().map(|p| view! {
@@ -126,7 +138,7 @@ fn App() -> impl IntoView {
         })}
         {move || match route.get() {
             Route::Home => view! { <pages::Home /> }.into_any(),
-            Route::Dashboard(slug) => view! { <dashboard::Dashboard slug=slug /> }.into_any(),
+            Route::Dashboard(slug) | Route::View(slug) => view! { <dashboard::Dashboard slug=slug /> }.into_any(),
             Route::Edit(slug) => view! { <designer::Designer slug=Some(slug) /> }.into_any(),
             Route::NewDashboard => view! { <designer::Designer slug=None /> }.into_any(),
             Route::Model(tab) => view! { <pages::Model tab=tab /> }.into_any(),
@@ -145,8 +157,9 @@ fn Pulse(#[prop(into)] on_dashboard: Signal<bool>) -> impl IntoView {
     let live = expect_context::<Live>();
     let waiting = move || {
         let behind = live
-            .server_epoch
+            .server
             .get()
+            .0
             .saturating_sub(live.board.with(|b| b.epoch));
         (live.paused.get() && behind > 0).then_some(behind)
     };
@@ -163,7 +176,7 @@ fn Pulse(#[prop(into)] on_dashboard: Signal<bool>) -> impl IntoView {
         let shown = if on_dashboard.get() && live.updated.get() > 0.0 {
             live.board.with(|b| b.epoch)
         } else {
-            live.server_epoch.get()
+            live.server.get().0
         };
         format!("epoch {}", display(&json!(shown)))
     };
@@ -276,7 +289,7 @@ fn StatusBar() -> impl IntoView {
                 {move || if live.connected.get() { "ws connected" } else { "ws disconnected" }}
             </span>
             <span>
-                {move || format!("snapshot {}", display(&json!(live.server_epoch.get())))}
+                {move || format!("snapshot {}", display(&json!(live.server.get().0)))}
                 {move || age().map(|a| format!(" · updated {a}"))}
             </span>
             {move || status.get().map(|s| view! {
@@ -284,7 +297,7 @@ fn StatusBar() -> impl IntoView {
                 <span>{format!("{} sessions", s.sessions)}</span>
                 <span>{format!("publish {} · refresh {}", millis(s.epoch_publish_ms), millis(s.live_refresh_ms))}</span>
             })}
-            <span>{move || format!("ingest {} rows/s", compact(live.rate.get()))}</span>
+            <span>{move || format!("ingest {} rows/s", compact(live.server.get().1))}</span>
             <span class="grow"></span>
             {move || status.get().map(|s| view! { <span>{format!("model v{}", s.config_version)}</span> })}
             <Suspense fallback=|| view! { <span>"…"</span> }>

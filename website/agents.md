@@ -21,6 +21,8 @@ Omit the header when the server has no tokens.
 | `preview_table` | the newest rows of a table | read |
 | `query_metrics` | metrics grouped by fields, under filters | read |
 | `read_rows` | the newest rows of a table that pass filters. A `contains` filter finds text, for example in log lines. | read |
+| `show_view` | shows an answer as a live view: a dashboard in memory, never written to the config. The answer has its id, its path in the UI and the numbers of each visual. | read |
+| `save_view` | writes a view to `dashboards/<id>.yaml`, with the same policy as `apply_change` | admin |
 | `get_config` | every config file, and the current version | admin |
 | `plan_change` | what a change does: problems, and each part with its class | admin |
 | `apply_change` | applies a change if the policy allows it, or puts it in the queue | admin |
@@ -83,6 +85,14 @@ agents:
 ```
 
 The history shows which changes an agent made (`an agent: …`).
+
+## show an answer
+
+`show_view` takes visuals as a dashboard file does (see `visual_types` in
+`describe_model`). tidepool calculates every number, keeps the view live as
+data arrives, and filters it when a person clicks. Open it at
+`/#/v/<id>` on the server. If the person wants to keep it, `save_view`
+makes it a dashboard. See [the live protocol](/data/live#views).
 
 ## a good loop
 

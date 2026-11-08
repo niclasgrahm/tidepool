@@ -48,6 +48,32 @@ The newest rows of a table that pass filters, newest first: the fields to show (
 | `limit` | integer | `100` |  |
 
 
+## `show_view` {#tool-show-view}
+
+**Show a live view** · read only
+
+Shows an answer as a view: a dashboard that lives only in memory, drawn and kept live by Tidepool, cross-filtered by clicks, and never written to the config. Visuals as in a dashboard file (`id`, `type`, `dimensions`, `metrics`, …; see visual_types in describe_model; `at` is optional), filters as in one. The answer has the view's id, its path in the UI (`/#/v/<id>`), and each visual's numbers as of now. The view is forgotten after a day unused; save_view keeps it.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `filters` | list of object |  |  |
+| `name` | string |  | Its title. |
+| `visuals` | list of object | **required** |  |
+
+
+## `save_view` {#tool-save-view}
+
+**Save a view as a dashboard**
+
+Writes a view as dashboards/&lt;id&gt;.yaml, through the same policy as apply_change: added at once when agents may apply safe changes, otherwise waiting for a person. Needs the admin token.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `id` | string | **required** | The dashboard's id: its file name. |
+| `summary` | string |  | Who or what made it, for the history. |
+| `view` | string | **required** | The view's id, from show_view. |
+
+
 ## `get_config` {#tool-get-config}
 
 **Get the config** · read only

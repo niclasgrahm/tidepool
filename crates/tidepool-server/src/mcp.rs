@@ -161,6 +161,45 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true },
         },
         {
+            "name": "show_view",
+            "title": "Show a live view",
+            "description": "Shows an answer as a view: a dashboard that lives only in memory, \
+                            drawn and kept live by Tidepool, cross-filtered by clicks, and \
+                            never written to the config. Visuals as in a dashboard file \
+                            (`id`, `type`, `dimensions`, `metrics`, …; see visual_types in \
+                            describe_model; `at` is optional), filters as in one. The answer \
+                            has the view's id, its path in the UI (`/#/v/<id>`), and each \
+                            visual's numbers as of now. The view is forgotten after a day \
+                            unused; save_view keeps it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Its title." },
+                    "visuals": { "type": "array", "items": { "type": "object" } },
+                    "filters": { "type": "array", "items": { "type": "object" } },
+                },
+                "required": ["visuals"],
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "save_view",
+            "title": "Save a view as a dashboard",
+            "description": "Writes a view as dashboards/<id>.yaml, through the same policy as \
+                            apply_change: added at once when agents may apply safe changes, \
+                            otherwise waiting for a person. Needs the admin token.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "description": "The view's id, from show_view." },
+                    "id": { "type": "string", "description": "The dashboard's id: its file name." },
+                    "summary": { "type": "string", "description": "Who or what made it, for the history." },
+                },
+                "required": ["view", "id"],
+            },
+            "annotations": { "destructiveHint": true },
+        },
+        {
             "name": "get_config",
             "title": "Get the config",
             "description": "Every config file of the current version, and the version: the \
@@ -402,6 +441,8 @@ async fn call(
             ok(api(state, caller, Method::POST, "/v1/config/plan", Some(&body)).await)
         }
         "apply_change" => apply_change(state, caller, args).await,
+        "show_view" => show_view(state, caller, args).await,
+        "save_view" => save_view(state, caller, args).await,
         "ingest_rows" => {
             let table = text("table")?;
             let path = format!("/v1/tables/{table}/rows?wait=visible");
@@ -409,6 +450,112 @@ async fn call(
         }
         other => Err(format!("no tool `{other}`")),
     }
+}
+
+/// `save_view`: the view's YAML as a dashboard file, through
+/// [`apply_change`]'s policy.
+async fn save_view(
+    state: &Arc<AppState>,
+    caller: &Asker<'_>,
+    args: &Value,
+) -> Result<Value, String> {
+    let text = |key: &str| {
+        args[key]
+            .as_str()
+            .map(str::to_string)
+            .ok_or(format!("`{key}` is required"))
+    };
+    let (view, id) = (text("view")?, text("id")?);
+    let (status, found) = api(
+        state,
+        caller,
+        Method::GET,
+        &format!("/v1/views/{view}"),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(found["error"]
+            .as_str()
+            .unwrap_or("no such view")
+            .to_string());
+    }
+    let (status, config) = api(state, caller, Method::GET, "/v1/config", None).await;
+    if !status.is_success() {
+        return Err(config["error"]
+            .as_str()
+            .unwrap_or("the config can't be read")
+            .to_string());
+    }
+    let mut files = serde_json::Map::new();
+    files.insert(format!("dashboards/{id}.yaml"), found["yaml"].clone());
+    let args = json!({
+        "files": files,
+        "base_version": config["version"],
+        "summary": args["summary"].as_str().unwrap_or("saved a view"),
+    });
+    apply_change(state, caller, &args).await
+}
+
+/// `show_view`: make the view, then answer each of its visuals' queries
+/// through the API, so the agent sees what the user sees.
+async fn show_view(
+    state: &Arc<AppState>,
+    caller: &Asker<'_>,
+    args: &Value,
+) -> Result<Value, String> {
+    let body = json!({
+        "name": args["name"].as_str().unwrap_or("View"),
+        "visuals": args["visuals"],
+        "filters": args.get("filters").cloned().unwrap_or_else(|| json!([])),
+    });
+    let (status, made) = api(state, caller, Method::POST, "/v1/views", Some(&body)).await;
+    if !status.is_success() {
+        let problems = made["problems_text"].as_str().unwrap_or_default();
+        let error = made["error"]
+            .as_str()
+            .unwrap_or("the view couldn't be made");
+        return Err(if problems.is_empty() {
+            error.to_string()
+        } else {
+            format!("{error}:\n{problems}")
+        });
+    }
+    let id = made["id"].as_str().unwrap_or_default().to_string();
+    let snapshot = state.writer.snapshot();
+    let mut answers = serde_json::Map::new();
+    if let Some(Ok(dashboard)) = state.views.get(state, &snapshot, &id) {
+        for visual in &dashboard.visuals {
+            let request = crate::live::request(&snapshot.model, visual);
+            let (path, body) = match visual.visual_type {
+                tidepool_config::dashboard::VisualType::Filter => continue,
+                tidepool_config::dashboard::VisualType::Rows => (
+                    "/v1/rows",
+                    json!({
+                        "fields": request.dimensions.iter().map(|d| d.field.clone()).collect::<Vec<_>>(),
+                        "limit": visual.limit,
+                    }),
+                ),
+                _ => (
+                    "/v1/query",
+                    serde_json::to_value(&request).unwrap_or_default(),
+                ),
+            };
+            let (status, answer) = api(state, caller, Method::POST, path, Some(&body)).await;
+            let answer = if status.is_success() {
+                answer
+            } else {
+                json!({ "error": answer["error"] })
+            };
+            answers.insert(visual.id.clone(), answer);
+        }
+    }
+    Ok(json!({
+        "view": id,
+        "path": format!("/#/v/{id}"),
+        "dashboard": made["dashboard"],
+        "answers": answers,
+    }))
 }
 
 /// `apply_change`: the agents' policy, then the config API.

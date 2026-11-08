@@ -121,6 +121,8 @@ async fn the_handshake_lists_the_tools() {
             "preview_table",
             "query_metrics",
             "read_rows",
+            "show_view",
+            "save_view",
             "get_config",
             "plan_change",
             "apply_change",
@@ -546,4 +548,78 @@ async fn an_agent_never_applies_a_change_to_who_can_reach_the_server() {
     assert!(!failed, "{proposed}");
     assert_eq!(proposed["status"], "queued", "{proposed}");
     assert_eq!(proposed["plan"]["class"], "security", "{proposed}");
+}
+
+#[tokio::test]
+async fn an_agent_shows_a_live_view_and_saves_it_as_a_dashboard() {
+    let state = server(Tokens::default()).await;
+    let (_, _) = tool(
+        &state,
+        None,
+        "ingest_rows",
+        json!({"table": "customers", "rows": [{"customer_id": "c1", "name": "Ada", "region": "north"}]}),
+    )
+    .await;
+    let (_, _) = tool(
+        &state,
+        None,
+        "ingest_rows",
+        json!({"table": "orders", "rows": [
+            {"order_id": "o1", "customer_id": "c1", "product_id": "p1", "status": "paid",
+             "ordered_at": "2026-02-01T10:00:00Z", "quantity": 1, "amount": "10.00"}
+        ]}),
+    )
+    .await;
+    let (failed, shown) = tool(
+        &state,
+        None,
+        "show_view",
+        json!({"name": "Revenue by region", "visuals": [
+            {"id": "regions", "type": "bar", "dimensions": ["customers.region"], "metrics": ["revenue"]},
+            {"id": "total", "type": "kpi", "metrics": ["revenue"]},
+        ]}),
+    )
+    .await;
+    assert!(!failed, "{shown}");
+    let view = shown["view"].as_str().unwrap_or_default().to_string();
+    assert!(view.starts_with('~'), "{shown}");
+    assert_eq!(shown["path"], format!("/#/v/{view}"));
+    // the agent sees the numbers the user sees
+    assert_eq!(
+        shown["answers"]["regions"]["rows"],
+        json!([["north", "10.00"]])
+    );
+    assert_eq!(shown["answers"]["total"]["rows"], json!([["10.00"]]));
+    // a mistake reads like a compiler's
+    let (failed, wrong) = tool(
+        &state,
+        None,
+        "show_view",
+        json!({"visuals": [{"id": "a", "type": "kpi", "metrics": ["revnue"]}]}),
+    )
+    .await;
+    assert!(failed);
+    assert!(
+        wrong["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("revenue")),
+        "{wrong}"
+    );
+    // saved: a dashboard file, applied as a safe change
+    let (failed, saved) = tool(
+        &state,
+        None,
+        "save_view",
+        json!({"view": view, "id": "regions", "summary": "revenue by region"}),
+    )
+    .await;
+    assert!(!failed, "{saved}");
+    assert_eq!(saved["status"], "applied", "{saved}");
+    let (_, model) = tool(&state, None, "describe_model", json!({})).await;
+    assert!(
+        model["dashboards"].as_array().is_some_and(|d| d
+            .iter()
+            .any(|d| d["id"] == "regions" && d["name"] == "Revenue by region")),
+        "{model}"
+    );
 }

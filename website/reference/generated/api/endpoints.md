@@ -178,6 +178,34 @@ Upgrades to a WebSocket speaking the live protocol: JSON messages tagged by `typ
 | --- | --- | --- |
 | `101` | none | Switching to the WebSocket protocol. |
 
+### `POST /v1/views` {#op-createview}
+
+**Make a view** · access: `read`
+
+A view is a dashboard that lives only in the server's memory: checked by the same rules as a dashboard file and shown live like one (`open_dashboard` with its id), but never written to the config, versioned or committed. For an answer an agent shows once; saving it as a dashboard is a config change like any other. The body is a dashboard file as JSON (the `dashboard` schema); a visual without `at` is placed for you. A view nobody opens for 24 hours is forgotten, and at most 1000 are kept.
+
+Request: JSON. A dashboard file, as JSON.
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`ViewInfo`](/reference/schemas#schema-viewinfo) | The view: its id, and what it shows. |
+| `422` | [`ViewProblems`](/reference/schemas#schema-viewproblems) | The dashboard doesn't compile: its problems. |
+
+### `GET /v1/views/{id}` {#op-getview}
+
+**A view** · access: `read`
+
+A view made with `POST /v1/views`: what it shows, and its dashboard file as YAML, ready to save under `dashboards/`.
+
+| path parameter | description | example |
+| --- | --- | --- |
+| `id` | The view's id, as making it answered. | `~3f9c2a7d41b0e85c6d2f1a9b7e4c3d20` |
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [`ViewInfo`](/reference/schemas#schema-viewinfo) | The view. |
+| `404` | [`ApiError`](/reference/schemas#schema-apierror) | No such view, or it was forgotten. |
+
 ### `GET /v1/model` {#op-getmodel}
 
 **The semantic model** · access: `read`

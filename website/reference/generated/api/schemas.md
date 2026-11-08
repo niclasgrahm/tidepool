@@ -273,6 +273,28 @@ One applied version: `GET /v1/config/versions`.
 | `version` | integer | **required** |  |
 
 
+## `ViewInfo` {#schema-viewinfo}
+
+A view (`POST /v1/views`): a dashboard that lives only in memory.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `dashboard` | [`DashboardInfo`](#schema-dashboardinfo) | **required** |  |
+| `id` | string | **required** | What `open_dashboard` opens it by: `~` and 32 hex digits. |
+| `yaml` | string | **required** | Its dashboard file, as YAML: what saving it writes. |
+
+
+## `ViewProblems` {#schema-viewproblems}
+
+Why a view couldn't be made.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `error` | string | **required** |  |
+| `problems` | list of [`ConfigProblem`](#schema-configproblem) | **required** |  |
+| `problems_text` | string | **required** | The problems as the CLI prints them, with the lines they point at. |
+
+
 ## `ExternalEdits` {#schema-externaledits}
 
 Edits found in the config directory that the server hasn't applied.
@@ -469,6 +491,18 @@ A result column to sort by, by its name in [`QueryResult::columns`].
 | `type` | string | **required** | The column type as written in the table file, e.g. `decimal(14,2)`. |
 
 
+## `DashboardInfo` {#schema-dashboardinfo}
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `columns` | integer | **required** |  |
+| `filters` | list of [`FilterInfo`](#schema-filterinfo) | **required** |  |
+| `id` | string | **required** | The file name, and the dashboard's URL path. |
+| `name` | string | **required** |  |
+| `row_height` | integer | **required** |  |
+| `visuals` | list of [`VisualInfo`](#schema-visualinfo) | **required** |  |
+
+
 ## `FieldInfo` {#schema-fieldinfo}
 
 | key | type | default | description |
@@ -495,6 +529,34 @@ A window of whole periods relative to now: `last` periods of `unit`, ending with
 | `unit` | [`RelativeUnit`](#schema-relativeunit) | **required** |  |
 
 
+## `FilterInfo` {#schema-filterinfo}
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `default` | [`RelativeWindow`](#schema-relativewindow) |  | The window a `date_range` starts with when the dashboard is opened. |
+| `field` | string | **required** | `dataset.field`. |
+| `measure` | string |  | The metric shown beside each value instead of its rows. |
+| `measure_format` | string |  | The measure's format (`currency:EUR compact`, …; see the metric's `format`). |
+| `timed` | boolean | `false` | Whether the field has a time of day, so windows of hours and minutes apply to it (a date has none). |
+| `widget` | string | **required** | `list`, `tree`, `date_range` or `search`. |
+
+
+## `VisualInfo` {#schema-visualinfo}
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `at` | [`GridAt`](#schema-gridat) | **required** |  |
+| `compare` | string |  | A KPI's comparison metric. |
+| `dimensions` | list of [`QueryDimension`](#schema-querydimension) | **required** |  |
+| `formats` | map of string |  | How each metric reads here, by name: the visual's own format for it, else the metric's. Metrics without one aren't listed. |
+| `id` | string | **required** |  |
+| `metrics` | list of string | **required** |  |
+| `on_brush` | boolean | **required** | Brushing a range selects it. |
+| `on_click` | boolean | **required** | Clicking a value selects it. |
+| `type` | string | **required** | `kpi`, `bar`, `line`, `table`, `filter` or `rows`. |
+| `widget` | string |  | A `filter` visual's list: `list` or `tree`. Its frames are the filter frames of its dimension's field. |
+
+
 ## `HierarchyInfo` {#schema-hierarchyinfo}
 
 A hierarchy field's columns (plan §5.6).
@@ -510,3 +572,13 @@ A hierarchy field's columns (plan §5.6).
 ## `RelativeUnit` {#schema-relativeunit}
 
 Type: `minute` · `hour` · `day` · `week` · `month` · `quarter` · `year`.
+
+
+## `GridAt` {#schema-gridat}
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `h` | integer | **required** |  |
+| `w` | integer | **required** |  |
+| `x` | integer | **required** |  |
+| `y` | integer | **required** |  |

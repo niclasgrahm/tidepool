@@ -7,6 +7,8 @@ pub enum Route {
     /// The dashboard list.
     Home,
     Dashboard(String),
+    /// A view: a dashboard that lives only in the server's memory.
+    View(String),
     /// A dashboard in the editor.
     Edit(String),
     /// A new dashboard, in the editor.
@@ -37,6 +39,26 @@ pub enum Tab {
     Metrics,
 }
 
+/// A dashboard id (a file name) from a title: lower case, words joined by
+/// `_`, nothing else; `dashboard` when nothing is left.
+#[must_use]
+pub fn id_from(title: &str) -> String {
+    let mut id = String::new();
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.is_empty() && !id.ends_with('_') {
+            id.push('_');
+        }
+    }
+    let id = id.trim_end_matches('_').to_string();
+    if id.is_empty() {
+        "dashboard".into()
+    } else {
+        id
+    }
+}
+
 impl Route {
     /// The route of a location hash (`#/d/sales`).
     #[must_use]
@@ -45,6 +67,7 @@ impl Route {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         match parts.as_slice() {
             ["d", slug] => Self::Dashboard((*slug).to_string()),
+            ["v", id] => Self::View((*id).to_string()),
             ["d", slug, "edit"] => Self::Edit((*slug).to_string()),
             ["new"] => Self::NewDashboard,
             ["model"] | ["model", "tables"] => Self::Model(Tab::Tables),
@@ -59,12 +82,19 @@ impl Route {
         }
     }
 
+    /// Whether this page shows a dashboard or a view, live.
+    #[must_use]
+    pub fn shows_a_board(&self) -> bool {
+        matches!(self, Self::Dashboard(_) | Self::View(_))
+    }
+
     /// The hash that leads here.
     #[must_use]
     pub fn href(&self) -> String {
         match self {
             Self::Home => "#/".into(),
             Self::Dashboard(slug) => format!("#/d/{slug}"),
+            Self::View(id) => format!("#/v/{id}"),
             Self::Edit(slug) => format!("#/d/{slug}/edit"),
             Self::NewDashboard => "#/new".into(),
             Self::Model(Tab::Tables) => "#/model/tables".into(),
@@ -84,10 +114,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_title_makes_an_id() {
+        assert_eq!(id_from("Revenue by region"), "revenue_by_region");
+        assert_eq!(id_from("  Q3: wins & losses! "), "q3_wins_losses");
+        assert_eq!(id_from("…"), "dashboard");
+    }
+
+    #[test]
     fn hashes_and_routes_go_both_ways() {
         for route in [
             Route::Home,
             Route::Dashboard("sales".into()),
+            Route::View("~3f9c".into()),
             Route::Edit("sales".into()),
             Route::NewDashboard,
             Route::Model(Tab::Tables),

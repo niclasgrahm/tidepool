@@ -78,6 +78,45 @@ pub struct ConfigStore {
     /// there is a data directory.
     keep: Option<PathBuf>,
     inner: Mutex<Inner>,
+    /// The applied version's files and catalog, readable without waiting
+    /// for a change in progress: what views are compiled against.
+    published: std::sync::RwLock<Arc<Published>>,
+}
+
+/// One applied config version: its number, files and catalog.
+pub(crate) struct Published {
+    pub version: u64,
+    pub files: Files,
+    pub catalog: Catalog,
+}
+
+impl Published {
+    fn of(inner: &Inner) -> Arc<Self> {
+        Arc::new(Self {
+            version: inner.version,
+            files: inner.files.clone(),
+            catalog: inner.catalog.clone(),
+        })
+    }
+}
+
+impl ConfigStore {
+    /// The applied version's files and catalog.
+    pub(crate) fn published(&self) -> Arc<Published> {
+        Arc::clone(
+            &self
+                .published
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn publish(&self, inner: &Inner) {
+        *self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Published::of(inner);
+    }
 }
 
 /// Why a change wasn't made.
@@ -292,7 +331,7 @@ fn assess(inner: &Inner, files: &Files, base_version: u64) -> Assessed {
     }
 }
 
-fn problems(diagnostics: &Diagnostics, set: &ConfigSet) -> Vec<ConfigProblem> {
+pub(crate) fn problems(diagnostics: &Diagnostics, set: &ConfigSet) -> Vec<ConfigProblem> {
     diagnostics
         .iter()
         .map(|d| {
@@ -510,6 +549,7 @@ impl ConfigStore {
             store: Self {
                 dir,
                 keep,
+                published: std::sync::RwLock::new(Published::of(&inner)),
                 inner: Mutex::new(inner),
             },
             change,
@@ -520,30 +560,32 @@ impl ConfigStore {
     /// and servers started without `--config`.
     #[must_use]
     pub fn detached(live: &ModelVersion) -> Self {
+        let inner = Inner {
+            version: live.version,
+            files: Files::new(),
+            catalog: (*live.catalog).clone(),
+            model: Arc::clone(&live.model),
+            history: vec![Version {
+                info: VersionInfo {
+                    version: live.version,
+                    at: now(),
+                    author: "tidepool".into(),
+                    source: "startup".into(),
+                    summary: "a model given in code, without config files".into(),
+                    class: None,
+                },
+                files: Files::new(),
+            }],
+            pending: Vec::new(),
+            next_change: 1,
+            on_disk: None,
+            external: None,
+        };
         Self {
             dir: None,
             keep: None,
-            inner: Mutex::new(Inner {
-                version: live.version,
-                files: Files::new(),
-                catalog: (*live.catalog).clone(),
-                model: Arc::clone(&live.model),
-                history: vec![Version {
-                    info: VersionInfo {
-                        version: live.version,
-                        at: now(),
-                        author: "tidepool".into(),
-                        source: "startup".into(),
-                        summary: "a model given in code, without config files".into(),
-                        class: None,
-                    },
-                    files: Files::new(),
-                }],
-                pending: Vec::new(),
-                next_change: 1,
-                on_disk: None,
-                external: None,
-            }),
+            published: std::sync::RwLock::new(Published::of(&inner)),
+            inner: Mutex::new(inner),
         }
     }
 }
@@ -715,6 +757,7 @@ pub async fn submit(
     inner.version = version;
     inner.catalog = compiled.catalog;
     inner.model = target.model;
+    state.config.publish(&inner);
     if let Some(keep) = &state.config.keep {
         save_version(keep, &inner, version).map_err(|e| Refused::Failed(e.to_string()))?;
     }

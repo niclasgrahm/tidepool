@@ -21,6 +21,8 @@ pub fn now() -> f64 {
 #[derive(Clone, Copy)]
 pub struct Live {
     pub dashboards: RwSignal<Vec<DashboardInfo>>,
+    /// Views this page opened (they aren't in the dashboards).
+    pub views: RwSignal<Vec<DashboardInfo>>,
     /// The config version the server runs: pages showing the model reload
     /// when it changes.
     pub model_version: RwSignal<u64>,
@@ -30,9 +32,9 @@ pub struct Live {
     pub selection: RwSignal<Vec<SelectedField>>,
     /// Whether there's a selection to go back to, and forward to.
     pub history: RwSignal<(bool, bool)>,
-    pub rate: RwSignal<f64>,
-    /// The newest epoch the server has published (from status messages).
-    pub server_epoch: RwSignal<u64>,
+    /// The newest epoch the server has published, and the rows it takes in
+    /// a second (from status messages).
+    pub server: RwSignal<(u64, f64)>,
     pub connected: RwSignal<bool>,
     pub paused: RwSignal<bool>,
     /// When the last frame arrived, on [`now`]'s clock.
@@ -53,13 +55,13 @@ impl Live {
     pub fn new() -> Self {
         Self {
             dashboards: RwSignal::new(Vec::new()),
+            views: RwSignal::new(Vec::new()),
             model_version: RwSignal::new(0),
             open: RwSignal::new(None),
             board: RwSignal::new(Board::default()),
             selection: RwSignal::new(Vec::new()),
             history: RwSignal::new((false, false)),
-            rate: RwSignal::new(0.0),
-            server_epoch: RwSignal::new(0),
+            server: RwSignal::new((0, 0.0)),
             connected: RwSignal::new(false),
             paused: RwSignal::new(false),
             updated: RwSignal::new(0.0),
@@ -86,6 +88,16 @@ impl Live {
     /// A selection is under way: the dashboard is about to change.
     pub fn busy(self) -> bool {
         self.in_flight.with(InFlight::busy)
+    }
+
+    /// A dashboard or a view this page knows of, by id.
+    pub fn board_info(self, id: &str) -> Option<DashboardInfo> {
+        self.dashboards
+            .with(|all| all.iter().find(|d| d.id == id).cloned())
+            .or_else(|| {
+                self.views
+                    .with(|all| all.iter().find(|d| d.id == id).cloned())
+            })
     }
 
     /// Show `slug` (frames for it from now on).
@@ -118,7 +130,7 @@ impl Live {
         match message {
             ServerMessage::Welcome { epoch, .. } => {
                 self.connected.set(true);
-                self.server_epoch.set(epoch);
+                self.server.update(|s| s.0 = epoch);
                 // a reconnect: show again what was open
                 if let Some(slug) = self.open.get_untracked() {
                     self.send(&json!({"type": "open_dashboard", "id": slug}));
@@ -151,9 +163,12 @@ impl Live {
                 epoch,
                 rows_per_second,
             } => {
-                self.server_epoch.set(epoch);
-                self.rate.set(rows_per_second);
+                self.server.set((epoch, rows_per_second));
             }
+            ServerMessage::View { dashboard } => self.views.update(|views| {
+                views.retain(|v| v.id != dashboard.id);
+                views.push(dashboard);
+            }),
             ServerMessage::Error { message } => self.problem.set(Some(message)),
             ServerMessage::Done => {
                 self.in_flight.update(|f| {

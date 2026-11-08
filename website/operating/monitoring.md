@@ -30,6 +30,7 @@ read token.
 | `tidepool_epoch_publish_seconds` | summary | the time to publish an epoch |
 | `tidepool_live_refresh_seconds` | summary | the time to update every live session after an epoch |
 | `tidepool_sessions` | gauge | live dashboard sessions |
+| `tidepool_views` | gauge | views in memory (`POST /v1/views`) |
 | `tidepool_query_seconds` | summary | the time to answer `POST /v1/query` |
 | `tidepool_query_errors_total` | counter | queries refused with `400` |
 | `tidepool_mcp_tool_calls_total` | counter | MCP tool calls, per tool |

@@ -48,11 +48,11 @@ use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
 use tokio::sync::mpsc;
 
-use crate::AppState;
 use crate::filters::{self, Window, token};
 use crate::query::{
     DEFAULT_ROWS, Stamp, field, json, resolve, result, rows_result, scalar, window_condition,
 };
+use crate::{AppState, views};
 
 /// Messages a session hasn't sent yet, at most; past this a slow client is
 /// dropped rather than buffered without end.
@@ -243,9 +243,39 @@ impl Hub {
         let snapshot = state.writer.snapshot();
         let model = &snapshot.model;
         let now = state.clock.now();
+        // a view opened: what it shows, which `Model` doesn't say
+        let view = match &message {
+            ClientMessage::OpenDashboard { id } if views::is_view(id) => {
+                match state.views.get(state, &snapshot, id) {
+                    Some(Ok(dashboard)) => Some(dashboard),
+                    Some(Err(message)) => {
+                        session.send(ServerMessage::Error { message });
+                        return;
+                    }
+                    None => {
+                        session.send(ServerMessage::Error {
+                            message: format!("no view `{id}`: it was never made, or forgotten"),
+                        });
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
+        let lookup = |slug: &str| -> Option<Arc<Dashboard>> {
+            if views::is_view(slug) {
+                state.views.get(state, &snapshot, slug)?.ok()
+            } else {
+                model
+                    .dashboards
+                    .iter()
+                    .find(|d| d.slug == slug)
+                    .map(|d| Arc::new(d.clone()))
+            }
+        };
         let changed = {
             let mut inner = session.lock();
-            match apply(model, &mut inner, message, now) {
+            match apply(model, &lookup, &mut inner, message, now) {
                 Ok(changed) => changed,
                 Err(message) => {
                     drop(inner);
@@ -254,6 +284,11 @@ impl Hub {
                 }
             }
         };
+        if let Some(view) = view {
+            session.send(ServerMessage::View {
+                dashboard: dashboard_info(model, &view),
+            });
+        }
         if changed.selection {
             let selection = selection_message(model, &session.lock(), now);
             session.send(selection);
@@ -276,7 +311,7 @@ impl Hub {
         {
             let now = state.clock.now();
             for session in self.sessions() {
-                follow(&session, &previous, &snapshot, now);
+                follow(state, &session, &previous, &snapshot, now);
             }
         }
         for session in self.sessions() {
@@ -348,7 +383,7 @@ fn field_type(model: &Model, field: &FieldRef) -> Option<tidepool_model::ir::Typ
 /// Tell a session the model changed (plan §8.1, notify): the dashboards
 /// again, selections on fields that are gone or changed type dropped, and
 /// its dashboard sent whole, or closed if it was removed.
-fn follow(session: &Session, previous: &Model, snapshot: &Snapshot, now: i64) {
+fn follow(state: &AppState, session: &Session, previous: &Model, snapshot: &Snapshot, now: i64) {
     let model = &snapshot.model;
     session.send(model_message(snapshot));
     let (selection, removed) = {
@@ -364,16 +399,26 @@ fn follow(session: &Session, previous: &Model, snapshot: &Snapshot, now: i64) {
         inner.open.retain(|name, _| {
             field(model, name).is_ok_and(|(at, _)| field_type(previous, &at).is_some())
         });
+        // a view stays open: it is compiled again for the new model
         let removed = inner
             .dashboard
-            .take_if(|d| !model.dashboards.iter().any(|x| x.slug == *d));
+            .take_if(|d| !views::is_view(d) && !model.dashboards.iter().any(|x| x.slug == *d));
+        let view = inner.dashboard.clone().filter(|d| views::is_view(d));
         (
             (inner.selection() != before).then(|| selection_message(model, &inner, now)),
-            removed,
+            (removed, view),
         )
     };
+    let (removed, view) = removed;
     if let Some(selection) = selection {
         session.send(selection);
+    }
+    if let Some(id) = view
+        && let Some(Ok(dashboard)) = state.views.get(state, snapshot, &id)
+    {
+        session.send(ServerMessage::View {
+            dashboard: dashboard_info(model, &dashboard),
+        });
     }
     if let Some(slug) = removed {
         session.send(ServerMessage::Error {
@@ -393,6 +438,7 @@ struct Changed {
 #[allow(clippy::too_many_lines)]
 fn apply(
     model: &Model,
+    lookup: &dyn Fn(&str) -> Option<Arc<Dashboard>>,
     inner: &mut SessionState,
     message: ClientMessage,
     now: i64,
@@ -404,16 +450,14 @@ fn apply(
     Ok(match message {
         ClientMessage::Hello { .. } => Changed::default(),
         ClientMessage::OpenDashboard { id } => {
-            if !model.dashboards.iter().any(|d| d.slug == id) {
+            let Some(dashboard) = lookup(&id) else {
                 return Err(format!("no dashboard `{id}`"));
-            }
+            };
             // the first time, its filters' default windows, unless the
             // viewer chose something for those fields already: part of the
             // selection it opens with, not a step to go back from
             let mut defaulted = false;
-            if inner.opened.insert(id.clone())
-                && let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == id)
-            {
+            if inner.opened.insert(id.clone()) {
                 let mut current = inner.selection();
                 for filter in &dashboard.filters {
                     if let Some(window) = filter.default
@@ -602,12 +646,12 @@ fn apply(
             column,
             desc,
         } => {
-            let found = model
-                .dashboards
-                .iter()
-                .flat_map(|d| &d.visuals)
-                .find(|v| v.id == visual)
-                .ok_or_else(|| format!("no visual `{visual}`"))?;
+            // a visual of the dashboard that is open, not of any other
+            let open = inner.dashboard.as_deref().and_then(lookup);
+            let found = open
+                .as_ref()
+                .and_then(|d| d.visuals.iter().find(|v| v.id == visual))
+                .ok_or_else(|| format!("no visual `{visual}` on the open dashboard"))?;
             let request = request(model, found);
             let columns: Vec<String> = request
                 .dimensions
@@ -837,7 +881,7 @@ fn formats(
         .collect()
 }
 
-fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
+pub(crate) fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
     let metric_name = |id| {
         model
             .metric(id)
@@ -906,8 +950,29 @@ fn refresh(state: &AppState, session: &Session, snapshot: &Arc<Snapshot>) {
     };
     let model = &snapshot.model;
     let selection = selection.resolve(model, state.clock.now());
-    let Some(dashboard) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
-        return;
+    let view;
+    let dashboard: &Dashboard = if views::is_view(&dashboard) {
+        match state.views.get(state, snapshot, &dashboard) {
+            Some(Ok(found)) => {
+                view = found;
+                &view
+            }
+            Some(Err(message)) => {
+                // once per problem, not once per epoch
+                let hash = hash_of(&message);
+                let first = session.lock().sent.insert("view".into(), hash) != Some(hash);
+                if first {
+                    session.send(ServerMessage::Error { message });
+                }
+                return;
+            }
+            None => return,
+        }
+    } else {
+        let Some(found) = model.dashboards.iter().find(|d| d.slug == dashboard) else {
+            return;
+        };
+        found
     };
     // a filter visual is shown from its list's frames
     let visuals: Vec<VisualFrame> = dashboard
