@@ -132,6 +132,11 @@ pub enum VisualType {
     /// given, 5000 at most). A click selects a point, a drag the points in
     /// its rectangle.
     Scatter,
+    /// A grid of cells by two dimensions (across, up), each coloured by one
+    /// metric: weekday by hour, region by category. `limit` cells (2000
+    /// when not given, 10000 at most). A click selects both of a cell's
+    /// values, a drag the values in its rectangle.
+    Heatmap,
     /// The values of one dimension as a list on the grid. A click selects a
     /// value, as in a filter on the rail. It has no metrics.
     Filter,
@@ -143,13 +148,14 @@ pub enum VisualType {
 
 impl VisualType {
     /// Every type, in the order editors offer them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Kpi,
         Self::Bar,
         Self::Line,
         Self::Table,
         Self::Pie,
         Self::Scatter,
+        Self::Heatmap,
         Self::Filter,
         Self::Rows,
     ];
@@ -164,6 +170,7 @@ impl VisualType {
             Self::Table => "table",
             Self::Pie => "pie",
             Self::Scatter => "scatter",
+            Self::Heatmap => "heatmap",
             Self::Filter => "filter",
             Self::Rows => "rows",
         }
@@ -183,6 +190,9 @@ impl VisualType {
             }
             Self::Table => {
                 "any dimensions and metrics, sortable; without metrics, the combinations of the dimensions there are"
+            }
+            Self::Heatmap => {
+                "exactly two dimensions (across, up) and one metric, as a grid of coloured cells; a click selects a cell's two values"
             }
             Self::Scatter => {
                 "exactly one dimension (the points) and two or three metrics: across, up, and size; up to 5000 points; a click or a drag selects"

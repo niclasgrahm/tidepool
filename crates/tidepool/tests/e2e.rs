@@ -1763,3 +1763,47 @@ fn a_drag_across_the_scatter_selects_the_points_inside() {
         "a chip for Kelp and Map, not Tent",
     );
 }
+
+#[test]
+fn a_heatmap_cell_selects_both_its_values() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    let cells = "[...document.querySelectorAll('.visual.heatmap .cell')]";
+    browser.wait_for(&format!("{cells}.length === 2"), "two cells");
+    // south's cell: the one in the column whose label is south
+    let at = browser.wait_for(
+        &format!(
+            "(() => {{ document.querySelector('.visual.heatmap svg.plot').scrollIntoView({{block: 'center'}}); \
+             const label = [...document.querySelectorAll('.visual.heatmap .labels text')].find(t => t.textContent === 'south'); \
+             if (!label) return null; const lx = label.getBoundingClientRect().x + label.getBoundingClientRect().width / 2; \
+             const cell = {cells}.map(c => c.getBoundingClientRect()).find(r => lx >= r.x && lx <= r.right); \
+             return cell ? [cell.x + cell.width / 2, cell.y + cell.height / 2] : null; }})()"
+        ),
+        "south's cell",
+    );
+    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else {
+        panic!("no position for south's cell: {at}");
+    };
+    browser.click(x, y);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('south') && {CHIPS}.includes('food')"),
+        "chips for south and food",
+    );
+    // one step back undoes both
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')",
+    );
+    browser.wait_for(&format!("{CHIPS} === ''"), "both chips gone");
+}

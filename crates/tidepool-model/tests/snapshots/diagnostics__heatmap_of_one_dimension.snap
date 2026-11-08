@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `region_by_category`: a heatmap colours one metric by exactly two dimensions
+  --> dashboards/sales.yaml:61:5
+   |
+61 |     dimensions: [customers.region]
+   |     ^^^^^^^^^^
+
+1 error, 0 warnings

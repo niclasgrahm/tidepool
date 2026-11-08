@@ -55,3 +55,10 @@ visuals:
     metrics: [revenue, order_count]
     on_click: select
     at: { x: 8, y: 8, w: 4, h: 4 }
+  - id: region_by_category
+    type: heatmap
+    title: Revenue by region and category
+    dimensions: [customers.region, products.category]
+    metrics: [revenue]
+    on_click: select
+    at: { x: 0, y: 12, w: 6, h: 4 }

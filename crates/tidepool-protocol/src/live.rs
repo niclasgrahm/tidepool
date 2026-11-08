@@ -38,6 +38,13 @@ pub enum ClientMessage {
         #[serde(default)]
         mode: SelectMode,
     },
+    /// Select values of several fields at once, as one step of the history
+    /// (Back undoes all of it): a heatmap's cell, a pivot's.
+    SelectMany {
+        fields: Vec<FieldValues>,
+        #[serde(default)]
+        mode: SelectMode,
+    },
     /// Select a half-open range `from <= value < to` (a brush, a date range).
     SelectRange {
         field: String,
@@ -194,6 +201,14 @@ impl RelativeWindow {
             (n, ago) => format!("{} ending {} ago", plural(n), plural(ago)),
         }
     }
+}
+
+/// Values of one field, in a [`ClientMessage::SelectMany`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FieldValues {
+    pub field: String,
+    pub values: Vec<Value>,
 }
 
 /// What the server sends.

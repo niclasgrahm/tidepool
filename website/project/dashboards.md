@@ -68,6 +68,7 @@ pointer is on it, and `describe_model` gives both to agents. Without a
 | `table` | metrics by one or more dimensions, sortable. Without metrics, each combination of its dimensions that the data has. | selects the row (`on_click: select`) |
 | `pie` | one metric by one dimension, as slices of a ring: the largest `limit` (8, at most 12). For a sum or a count, the rest is one more slice. | selects the slice (`on_click: select`) |
 | `scatter` | the values of one dimension as points: the first metric across, the second up, a third as the size of each point. Up to `limit` points (1000, at most 5000). | selects the point. A drag selects the points in its rectangle. |
+| `heatmap` | one metric by two dimensions, as a grid of cells: the first dimension across, the second up, the colour from low to high. Up to `limit` cells (2000, at most 10000). | selects the two values of the cell, as one step. A drag selects the values its rectangle covers. |
 | `filter` | the values of one dimension, as a list (a tree for a hierarchy). It has no metrics. | selects the value |
 | `rows` | the newest rows of one table that the selection allows, the newest first. Its dimensions are the columns. It has no metrics. | |
 

@@ -219,7 +219,7 @@ async fn describe_model_says_what_an_agent_needs_to_ask_well() {
     assert_eq!(
         types,
         [
-            "kpi", "bar", "line", "table", "pie", "scatter", "filter", "rows"
+            "kpi", "bar", "line", "table", "pie", "scatter", "heatmap", "filter", "rows"
         ]
     );
     assert!(model["visual_types"].as_array().is_some_and(|t| {

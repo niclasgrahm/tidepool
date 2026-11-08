@@ -1806,3 +1806,53 @@ async fn a_pie_comes_with_its_whole_when_its_metric_adds_up() {
     let frame = next(&mut socket, "frame").await;
     assert_eq!(visual(&frame, "category_share")["compare"], "2.50");
 }
+
+#[tokio::test]
+async fn a_cell_selects_both_its_values_as_one_step() {
+    let (_state, url) = server().await;
+    let mut socket = connect(&url).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    // the heatmap: revenue by region and category
+    assert_eq!(
+        rows(&frame, "region_by_category"),
+        json!([["north", "boats", "10.00"], ["south", "boats", "5.00"]])
+    );
+    say(
+        &mut socket,
+        json!({"type": "select_many", "fields": [
+            {"field": "customers.region", "values": ["north"]},
+            {"field": "products.category", "values": ["boats"]},
+        ]}),
+    )
+    .await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(
+        selection["fields"].as_array().map(Vec::len),
+        Some(2),
+        "{selection}"
+    );
+    // Back undoes the cell's two values together
+    say(&mut socket, json!({"type": "back"})).await;
+    let selection = next(&mut socket, "selection").await;
+    assert_eq!(selection["fields"], json!([]), "{selection}");
+    // a value that isn't the field's is refused, the selection unchanged
+    say(
+        &mut socket,
+        json!({"type": "select_many", "fields": [
+            {"field": "customers.region", "values": [7]},
+        ]}),
+    )
+    .await;
+    let error = next(&mut socket, "error").await;
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("region")),
+        "{error}"
+    );
+}

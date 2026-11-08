@@ -114,6 +114,7 @@ Type: `select`.
 | `table` | Rows of dimensions and metrics, sortable. Without metrics: the combinations of the dimensions there are. |
 | `pie` | Slices of a whole: one dimension, one metric. The largest `limit` slices (8 when not given, 12 at most); for a sum or a count, the rest as one more slice. A click selects a slice. |
 | `scatter` | Points by one dimension: the first metric across, the second up, a third (if any) as each point's size. `limit` points (1000 when not given, 5000 at most). A click selects a point, a drag the points in its rectangle. |
+| `heatmap` | A grid of cells by two dimensions (across, up), each coloured by one metric: weekday by hour, region by category. `limit` cells (2000 when not given, 10000 at most). A click selects both of a cell's values, a drag the values in its rectangle. |
 | `filter` | The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics. |
 | `rows` | The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics. |
 

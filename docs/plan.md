@@ -1036,6 +1036,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `open_dashboard { id }` | subscribe all its visuals and filters; a view's id (`~…`) opens the view |
 | `select { field, values, mode: replace\|toggle\|add }` | change selection (click, list box) |
 | `select_range { field, lo, hi }` | brush on time axis / date range |
+| `select_many { fields: [{ field, values }], mode }` | several fields at once, one step of the history (a heatmap's or a pivot's cell; 2026-11-08) |
 | `select_relative { field, window: { unit, last, ago? } }` | a period relative to now ("Last 7 days", §5.5) |
 | `clear { field? }` / `back` / `forward` | selection management |
 | `filter_window { filter_id, offset, limit, search?, sort? }` | page/search a filter list |
@@ -1287,6 +1288,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
   - table (sortable, uses the server-side sort). Without metrics (2026-10-13): the distinct combinations of its dimensions, counted on one anchor (of the tables reaching every dimension, the one reaching fewest, ties by name); a group with no rows under the selection isn't one. Covered by the oracle (`SELECT DISTINCT` over the same anchor).
   - pie (2026-11-08): one metric by one dimension, a ring of slices in a categorical palette (`--c0`…`--c7`, Radix step 9s without ruby, which means "selected"); its largest `limit` (8 unless set, 12 at most, by the metric descending unless sorted); for an additive metric (a plain `SUM` or `COUNT`, `Metric::additive`) the rest of its whole as a grey slice, the whole sent in the frame's `compare`. Values that can't be slices (NULL, 0 or less) are left out and counted under the ring. `PieLayout` (angles, label fitting, `hit` by angle and radius, blending by key) has plain tests; a click or Enter selects, selected slices edged in ruby and the rest dimmed
   - scatter (2026-11-08): one dimension's values as points by two metrics (across, up; axes fitted to the values, `Linear::fit`, not from zero) and a third as each point's size (by area); `limit` 1000 unless set, 5000 at most. A click selects a point, a drag the points in its rectangle (`ScatterLayout::within`), the keyboard walks them left to right. Points missing an axis value are left out
+  - heatmap (2026-11-08): one metric by two dimensions, cells on two bands (the first value of the second dimension at the bottom), coloured in ten steps from the paper to `--tide` (`color-mix`), empty cells in the surface colour; `limit` 2000 unless set, 10000 at most. A click selects both of a cell's values with `select_many`, so Back undoes them together; a drag the values on each axis its rectangle covers; the arrows move a cell at a time
   - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
   - list box with selected/possible/excluded styling, search and a virtualized window
