@@ -219,6 +219,7 @@ fn metric(
         body,
         ignore_selection,
         time_offset,
+        ai_context: spec.ai_context.clone(),
     })
 }
 

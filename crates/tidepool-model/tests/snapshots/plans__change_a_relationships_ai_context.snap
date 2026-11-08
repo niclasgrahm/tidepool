@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"model.ossie.yaml\",\n\"    from_columns: [customer_id]\\n    to_columns: [customer_id]\\n\",\n\"    from_columns: [customer_id]\\n    to_columns: [customer_id]\\n    ai_context: { instructions: \\\"who placed the order\\\" }\\n\")])"
+---
+1 change (1 safe, 0 rebuild, 0 destructive)
+
+  ~ relationship order_customer (orders → customers)  ai_context  safe

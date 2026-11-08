@@ -1085,9 +1085,9 @@ pub fn endpoints() -> Vec<ApiDoc> {
             operation: Operation::Mcp,
             summary: "MCP for agents",
             description: "The Model Context Protocol over Streamable HTTP: JSON-RPC 2.0 \
-                          messages, each answered with one JSON body. Tools: describe_model, \
-                          preview_table, query_metrics, get_config, plan_change, \
-                          apply_change and ingest_rows. Each tool is the HTTP endpoint it \
+                          messages, each answered with one JSON body. `tools/list` lists the \
+                          tools (the MCP reference has each one) and `resources/list` the \
+                          config files' JSON Schemas. Each tool is the HTTP endpoint it \
                           wraps, called with the caller's credentials, so tools that change \
                           the config need the admin token and ingest_rows the ingest token. \
                           apply_change applies what `agents.auto_apply` allows and proposes \

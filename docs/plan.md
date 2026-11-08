@@ -1140,13 +1140,15 @@ Since M2: a bearer token per access level (`TIDEPOOL_INGEST_TOKEN`, `TIDEPOOL_RE
 
 | Tool | Notes |
 |---|---|
-| `describe_model` | tables, columns, relationships, metrics, dashboards, plus `ai_context` from Ossie |
+| `describe_model` | tables, columns, datasets and fields (labels, grains), relationships, metrics, dashboards with their visuals, the visual types (`VisualType::shape`), `semantics` (how answers are computed), plus `ai_context` from Ossie at every level it's written |
 | `preview_table` | latest N rows |
 | `query_metrics` | wraps `/v1/query` |
 | `get_config` | current files + version |
 | `plan_change` | takes full or patched files, returns a plan |
 | `apply_change` | applies if policy allows; otherwise queues for approval and returns the change id |
 | `ingest_rows` | for agents that generate or forward data (ingest token scope) |
+
+**Grounding (2026-11-08).** Ossie's `description`, `label` and `ai_context` reach the IR, `GET /v1/model` and `describe_model` as written; editing them is a safe change that plans report. Every query answer carries `as_of` (when its epoch was published) next to `epoch`. MCP also serves resources: each config kind's JSON Schema at `tidepool://schemas/<kind>`, read through `GET /v1/schemas/{kind}`; `query_metrics`, `read_rows` and `plan_change` declare an `outputSchema`. `evals/questions.yaml` is a set of questions about the retail example with the call that answers each one; `tidepool-server/tests/evals.rs` keeps its answers true, and it's what an agent is scored against (no LLM runs in CI).
 
 ### 9.2 Exposure: listeners and ingest credentials
 

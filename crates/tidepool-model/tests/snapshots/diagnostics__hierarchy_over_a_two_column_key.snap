@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: hierarchy `shelves.stack` is over `shelves`, which is keyed by more than one column
-  --> model.ossie.yaml:43:15
+  --> model.ossie.yaml:47:15
    |
-43 |         data: '{"hierarchy": {"name": "stack", "parent": "above"}}'
+47 |         data: '{"hierarchy": {"name": "stack", "parent": "above"}}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: a hierarchy's nodes are rows of an upsert table keyed by one column
 

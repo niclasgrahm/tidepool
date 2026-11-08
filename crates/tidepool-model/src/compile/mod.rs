@@ -86,6 +86,8 @@ pub fn compile(set: &ConfigSet, previous: &Catalog) -> (Option<Compiled>, Diagno
         server,
         direction: semantic.direction,
         name: set.model.as_ref().map(|m| m.value.name.clone()),
+        description: set.model.as_ref().and_then(|m| m.value.description.clone()),
+        ai_context: set.model.as_ref().and_then(|m| m.value.ai_context.clone()),
         tables,
         datasets: semantic.datasets,
         relationships: semantic.relationships,

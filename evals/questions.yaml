@@ -1,0 +1,105 @@
+# Questions an agent may be asked about the retail example
+# (examples/retail), each with the tool call that answers it and the answer
+# on the data below. Use it to score an agent: give it the question and
+# Tidepool's MCP tools, and compare what it calls and gets with what is here.
+#
+# crates/tidepool-server/tests/evals.rs writes the data into the retail
+# example and makes every call, so the answers here stay true.
+
+data:
+  categories:
+    - { category: "on the water", parent: null, level: department }
+    - { category: camping, parent: null, level: department }
+    - { category: navigation, parent: null, level: department }
+    - { category: kayaks, parent: "on the water", level: category }
+    - { category: tents, parent: camping, level: category }
+    - { category: maps, parent: navigation, level: category }
+  products:
+    - { product_id: p1, name: Sea kayak, category: kayaks, list_price: "100.00" }
+    - { product_id: p2, name: Two-person tent, category: tents, list_price: "25.00" }
+    - { product_id: p3, name: Coast chart, category: maps, list_price: "20.00" }
+  customers:
+    - { customer_id: c1, name: Ada, region: north, segment: null }
+    - { customer_id: c2, name: Bo, region: south, segment: null }
+    - { customer_id: c3, name: Cy, region: east, segment: null }
+    - { customer_id: c4, name: Di, region: west, segment: null }
+  orders:
+    - { order_id: o1, customer_id: c1, product_id: p1, status: paid, ordered_at: "2026-01-10T10:00:00Z", quantity: 1, amount: "100.00", note: null }
+    - { order_id: o2, customer_id: c2, product_id: p2, status: paid, ordered_at: "2026-01-20T12:00:00Z", quantity: 2, amount: "50.00", note: null }
+    - { order_id: o3, customer_id: c1, product_id: p3, status: shipped, ordered_at: "2026-02-03T09:00:00Z", quantity: 1, amount: "20.00", note: "Gift wrap, please" }
+    - { order_id: o4, customer_id: c3, product_id: p1, status: paid, ordered_at: "2026-02-14T15:00:00Z", quantity: 1, amount: "120.00", note: null }
+    - { order_id: o5, customer_id: c4, product_id: p2, status: returned, ordered_at: "2026-02-20T08:00:00Z", quantity: 1, amount: "40.00", note: null }
+    - { order_id: o6, customer_id: c2, product_id: p1, status: paid, ordered_at: "2026-03-01T11:00:00Z", quantity: 1, amount: "110.00", note: "Leave at the door" }
+    - { order_id: o7, customer_id: c3, product_id: p2, status: paid, ordered_at: "2026-03-15T16:00:00Z", quantity: 3, amount: "75.00", note: "gift wrap for my dad" }
+
+questions:
+  - ask: What were total sales?
+    tool: query_metrics
+    arguments: { metrics: [revenue] }
+    answer: [["515.00"]]
+
+  - ask: Which region sold the most?
+    tool: query_metrics
+    arguments:
+      metrics: [revenue]
+      dimensions: [{ field: customers.region }]
+      sort: [{ column: revenue, desc: true }]
+      limit: 1
+    answer: [[east, "195.00"]]
+
+  - ask: Revenue by region, highest first
+    tool: query_metrics
+    arguments:
+      metrics: [revenue]
+      dimensions: [{ field: customers.region }]
+      sort: [{ column: revenue, desc: true }]
+    answer: [[east, "195.00"], [south, "160.00"], [north, "120.00"], [west, "40.00"]]
+
+  - ask: How many orders were returned?
+    tool: query_metrics
+    arguments:
+      metrics: [order_count]
+      filters: [{ field: orders.status, in: [returned] }]
+    answer: [[1]]
+
+  - ask: How much paid revenue came in during February 2026?
+    tool: query_metrics
+    arguments:
+      metrics: [paid_revenue]
+      filters: [{ field: orders.ordered_at, from: "2026-02-01T00:00:00Z", to: "2026-03-01T00:00:00Z" }]
+    answer: [["120.00"]]
+
+  - ask: Revenue per month
+    tool: query_metrics
+    arguments:
+      metrics: [revenue]
+      dimensions: [{ field: orders.ordered_at, grain: month }]
+    answer: [["2026-01-01", "150.00"], ["2026-02-01", "180.00"], ["2026-03-01", "185.00"]]
+
+  - ask: How many customers bought tents?
+    tool: query_metrics
+    arguments:
+      metrics: [customer_count]
+      filters: [{ field: products.category, in: [tents] }]
+    answer: [[3]]
+
+  - ask: How much did everything on the water sell for?
+    tool: query_metrics
+    arguments:
+      metrics: [revenue]
+      filters: [{ field: categories.tree, in: ["on the water"] }]
+    answer: [["330.00"]]
+
+  - ask: Revenue on the coasts against the rest
+    tool: query_metrics
+    arguments:
+      metrics: [revenue]
+      dimensions: [{ field: customers.coast }]
+    answer: [[coastal, "235.00"], [north, "120.00"], [south, "160.00"]]
+
+  - ask: Who asked for gift wrap?
+    tool: read_rows
+    arguments:
+      fields: [orders.order_id, customers.name]
+      filters: [{ field: orders.note, contains: gift wrap }]
+    answer: [[o7, Cy], [o3, Ada]]

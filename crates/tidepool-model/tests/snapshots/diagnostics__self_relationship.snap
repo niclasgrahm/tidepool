@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: relationship `category_parent` connects `categories` to itself
-  --> model.ossie.yaml:53:9
+  --> model.ossie.yaml:57:9
    |
-53 |     to: categories
+57 |     to: categories
    |         ^^^^^^^^^^
    = help: for a parent–child hierarchy, add a TIDEPOOL extension to the dataset instead: {"hierarchy": {"name": …, "parent": …}}
 

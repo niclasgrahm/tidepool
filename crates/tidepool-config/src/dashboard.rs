@@ -111,9 +111,17 @@ pub enum FilterWidget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VisualType {
+    /// Metrics as large numbers, with no dimensions. `compare` adds a
+    /// second metric and the change from it.
     Kpi,
+    /// Bars: one dimension, one or more metrics. A click selects a bar, a
+    /// drag several.
     Bar,
+    /// A line over one dimension, usually a time field with a grain, with
+    /// one or two metrics. A drag across it selects a range.
     Line,
+    /// Rows of dimensions and metrics, sortable. Without metrics: the
+    /// combinations of the dimensions there are.
     Table,
     /// The values of one dimension as a list on the grid. A click selects a
     /// value, as in a filter on the rail. It has no metrics.
@@ -122,6 +130,55 @@ pub enum VisualType {
     /// a log tail. Its dimensions are the columns; `limit` is how many rows
     /// (100 when not given, 1000 at most). It has no metrics.
     Rows,
+}
+
+impl VisualType {
+    /// Every type, in the order editors offer them.
+    pub const ALL: [Self; 6] = [
+        Self::Kpi,
+        Self::Bar,
+        Self::Line,
+        Self::Table,
+        Self::Filter,
+        Self::Rows,
+    ];
+
+    /// The name a dashboard file uses.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Kpi => "kpi",
+            Self::Bar => "bar",
+            Self::Line => "line",
+            Self::Table => "table",
+            Self::Filter => "filter",
+            Self::Rows => "rows",
+        }
+    }
+
+    /// What it shows and what it takes, in a sentence or two: for agents
+    /// choosing one (`describe_model`).
+    #[must_use]
+    pub fn shape(self) -> &'static str {
+        match self {
+            Self::Kpi => {
+                "metrics as large numbers; no dimensions; `compare` names a second metric to show the change from"
+            }
+            Self::Bar => "exactly one dimension and one or more metrics; a click selects a bar",
+            Self::Line => {
+                "exactly one dimension (a time field with a grain, usually) and one or two metrics; a drag selects a range"
+            }
+            Self::Table => {
+                "any dimensions and metrics, sortable; without metrics, the combinations of the dimensions there are"
+            }
+            Self::Filter => {
+                "exactly one dimension and no metrics: its values as a list to select from"
+            }
+            Self::Rows => {
+                "the newest rows of one table that pass the selection; dimensions are its columns; no metrics; `limit` up to 1000"
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -352,6 +409,14 @@ fn scalar(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_visual_type_is_listed_under_its_file_name() {
+        for kind in VisualType::ALL {
+            assert_eq!(super::word(&kind), kind.name());
+            assert_ne!(kind.shape(), "");
+        }
+    }
+
     use super::*;
 
     fn example(name: &str) -> String {

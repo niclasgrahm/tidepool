@@ -65,6 +65,13 @@ pub struct Model {
     pub direction: Direction,
     /// The Ossie model's name, or `None` without a model file.
     pub name: Option<String>,
+    /// The Ossie model's description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The Ossie model's `ai_context`: instructions, synonyms and examples
+    /// for an agent, passed on as written.
+    #[serde(default)]
+    pub ai_context: Option<serde_json::Value>,
     pub tables: Vec<Table>,
     pub datasets: Vec<Dataset>,
     pub relationships: Vec<Relationship>,
@@ -162,6 +169,9 @@ pub struct Dataset {
     pub name: String,
     pub table: TableId,
     pub description: Option<String>,
+    /// The dataset's Ossie `ai_context`, as written.
+    #[serde(default)]
+    pub ai_context: Option<serde_json::Value>,
     /// Every column (implicitly) plus declared derived fields.
     pub fields: Vec<Field>,
 }
@@ -184,6 +194,10 @@ pub struct Field {
     pub grains: Vec<TimeGrain>,
     pub label: Option<String>,
     pub description: Option<String>,
+    /// The field's Ossie `ai_context`, as written; `None` for columns no
+    /// field declares.
+    #[serde(default)]
+    pub ai_context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -243,6 +257,9 @@ pub struct Relationship {
     pub to: TableId,
     pub to_columns: Vec<ColumnId>,
     pub role: Option<String>,
+    /// The relationship's Ossie `ai_context`, as written.
+    #[serde(default)]
+    pub ai_context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +281,9 @@ pub struct Metric {
     /// none, `Some(empty)`… is never produced: `IgnoreSelection::All` is `*`.
     pub ignore_selection: IgnoreSelection,
     pub time_offset: Option<TimeOffset>,
+    /// The metric's Ossie `ai_context`, as written.
+    #[serde(default)]
+    pub ai_context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

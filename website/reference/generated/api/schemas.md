@@ -99,9 +99,12 @@ The semantic model as the UI shows it (`GET /v1/model`).
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `ai_context` | any |  | The model's Ossie `ai_context` (instructions, synonyms, examples for an agent), as written. |
 | `datasets` | list of [`DatasetInfo`](#schema-datasetinfo) | **required** |  |
+| `description` | string |  |  |
 | `filter_direction` | string | `one_to_many` | Which way selections flow along relationships: `one_to_many` (from the one side to the many side) or `both`. |
 | `metrics` | list of [`MetricInfo`](#schema-metricinfo) | **required** |  |
+| `name` | string |  | The Ossie model's name. |
 | `relationships` | list of [`RelationshipInfo`](#schema-relationshipinfo) | **required** |  |
 
 
@@ -176,6 +179,7 @@ A query's answer.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `as_of` | string |  | When that epoch was published (RFC 3339, UTC): how fresh the data the answer reads is. |
 | `columns` | list of [`QueryColumn`](#schema-querycolumn) | **required** | Dimensions first, then metrics, in request order. |
 | `epoch` | integer | **required** | The data epoch the answer was computed from. |
 | `rows` | list of list of any | **required** | Values as JSON: decimals, dates and timestamps as strings, so nothing is lost on the way through. |
@@ -315,6 +319,7 @@ One problem with a write.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `ai_context` | any |  | The dataset's Ossie `ai_context`, as written. |
 | `description` | string |  |  |
 | `fields` | list of [`FieldInfo`](#schema-fieldinfo) | **required** |  |
 | `name` | string | **required** |  |
@@ -325,6 +330,7 @@ One problem with a write.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `ai_context` | any |  | The metric's Ossie `ai_context`, as written. |
 | `anchor` | string |  | The table whose rows a base metric aggregates. |
 | `dashboards` | list of string | **required** | Dashboards that show it. |
 | `description` | string |  |  |
@@ -340,6 +346,7 @@ One problem with a write.
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `ai_context` | any |  | The relationship's Ossie `ai_context`, as written. |
 | `from` | string | **required** | The many side. |
 | `from_columns` | list of string | **required** |  |
 | `name` | string | **required** |  |
@@ -466,10 +473,13 @@ A result column to sort by, by its name in [`QueryResult::columns`].
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `ai_context` | any |  | The field's Ossie `ai_context`, as written. |
 | `description` | string |  |  |
 | `expression` | string |  | The expression, for a derived field. |
+| `grains` | list of string |  | The grains a visual may group a time field by (`day`, `month`, …); empty for other fields. |
 | `hierarchy` | [`HierarchyInfo`](#schema-hierarchyinfo) |  | For a hierarchy field: the columns its tree is made of. |
 | `is_time` | boolean | **required** |  |
+| `label` | string |  | What to call the field on screen. |
 | `name` | string | **required** |  |
 | `type` | string | **required** | `string`, `int`, `decimal(2)`, `date`, … |
 

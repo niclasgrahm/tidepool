@@ -230,6 +230,10 @@ pub struct QueryResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     /// The data epoch the answer was computed from.
     pub epoch: u64,
+    /// When that epoch was published (RFC 3339, UTC): how fresh the data
+    /// the answer reads is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -248,6 +252,15 @@ pub struct QueryColumn {
 /// The semantic model as the UI shows it (`GET /v1/model`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelInfo {
+    /// The Ossie model's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The model's Ossie `ai_context` (instructions, synonyms, examples for
+    /// an agent), as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_context: Option<serde_json::Value>,
     pub datasets: Vec<DatasetInfo>,
     pub relationships: Vec<RelationshipInfo>,
     pub metrics: Vec<MetricInfo>,
@@ -268,6 +281,9 @@ pub struct DatasetInfo {
     pub table: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The dataset's Ossie `ai_context`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_context: Option<serde_json::Value>,
     pub fields: Vec<FieldInfo>,
 }
 
@@ -281,8 +297,18 @@ pub struct FieldInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
     pub is_time: bool,
+    /// The grains a visual may group a time field by (`day`, `month`, …);
+    /// empty for other fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grains: Vec<String>,
+    /// What to call the field on screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The field's Ossie `ai_context`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_context: Option<serde_json::Value>,
     /// For a hierarchy field: the columns its tree is made of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hierarchy: Option<HierarchyInfo>,
@@ -314,6 +340,9 @@ pub struct RelationshipInfo {
     /// vs ship date).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The relationship's Ossie `ai_context`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_context: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -337,6 +366,9 @@ pub struct MetricInfo {
     /// `currency:EUR compact`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// The metric's Ossie `ai_context`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_context: Option<serde_json::Value>,
     /// Dashboards that show it.
     pub dashboards: Vec<String>,
 }

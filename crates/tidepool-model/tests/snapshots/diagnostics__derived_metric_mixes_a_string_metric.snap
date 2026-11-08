@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: metric `avg_order_value`: `/` doesn't apply to a decimal (scale 2) and a string
-  --> model.ossie.yaml:71:63
+  --> model.ossie.yaml:78:63
    |
-71 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / customer_count" }] }
+78 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / customer_count" }] }
    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 1 error, 0 warnings

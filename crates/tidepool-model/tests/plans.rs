@@ -411,3 +411,37 @@ scenario!(
         "  note:        { type: string, nullable: true, encoding: plain, filled: credential }\n"
     )]
 );
+
+// what the model says to agents: safe, and reported so a plan isn't empty
+scenario!(
+    change_what_the_model_tells_agents,
+    [Replace(
+        "model.ossie.yaml",
+        "Sales of an outdoor shop.",
+        "Sales of an outdoor shop, in euros."
+    )]
+);
+scenario!(
+    change_a_fields_synonyms,
+    [Replace(
+        "model.ossie.yaml",
+        "synonyms: [area, territory, market]",
+        "synonyms: [area, territory]"
+    )]
+);
+scenario!(
+    describe_a_dataset,
+    [Replace(
+        "model.ossie.yaml",
+        "  - name: customers\n    source: customers\n",
+        "  - name: customers\n    source: customers\n    description: Everyone who ordered\n"
+    )]
+);
+scenario!(
+    change_a_relationships_ai_context,
+    [Replace(
+        "model.ossie.yaml",
+        "    from_columns: [customer_id]\n    to_columns: [customer_id]\n",
+        "    from_columns: [customer_id]\n    to_columns: [customer_id]\n    ai_context: { instructions: \"who placed the order\" }\n"
+    )]
+);

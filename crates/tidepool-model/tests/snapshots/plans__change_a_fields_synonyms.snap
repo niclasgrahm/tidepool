@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"model.ossie.yaml\", \"synonyms: [area, territory, market]\",\n\"synonyms: [area, territory]\")])"
+---
+1 change (1 safe, 0 rebuild, 0 destructive)
+
+  ~ field        customers.region  safe

@@ -343,6 +343,7 @@ fn datasets(
             name: spec.name.clone(),
             table: table.id,
             description: spec.description.clone(),
+            ai_context: spec.ai_context.clone(),
             fields,
         });
     }
@@ -509,6 +510,7 @@ fn declared_field(
         grains: ext.grain.unwrap_or_default(),
         label: field.label.clone(),
         description: field.description.clone(),
+        ai_context: field.ai_context.clone(),
     })
 }
 
@@ -663,6 +665,7 @@ fn fields(
                 grains: Vec::new(),
                 label: None,
                 description: None,
+                ai_context: None,
             })
         })
         .collect();
@@ -769,6 +772,7 @@ fn hierarchy_field(
         grains: Vec::new(),
         label: None,
         description: None,
+        ai_context: None,
     })
 }
 
@@ -970,6 +974,7 @@ fn relationship(
         to,
         to_columns,
         role: ext.role,
+        ai_context: spec.ai_context.clone(),
     })
 }
 

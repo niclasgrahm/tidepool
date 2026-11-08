@@ -6,7 +6,9 @@ use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::State;
+use tidepool_config::ossie::TimeGrain;
 use tidepool_config::server::Durability;
+use tidepool_expr::Type;
 use tidepool_model::ir::{
     Direction, FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId,
 };
@@ -49,6 +51,38 @@ fn hierarchy(model: &Model, table: TableId, h: &Hierarchy) -> HierarchyInfo {
     }
 }
 
+/// The grains a visual may group `field` by: those it declares, or every
+/// grain its type has (sub-day ones need a time of day). None for a field
+/// that isn't a time.
+fn grains(field: &tidepool_model::ir::Field) -> Vec<String> {
+    if !field.is_time {
+        return Vec::new();
+    }
+    let all = [
+        TimeGrain::Minute,
+        TimeGrain::Hour,
+        TimeGrain::Day,
+        TimeGrain::Week,
+        TimeGrain::Month,
+        TimeGrain::Quarter,
+        TimeGrain::Year,
+    ];
+    let allowed: Vec<TimeGrain> = if field.grains.is_empty() {
+        all.into_iter()
+            .filter(|g| !g.is_sub_day() || field.ty != Type::Date)
+            .collect()
+    } else {
+        field.grains.clone()
+    };
+    allowed
+        .into_iter()
+        .filter_map(|g| match serde_json::to_value(g) {
+            Ok(serde_json::Value::String(name)) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn info(model: &Model) -> ModelInfo {
     let columns = |table, ids: &[tidepool_model::ir::ColumnId]| -> Vec<String> {
         ids.iter()
@@ -61,6 +95,9 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
             .collect()
     };
     ModelInfo {
+        name: model.name.clone(),
+        description: model.description.clone(),
+        ai_context: model.ai_context.clone(),
         datasets: model
             .datasets
             .iter()
@@ -68,6 +105,7 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                 name: d.name.clone(),
                 table: table_name(model, d.table),
                 description: d.description.clone(),
+                ai_context: d.ai_context.clone(),
                 fields: d
                     .fields
                     .iter()
@@ -79,7 +117,10 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                             FieldSource::Column(_) | FieldSource::Hierarchy(_) => None,
                         },
                         is_time: f.is_time,
+                        grains: grains(f),
+                        label: f.label.clone(),
                         description: f.description.clone(),
+                        ai_context: f.ai_context.clone(),
                         hierarchy: f.hierarchy().map(|h| hierarchy(model, d.table, h)),
                     })
                     .collect(),
@@ -95,60 +136,65 @@ pub(crate) fn info(model: &Model) -> ModelInfo {
                 to: table_name(model, r.to),
                 to_columns: columns(r.to, &r.to_columns),
                 role: r.role.clone(),
+                ai_context: r.ai_context.clone(),
             })
             .collect(),
         metrics: model
             .metrics
             .iter()
-            .map(|m| {
-                let (expression, kind, anchor) = match &m.body {
-                    MetricBody::Base {
-                        expression, anchor, ..
-                    } => (expression.clone(), "base", Some(table_name(model, *anchor))),
-                    MetricBody::Derived { expression, .. } => (expression.clone(), "derived", None),
-                };
-                MetricInfo {
-                    name: m.name.clone(),
-                    description: m.description.clone(),
-                    expression,
-                    kind: kind.into(),
-                    anchor,
-                    ignores: match &m.ignore_selection {
-                        IgnoreSelection::None => Vec::new(),
-                        IgnoreSelection::All => vec!["*".into()],
-                        IgnoreSelection::Fields(fields) => fields
-                            .iter()
-                            .map(|f| label(model, f.table, &f.field))
-                            .collect(),
-                    },
-                    time_offset: m.time_offset.as_ref().map(|t| {
-                        format!(
-                            "{} {:?} on {}",
-                            t.amount,
-                            t.unit,
-                            label(model, t.field.table, &t.field.field)
-                        )
-                        .to_lowercase()
-                    }),
-                    format: m.format.clone(),
-                    dashboards: model
-                        .dashboards
-                        .iter()
-                        .filter(|d| {
-                            d.visuals
-                                .iter()
-                                .any(|v| v.metrics.contains(&m.id) || v.compare == Some(m.id))
-                        })
-                        .map(|d| d.slug.clone())
-                        .collect(),
-                }
-            })
+            .map(|m| metric_info(model, m))
             .collect(),
         filter_direction: match model.direction {
             Direction::OneToMany => "one_to_many",
             Direction::Both => "both",
         }
         .into(),
+    }
+}
+
+/// One metric as the model browser and agents see it.
+fn metric_info(model: &Model, m: &tidepool_model::ir::Metric) -> MetricInfo {
+    let (expression, kind, anchor) = match &m.body {
+        MetricBody::Base {
+            expression, anchor, ..
+        } => (expression.clone(), "base", Some(table_name(model, *anchor))),
+        MetricBody::Derived { expression, .. } => (expression.clone(), "derived", None),
+    };
+    MetricInfo {
+        name: m.name.clone(),
+        description: m.description.clone(),
+        expression,
+        kind: kind.into(),
+        anchor,
+        ignores: match &m.ignore_selection {
+            IgnoreSelection::None => Vec::new(),
+            IgnoreSelection::All => vec!["*".into()],
+            IgnoreSelection::Fields(fields) => fields
+                .iter()
+                .map(|f| label(model, f.table, &f.field))
+                .collect(),
+        },
+        time_offset: m.time_offset.as_ref().map(|t| {
+            format!(
+                "{} {:?} on {}",
+                t.amount,
+                t.unit,
+                label(model, t.field.table, &t.field.field)
+            )
+            .to_lowercase()
+        }),
+        format: m.format.clone(),
+        ai_context: m.ai_context.clone(),
+        dashboards: model
+            .dashboards
+            .iter()
+            .filter(|d| {
+                d.visuals
+                    .iter()
+                    .any(|v| v.metrics.contains(&m.id) || v.compare == Some(m.id))
+            })
+            .map(|d| d.slug.clone())
+            .collect(),
     }
 }
 

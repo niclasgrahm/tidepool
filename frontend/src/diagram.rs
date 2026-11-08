@@ -549,6 +549,7 @@ mod tests {
             to: to.into(),
             to_columns: vec![column.into()],
             role: None,
+            ai_context: None,
         }
     }
 
@@ -607,12 +608,16 @@ mod tests {
             name: "categories".into(),
             table: "categories".into(),
             description: None,
+            ai_context: None,
             fields: vec![FieldInfo {
                 name: "tree".into(),
                 ty: "string".into(),
                 expression: None,
                 is_time: false,
+                grains: Vec::new(),
+                label: None,
                 description: None,
+                ai_context: None,
                 hierarchy: Some(HierarchyInfo {
                     key: "category".into(),
                     parent: "parent".into(),

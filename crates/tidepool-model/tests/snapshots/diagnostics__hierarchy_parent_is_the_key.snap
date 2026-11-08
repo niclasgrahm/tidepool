@@ -3,9 +3,9 @@ source: crates/tidepool-model/tests/diagnostics.rs
 expression: rendered
 ---
 error: hierarchy `categories.tree`: `category` is the key itself, not a parent
-  --> model.ossie.yaml:38:15
+  --> model.ossie.yaml:42:15
    |
-38 |         data: '{"hierarchy": {"name": "tree", "parent": "category", "kind": "level"}}'
+42 |         data: '{"hierarchy": {"name": "tree", "parent": "category", "kind": "level"}}'
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: name the column that holds each node's parent's key
 

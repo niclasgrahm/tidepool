@@ -32,6 +32,7 @@ tracing.workspace = true
 subtle = "2"
 
 [dev-dependencies]
+serde_norway = "0.9.42"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-tungstenite = "0.30"
 arrow-array = "60"

@@ -1,5 +1,6 @@
 version: "0.2.0"
 name: retail
+description: "An outdoor shop: its orders, customers and products."
 datasets:
   - name: orders
     source: orders                       # table name from tables/*.yaml
@@ -8,6 +9,7 @@ datasets:
         expression: { dialects: [{ dialect: ANSI_SQL, expression: ordered_at }] }
         datatype: DateTimeTz
         dimension: { is_time: true }
+        label: Order time
       - name: order_year                 # derived field: a cheap dimension (see §6.2)
         expression: { dialects: [{ dialect: ANSI_SQL, expression: "EXTRACT(YEAR FROM ordered_at)" }] }
         datatype: Integer
@@ -19,6 +21,8 @@ datasets:
     fields:
       - name: region
         expression: { dialects: [{ dialect: ANSI_SQL, expression: region }] }
+        label: Region
+        ai_context: { synonyms: [area, territory, market] }
       - name: coast                      # derived over one dictionary column: evaluated per
         expression:                      # region, not per row (a derived dictionary, plan §4.4)
           dialects:
@@ -57,15 +61,18 @@ relationships:
 metrics:
   - name: revenue
     description: Gross order value
+    ai_context: { synonyms: [sales, turnover, gross sales], instructions: "every order, whatever its status; paid_revenue counts paid orders only" }
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
   - name: paid_revenue                   # SQL's standard FILTER clause instead of set analysis
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount) FILTER (WHERE orders.status = 'paid')" }] }
   - name: order_count
+    ai_context: { synonyms: [orders, number of orders] }
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }] }
     custom_extensions:
       - vendor_name: TIDEPOOL
         data: '{"table": "orders"}'      # anchor table for COUNT(*)
   - name: customer_count
+    ai_context: { synonyms: [buyers, active customers] }
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.customer_id)" }] }
   - name: avg_order_value
     expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / order_count" }] }
@@ -86,3 +93,15 @@ metrics:
 custom_extensions:
   - vendor_name: TIDEPOOL
     data: '{"filter_direction": "one_to_many"}'
+
+ai_context:                              # for agents: read by describe_model
+  instructions: >-
+    Sales of an outdoor shop. Time questions group or filter by
+    orders.ordered_at; "this year" and "last month" are ranges on it.
+    An order's status is paid, shipped or returned.
+    Categories form a tree (categories.tree): selecting one selects
+    everything below it.
+  examples:
+    - "Which region sold the most last month?"
+    - "Revenue by day this week"
+    - "How many customers bought tents?"

@@ -199,6 +199,7 @@ pub fn diff(old: &Model, new: &Model) -> Plan {
     let mut plan = Plan::default();
     tables(&mut plan, old, new);
     relationships(&mut plan, old, new);
+    about(&mut plan, old, new);
     datasets(&mut plan, old, new);
     metrics(&mut plan, old, new);
     dashboards(&mut plan, old, new);
@@ -438,9 +439,20 @@ fn relationships(plan: &mut Plan, old: &Model, new: &Model) {
                 && b.from_columns == relationship.from_columns
                 && b.to_columns == relationship.to_columns
         }) {
-            if before.is_some_and(|b| b.role != relationship.role) {
-                plan.push(Op::Change, "relationship", subject, ChangeClass::Safe)
-                    .detail("role");
+            if let Some(b) = before {
+                let what = match (
+                    b.role != relationship.role,
+                    b.ai_context != relationship.ai_context,
+                ) {
+                    (true, true) => Some("role, ai_context"),
+                    (true, false) => Some("role"),
+                    (false, true) => Some("ai_context"),
+                    (false, false) => None,
+                };
+                if let Some(what) = what {
+                    plan.push(Op::Change, "relationship", subject, ChangeClass::Safe)
+                        .detail(what);
+                }
             }
             continue;
         }
@@ -499,6 +511,10 @@ fn datasets(plan: &mut Plan, old: &Model, new: &Model) {
                 format!("{} → {}", before.name, dataset.name),
                 ChangeClass::Safe,
             );
+        }
+        if before.description != dataset.description || before.ai_context != dataset.ai_context {
+            plan.push(Op::Change, "dataset", &dataset.name, ChangeClass::Safe)
+                .detail("description");
         }
         // fields are compared by name, and only declared changes matter;
         // implicit column fields follow their columns, reported above
@@ -592,6 +608,19 @@ fn column_only_change(a: &crate::ir::Field, b: &crate::ir::Field) -> bool {
         && a.grains == b.grains
         && a.label == b.label
         && a.description == b.description
+        && a.ai_context == b.ai_context
+}
+
+/// What the model says about itself: its description and `ai_context`.
+fn about(plan: &mut Plan, old: &Model, new: &Model) {
+    // a model that wasn't there before is new altogether, not changed
+    if old.name.is_some()
+        && (old.description != new.description || old.ai_context != new.ai_context)
+    {
+        let name = new.name.as_deref().unwrap_or("model");
+        plan.push(Op::Change, "model", name, ChangeClass::Safe)
+            .detail("description");
+    }
 }
 
 fn metrics(plan: &mut Plan, old: &Model, new: &Model) {
