@@ -787,6 +787,13 @@ fn security(plan: &mut Plan, a: &ServerConfig, b: &ServerConfig) {
     setting("agents.auto_apply", classes(&a.agents), classes(&b.agents));
 
     credentials(plan, x, y);
+    // where embedded views load the UI from and send their token to: read
+    // when a view is shown, so at once
+    if a.public_url != b.public_url {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "default".into());
+        plan.push(Op::Change, "setting", "public_url", ChangeClass::Security)
+            .detail(format!("{} → {}", show(&a.public_url), show(&b.public_url)));
+    }
 }
 
 /// Ingest credentials added, changed and removed. The single token is a

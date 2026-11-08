@@ -52,7 +52,7 @@ The newest rows of a table that pass filters, newest first: the fields to show (
 
 **Show a live view** · read only
 
-Shows an answer as a view: a dashboard that lives only in memory, drawn and kept live by Tidepool, cross-filtered by clicks, and never written to the config. Visuals as in a dashboard file (`id`, `type`, `dimensions`, `metrics`, …; see visual_types in describe_model; `at` is optional), filters as in one. The answer has the view's id, its path in the UI (`/#/v/<id>`), and each visual's numbers as of now. The view is forgotten after a day unused; save_view keeps it.
+Shows an answer as a view: a dashboard that lives only in memory, drawn and kept live by Tidepool, cross-filtered by clicks, and never written to the config. Visuals as in a dashboard file (`id`, `type`, `dimensions`, `metrics`, …; see visual_types in describe_model; `at` is optional), filters as in one. The answer has the view's id, its path in the UI (`/#/v/<id>`), and each visual's numbers as of now. Hosts that show MCP Apps draw it live in the conversation (ui://tidepool/view). The view is forgotten after a day unused; save_view keeps it.
 
 | key | type | default | description |
 | --- | --- | --- | --- |

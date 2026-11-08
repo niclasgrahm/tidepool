@@ -373,6 +373,22 @@ pub struct MetricInfo {
     pub dashboards: Vec<String>,
 }
 
+/// `POST /v1/auth/embed`: the views a token may open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedRequest {
+    pub views: Vec<String>,
+}
+
+/// A token for embedded views.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EmbedToken {
+    /// Send it as `?token=` on `/v1/ws`.
+    pub token: String,
+    /// How long it lasts unused.
+    pub idle_seconds: u64,
+}
+
 /// What the server is doing (`GET /v1/status`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusInfo {

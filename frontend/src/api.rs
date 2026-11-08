@@ -21,8 +21,26 @@ pub fn token_of(search: &str) -> Option<String> {
 }
 
 /// One request to the server this UI came from: the status and the body.
+/// The server's address when the page wasn't served by it (an MCP App):
+/// its `<meta name="tidepool-origin">`.
+#[must_use]
+pub fn origin() -> Option<String> {
+    meta("tidepool-origin").map(|o| o.trim_end_matches('/').to_string())
+}
+
+/// A `<meta name=…>`'s content.
+#[must_use]
+pub fn meta(name: &str) -> Option<String> {
+    web_sys::window()?
+        .document()?
+        .query_selector(&format!("meta[name=\"{name}\"]"))
+        .ok()??
+        .get_attribute("content")
+}
+
 async fn request(method: &str, path: &str, body: Option<String>) -> Result<(u16, String), String> {
     let window = web_sys::window().ok_or("no window")?;
+    let path = &format!("{}{path}", origin().unwrap_or_default());
     let init = web_sys::RequestInit::new();
     init.set_method(method);
     let headers = web_sys::Headers::new().map_err(|err| format!("{err:?}"))?;

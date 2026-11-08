@@ -4,6 +4,7 @@
 //! A library rather than code in the binary so integration tests can drive
 //! [`router`] in process through `tower::ServiceExt::oneshot`, with no socket.
 
+mod apps;
 pub mod auth;
 pub mod config;
 mod endpoints;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub(crate) counters: metrics::Counters,
     /// Browser sessions.
     pub(crate) sessions: auth::Sessions,
+    /// Tokens for views embedded in other apps.
+    pub(crate) embeds: auth::Embeds,
     /// What each ingest credential has used of its limits.
     pub(crate) limiter: limits::Limiter,
     /// What time it is, for selections relative to now.
@@ -195,6 +198,7 @@ impl AppState {
             started: std::time::Instant::now(),
             counters: metrics::Counters::default(),
             sessions: auth::Sessions::default(),
+            embeds: auth::Embeds::default(),
             limiter: limits::Limiter::default(),
             clock: Clock::default(),
             views: views::Views::default(),

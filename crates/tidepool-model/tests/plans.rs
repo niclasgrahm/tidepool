@@ -445,3 +445,14 @@ scenario!(
         "    from_columns: [customer_id]\n    to_columns: [customer_id]\n    ai_context: { instructions: \"who placed the order\" }\n"
     )]
 );
+
+// where embedded views load the UI from, and send their token: who can
+// reach what, so a person approves it
+scenario!(
+    set_the_public_url,
+    [Replace(
+        "tidepool.yaml",
+        "durability: fsync\n",
+        "durability: fsync\npublic_url: https://tidepool.example.com\n"
+    )]
+);

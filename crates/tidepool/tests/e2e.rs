@@ -1370,3 +1370,247 @@ fn a_view_an_agent_made_goes_live_and_is_saved_as_a_dashboard() {
         "the view written to the config directory"
     );
 }
+
+/// JSON-RPC to `/mcp`; the reply's `result`.
+fn mcp(address: SocketAddr, method: &str, params: &Value) -> Value {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+    match http(address, "POST", "/mcp", &body.to_string()) {
+        Some((200, reply)) => match serde_json::from_str::<Value>(&reply) {
+            Ok(reply) => reply["result"].clone(),
+            Err(err) => panic!("{method}: {err}: {reply}"),
+        },
+        other => panic!("{method}: {other:?}"),
+    }
+}
+
+/// Evaluate `expression` in the frame the host page made (the app). The
+/// frame is sandboxed, so the page can't look in, and Chrome runs it in a
+/// process of its own: it is evaluated through the frame's own target.
+fn in_frame(browser: &mut Browser, expression: &str) -> Value {
+    let page = std::mem::take(&mut browser.session);
+    let targets = browser.call("Target.getTargets", &json!({}));
+    let frame = targets["targetInfos"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["type"] == "iframe"))
+        .map(|t| t["targetId"].clone());
+    let Some(frame) = frame else {
+        browser.session = page;
+        return Value::Null;
+    };
+    let attached = browser.call(
+        "Target.attachToTarget",
+        &json!({ "targetId": frame, "flatten": true }),
+    );
+    browser.session = attached["sessionId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let result = browser.call(
+        "Runtime.evaluate",
+        &json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
+    );
+    let session = std::mem::take(&mut browser.session);
+    browser.call("Target.detachFromTarget", &json!({ "sessionId": session }));
+    browser.session = page;
+    result["result"]["value"].clone()
+}
+
+fn wait_in_frame(browser: &mut Browser, expression: &str, what: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let value = in_frame(browser, expression);
+        if !matches!(value, Value::Null | Value::Bool(false)) {
+            return value;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let page = in_frame(
+        browser,
+        "(document.body?.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 400)",
+    );
+    let probe = in_frame(
+        browser,
+        "(async () => { const src = [...document.scripts].map(s => s.textContent).join(' ').match(/from '([^']+)'/); let fetched; try { fetched = (await fetch(src[1])).status } catch (e) { fetched = String(e) } let imported; try { await import(src[1]); imported = 'ok' } catch (e) { imported = String(e) } return JSON.stringify({src: src && src[1], fetched, imported, wasm: typeof WebAssembly, started: window.tidepoolStarted, bindings: typeof window.wasmBindings}) })()",
+    );
+    panic!("timed out waiting in the app for {what}; it shows: {page}; probe {probe}");
+}
+
+/// A page playing an MCP host: it frames the app's HTML in a sandboxed
+/// frame under the CSP the resource declares, answers `ui/initialize`,
+/// sends the tool result, and keeps every message the app sends in
+/// `window.received`.
+fn host_page(app: &Value, called: &Value, wasm: bool) -> String {
+    let html = app["text"].as_str().unwrap_or_default();
+    // the frame's CSP from what the resource declares, as a host builds it
+    let origins = |key: &str| {
+        app["_meta"]["ui"]["csp"][key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    };
+    let csp = format!(
+        "default-src 'none'; script-src 'unsafe-inline' {w} {r}; \
+         style-src 'unsafe-inline' {r}; connect-src {c}; img-src data:",
+        w = if wasm { "'wasm-unsafe-eval'" } else { "" },
+        r = origins("resourceDomains"),
+        c = origins("connectDomains"),
+    );
+    let html = html.replacen(
+        "<head>",
+        &format!("<head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
+        1,
+    );
+    format!(
+        "(() => {{
+           window.received = [];
+           const frame = document.createElement('iframe');
+           frame.style = 'position:fixed;left:0;top:0;width:1200px;height:800px;border:0';
+           frame.sandbox = 'allow-scripts';
+           frame.srcdoc = {html};
+           const reply = (message) => frame.contentWindow.postMessage(Object.assign({{jsonrpc: '2.0'}}, message), '*');
+           window.addEventListener('message', (event) => {{
+             const m = event.data || {{}};
+             window.received.push(m);
+             if (m.method === 'ui/initialize') reply({{id: m.id, result: {{protocolVersion: '2026-01-26', hostInfo: {{name: 'e2e'}}, hostCapabilities: {{}}, hostContext: {{}}}}}});
+             else if (m.method === 'ui/notifications/initialized') reply({{method: 'ui/notifications/tool-result', params: {result}}});
+             else if (m.id !== undefined && m.method) reply({{id: m.id, result: {{}}}});
+           }});
+           document.body.appendChild(frame);
+         }})()",
+        html = serde_json::to_string(&html).unwrap_or_default(),
+        result = called,
+    )
+}
+
+#[test]
+fn an_ai_app_shows_a_view_live_and_hears_of_selections() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+    // what a host does: call the tool, read the app it names
+    let called = mcp(
+        address,
+        "tools/call",
+        &json!({"name": "show_view", "arguments": {"name": "Regions", "visuals": [
+            {"id": "total", "type": "kpi", "metrics": ["revenue"]},
+            {"id": "regions", "type": "bar", "dimensions": ["customers.region"],
+             "metrics": ["revenue"], "on_click": "select"},
+        ]}}),
+    );
+    assert!(called["_meta"]["tidepool"]["token"].is_string(), "{called}");
+    let read = mcp(
+        address,
+        "resources/read",
+        &json!({"uri": "ui://tidepool/view"}),
+    );
+    let app = &read["contents"][0];
+    let host = host_page(app, &called, true);
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    // the host page on loopback too: Chrome keeps pages elsewhere from
+    // reaching loopback, which a real host (public, and a public Tidepool)
+    // doesn't meet
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/readyz") }),
+    );
+    browser.wait_for("document.readyState === 'complete'", "the host page");
+    browser.eval(&host);
+
+    // drawn by the UI, live, inside the sandboxed frame
+    let bars = "[...document.querySelectorAll('.visual.bar .plot .bar')]";
+    wait_in_frame(&mut browser, &format!("{bars}.length === 2"), "two bars");
+    let kpi =
+        "(e => e && (e.title || e.textContent))(document.querySelector('.visual.kpi .kpi-value'))";
+    wait_in_frame(
+        &mut browser,
+        &format!("{kpi} === '130.00'"),
+        "the total, 130.00",
+    );
+    post(
+        address,
+        "orders",
+        &json!([{"order_id": "o9", "customer_id": "c-south", "product_id": "p1", "status": "paid",
+                 "ordered_at": "2026-10-01T12:00:00Z", "quantity": 1, "amount": "20.00", "note": null}]),
+    );
+    wait_in_frame(
+        &mut browser,
+        &format!("{kpi} === '150.00'"),
+        "the total to update live",
+    );
+
+    // a click selects, and the host's model hears of it
+    let at = wait_in_frame(
+        &mut browser,
+        &format!(
+            "(() => {{ const labels = [...document.querySelectorAll('.visual.bar .plot .labels text')]; \
+             const i = labels.findIndex(t => t.textContent === 'north'); const bar = {bars}[i]; \
+             if (!bar) return null; const r = bar.getBoundingClientRect(); \
+             return [r.x + r.width / 2, r.y + r.height / 2]; }})()"
+        ),
+        "the north bar",
+    );
+    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else {
+        panic!("no position for the north bar: {at}");
+    };
+    browser.click(x, y);
+    wait_in_frame(
+        &mut browser,
+        &format!("{kpi} === '100.00'"),
+        "north's 100.00",
+    );
+    browser.wait_for(
+        "window.received.some(m => m.method === 'ui/update-model-context' \
+         && JSON.stringify(m.params).includes('north'))",
+        "the host to be told north is selected",
+    );
+}
+
+#[test]
+fn an_ai_app_that_allows_no_webassembly_still_shows_the_numbers() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+    let called = mcp(
+        address,
+        "tools/call",
+        &json!({"name": "show_view", "arguments": {"visuals": [
+            {"id": "regions", "type": "bar", "dimensions": ["customers.region"], "metrics": ["revenue"]},
+        ]}}),
+    );
+    let read = mcp(
+        address,
+        "resources/read",
+        &json!({"uri": "ui://tidepool/view"}),
+    );
+    let host = host_page(&read["contents"][0], &called, false);
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/readyz") }),
+    );
+    browser.wait_for("document.readyState === 'complete'", "the host page");
+    browser.eval(&host);
+    wait_in_frame(
+        &mut browser,
+        "(() => { const t = document.querySelector('#tidepool-fallback:not([hidden]) table'); \
+         return t && t.innerText.includes('north') && t.innerText.includes('100.00'); })()",
+        "the tool's numbers as a table",
+    );
+}

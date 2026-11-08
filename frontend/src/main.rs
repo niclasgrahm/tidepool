@@ -7,6 +7,7 @@
 //! where `cargo test` reaches it.
 
 mod api;
+mod apps;
 mod board;
 mod calendar;
 mod charts;
@@ -158,8 +159,7 @@ fn Pulse(#[prop(into)] on_dashboard: Signal<bool>) -> impl IntoView {
     let waiting = move || {
         let behind = live
             .server
-            .get()
-            .0
+            .with(|s| s.epoch)
             .saturating_sub(live.board.with(|b| b.epoch));
         (live.paused.get() && behind > 0).then_some(behind)
     };
@@ -176,7 +176,7 @@ fn Pulse(#[prop(into)] on_dashboard: Signal<bool>) -> impl IntoView {
         let shown = if on_dashboard.get() && live.updated.get() > 0.0 {
             live.board.with(|b| b.epoch)
         } else {
-            live.server.get().0
+            live.server.with(|s| s.epoch)
         };
         format!("epoch {}", display(&json!(shown)))
     };
@@ -289,7 +289,7 @@ fn StatusBar() -> impl IntoView {
                 {move || if live.connected.get() { "ws connected" } else { "ws disconnected" }}
             </span>
             <span>
-                {move || format!("snapshot {}", display(&json!(live.server.get().0)))}
+                {move || format!("snapshot {}", display(&json!(live.server.with(|s| s.epoch))))}
                 {move || age().map(|a| format!(" · updated {a}"))}
             </span>
             {move || status.get().map(|s| view! {
@@ -297,7 +297,7 @@ fn StatusBar() -> impl IntoView {
                 <span>{format!("{} sessions", s.sessions)}</span>
                 <span>{format!("publish {} · refresh {}", millis(s.epoch_publish_ms), millis(s.live_refresh_ms))}</span>
             })}
-            <span>{move || format!("ingest {} rows/s", compact(live.server.get().1))}</span>
+            <span>{move || format!("ingest {} rows/s", compact(live.server.with(|s| s.rows_per_second)))}</span>
             <span class="grow"></span>
             {move || status.get().map(|s| view! { <span>{format!("model v{}", s.config_version)}</span> })}
             <Suspense fallback=|| view! { <span>"…"</span> }>
@@ -312,7 +312,119 @@ fn StatusBar() -> impl IntoView {
 
 fn main() {
     console_error_panic_hook::set_once();
-    leptos::mount::mount_to_body(App);
+    if api::meta("tidepool-mode").as_deref() == Some("mcp-app") {
+        leptos::mount::mount_to_body(McpApp);
+    } else if let Some(view) = current_hash().strip_prefix("#/embed/v/") {
+        let view = view.to_string();
+        leptos::mount::mount_to_body(move || view! { <Embedded view=view.clone() /> });
+    } else {
+        leptos::mount::mount_to_body(App);
+    }
+}
+
+/// A view or dashboard alone, for another page to frame: no top bar, no
+/// status bar, only the selection over the grid.
+#[component]
+fn Embedded(view: String) -> impl IntoView {
+    let live = Live::new();
+    provide_context(live);
+    leptos::task::spawn_local(async move {
+        api::adopt_token().await;
+        live.connect();
+    });
+    view! { <EmbeddedBoard view=view /> }
+}
+
+#[component]
+fn EmbeddedBoard(view: String) -> impl IntoView {
+    let live = expect_context::<Live>();
+    view! {
+        <div class="embedded">
+            <div class="toolbar embedded-bar"><Selection /></div>
+            {move || live.problem.get().map(|p| view! { <p class="problem banner" role="alert">{p}</p> })}
+            <dashboard::Dashboard slug=view.clone() />
+        </div>
+    }
+}
+
+/// Inside an AI app (an MCP App): the view the tool result names, opened
+/// with the token it carries, and every selection told to the host's model.
+#[component]
+fn McpApp() -> impl IntoView {
+    let live = Live::new();
+    provide_context(live);
+    let target = RwSignal::new(None::<apps::Target>);
+    let Some(window) = web_sys::window() else {
+        return view! { <p>"No window."</p> }.into_any();
+    };
+    // the page's script shows the tool's numbers as tables unless the UI says it started
+    let _ = js_sys::Reflect::set(&window, &"tidepoolStarted".into(), &true.into());
+    let read = move || {
+        let window: wasm_bindgen::JsValue = web_sys::window()?.into();
+        let bridge = js_sys::Reflect::get(&window, &"tidepoolBridge".into()).ok()?;
+        let result = js_sys::Reflect::get(&bridge, &"result".into()).ok()?;
+        let text = js_sys::JSON::stringify(&result).ok()?.as_string()?;
+        let result: serde_json::Value = serde_json::from_str(&text).ok()?;
+        apps::target(&result)
+    };
+    let start = move |found: apps::Target| {
+        if target.get_untracked().is_none() {
+            live.connect_to(&apps::socket_url(&found));
+            target.set(Some(found));
+        }
+    };
+    if let Some(found) = read() {
+        start(found);
+    } else {
+        let on_result = Closure::<dyn Fn()>::new(move || {
+            if let Some(found) = read() {
+                start(found);
+            }
+        });
+        let _ = window.add_event_listener_with_callback(
+            "tidepool-tool-result",
+            on_result.as_ref().unchecked_ref(),
+        );
+        on_result.forget(); // lives as long as the page
+    }
+    // the host's model hears of every selection the person makes
+    Effect::new(move |_| {
+        let selection = live.selection.get();
+        let Some(found) = target.get() else { return };
+        let (session, epoch) = live.server.with(|s| (s.session.clone(), s.epoch));
+        if session.is_empty() {
+            return;
+        }
+        let context = apps::model_context(&found.view, &session, &selection, epoch);
+        tell_host("ui/update-model-context", &context);
+    });
+    view! {
+        {move || match target.get() {
+            None => view! { <p class="quiet page-note">"Waiting for the view…"</p> }.into_any(),
+            Some(found) => view! { <EmbeddedBoard view=found.view /> }.into_any(),
+        }}
+    }
+    .into_any()
+}
+
+/// Send the host a request through the page's bridge (`tidepoolBridge`).
+fn tell_host(method: &str, params: &serde_json::Value) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(bridge) = js_sys::Reflect::get(&window, &"tidepoolBridge".into()) else {
+        return;
+    };
+    let Ok(request) = js_sys::Reflect::get(&bridge, &"request".into()) else {
+        return;
+    };
+    let Ok(request) = request.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let Ok(params) = js_sys::JSON::parse(&params.to_string()) else {
+        return;
+    };
+    let _ = request.call2(&bridge, &method.into(), &params);
 }
 
 #[cfg(test)]

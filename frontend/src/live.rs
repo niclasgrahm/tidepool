@@ -18,6 +18,15 @@ pub fn now() -> f64 {
         .map_or(0.0, |p| p.now())
 }
 
+/// What the server says about itself and this page's session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pulse {
+    /// The newest epoch it has published.
+    pub epoch: u64,
+    pub rows_per_second: f64,
+    pub session: String,
+}
+
 #[derive(Clone, Copy)]
 pub struct Live {
     pub dashboards: RwSignal<Vec<DashboardInfo>>,
@@ -32,9 +41,9 @@ pub struct Live {
     pub selection: RwSignal<Vec<SelectedField>>,
     /// Whether there's a selection to go back to, and forward to.
     pub history: RwSignal<(bool, bool)>,
-    /// The newest epoch the server has published, and the rows it takes in
-    /// a second (from status messages).
-    pub server: RwSignal<(u64, f64)>,
+    /// The newest epoch the server has published, the rows it takes in a
+    /// second, and this page's session.
+    pub server: RwSignal<Pulse>,
     pub connected: RwSignal<bool>,
     pub paused: RwSignal<bool>,
     /// When the last frame arrived, on [`now`]'s clock.
@@ -61,7 +70,7 @@ impl Live {
             board: RwSignal::new(Board::default()),
             selection: RwSignal::new(Vec::new()),
             history: RwSignal::new((false, false)),
-            server: RwSignal::new((0, 0.0)),
+            server: RwSignal::new(Pulse::default()),
             connected: RwSignal::new(false),
             paused: RwSignal::new(false),
             updated: RwSignal::new(0.0),
@@ -128,9 +137,12 @@ impl Live {
 
     fn receive(self, message: ServerMessage) {
         match message {
-            ServerMessage::Welcome { epoch, .. } => {
+            ServerMessage::Welcome { epoch, session_id } => {
                 self.connected.set(true);
-                self.server.update(|s| s.0 = epoch);
+                self.server.update(|s| {
+                    s.epoch = epoch;
+                    s.session = session_id;
+                });
                 // a reconnect: show again what was open
                 if let Some(slug) = self.open.get_untracked() {
                     self.send(&json!({"type": "open_dashboard", "id": slug}));
@@ -163,7 +175,10 @@ impl Live {
                 epoch,
                 rows_per_second,
             } => {
-                self.server.set((epoch, rows_per_second));
+                self.server.update(|s| {
+                    s.epoch = epoch;
+                    s.rows_per_second = rows_per_second;
+                });
             }
             ServerMessage::View { dashboard } => self.views.update(|views| {
                 views.retain(|v| v.id != dashboard.id);
@@ -178,9 +193,33 @@ impl Live {
         }
     }
 
-    /// Open the socket to the server this page came from, and start the
-    /// clock.
+    /// Open the socket to the server this page came from (or the one its
+    /// `tidepool-origin` names), and start the clock.
     pub fn connect(self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let location = window.location();
+        let url = match crate::api::origin() {
+            Some(origin) => {
+                let (scheme, host) = origin.split_once("://").unwrap_or(("http", &origin));
+                socket_url(
+                    &format!("{scheme}:"),
+                    host,
+                    &location.search().unwrap_or_default(),
+                )
+            }
+            None => socket_url(
+                &location.protocol().unwrap_or_default(),
+                &location.host().unwrap_or_default(),
+                &location.search().unwrap_or_default(),
+            ),
+        };
+        self.connect_to(&url);
+    }
+
+    /// Open the socket at `url`, and start the clock.
+    pub fn connect_to(self, url: &str) {
         let Some(window) = web_sys::window() else {
             return;
         };
@@ -190,13 +229,7 @@ impl Live {
             250,
         );
         tick.forget(); // lives as long as the page
-        let location = window.location();
-        let url = socket_url(
-            &location.protocol().unwrap_or_default(),
-            &location.host().unwrap_or_default(),
-            &location.search().unwrap_or_default(),
-        );
-        let Ok(socket) = web_sys::WebSocket::new(&url) else {
+        let Ok(socket) = web_sys::WebSocket::new(url) else {
             self.problem.set(Some(format!("Can't open {url}.")));
             return;
         };

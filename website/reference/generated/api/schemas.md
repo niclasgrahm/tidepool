@@ -70,6 +70,25 @@ One version's files: `GET /v1/config/versions/{version}`.
 | `info` | [`VersionInfo`](#schema-versioninfo) | **required** |  |
 
 
+## `EmbedRequest` {#schema-embedrequest}
+
+`POST /v1/auth/embed`: the views a token may open.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `views` | list of string | **required** |  |
+
+
+## `EmbedToken` {#schema-embedtoken}
+
+A token for embedded views.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `idle_seconds` | integer | **required** | How long it lasts unused. |
+| `token` | string | **required** | Send it as `?token=` on `/v1/ws`. |
+
+
 ## `IngestError` {#schema-ingesterror}
 
 A rejected write: nothing was written.

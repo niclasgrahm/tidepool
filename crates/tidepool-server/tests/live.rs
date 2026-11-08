@@ -1444,3 +1444,170 @@ async fn a_view_nobody_looks_at_for_a_day_is_forgotten() {
         "{error}"
     );
 }
+
+/// A server with a read token, on a port, and a view on it.
+async fn guarded_view() -> (Arc<AppState>, String, String) {
+    let state = common::project_state_with(
+        tidepool_server::Tokens::levels(None, Some("read-secret"), None),
+        |_| {},
+    )
+    .await;
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/v1/views",
+            &[
+                ("content-type", "application/json"),
+                ("authorization", "Bearer read-secret"),
+            ],
+            revenue_by_region().to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let id = reply.json()["id"].as_str().unwrap_or_default().to_string();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) => panic!("binding: {err}"),
+    };
+    let address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(err) => panic!("the bound address: {err}"),
+    };
+    let app = tidepool_server::router(Arc::clone(&state));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (state, format!("ws://{address}/v1/ws"), id)
+}
+
+async fn embed_token(state: &Arc<AppState>, views: &Value) -> (StatusCode, Value) {
+    let reply = send(
+        Arc::clone(state),
+        request(
+            Method::POST,
+            "/v1/auth/embed",
+            &[
+                ("content-type", "application/json"),
+                ("authorization", "Bearer read-secret"),
+            ],
+            json!({"views": views}).to_string(),
+        ),
+    )
+    .await;
+    (reply.status, reply.json())
+}
+
+#[tokio::test]
+async fn an_embed_token_opens_its_views_and_nothing_else() {
+    let (state, url, view) = guarded_view().await;
+    let (status, embed) = embed_token(&state, &json!([view])).await;
+    assert_eq!(status, StatusCode::OK, "{embed}");
+    let token = embed["token"].as_str().unwrap_or_default().to_string();
+    assert!(token.starts_with("embed_"), "{embed}");
+    assert_eq!(embed["idle_seconds"], 3600);
+
+    // the socket, with the token: its view opens, a dashboard doesn't
+    let mut socket = connect(&format!("{url}?token={token}")).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    let welcome = next(&mut socket, "welcome").await;
+    let session = welcome["session_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        session.starts_with('s') && session.len() == 33,
+        "a session id nobody can guess: {session}"
+    );
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let refused = next(&mut socket, "error").await;
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("sales")),
+        "{refused}"
+    );
+    say(&mut socket, json!({"type": "open_dashboard", "id": view})).await;
+    let _ = next(&mut socket, "view").await;
+    let _ = next(&mut socket, "frame").await;
+
+    // nowhere else: not the model, not other endpoints
+    let reply = send(
+        Arc::clone(&state),
+        request(Method::GET, &format!("/v1/model?token={token}"), &[], ""),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    // a connection without the token can't take over its session
+    let mut other = connect(&format!("{url}?token=read-secret")).await;
+    say(&mut other, json!({"type": "hello", "session_id": session})).await;
+    let welcome = next(&mut other, "welcome").await;
+    assert_ne!(welcome["session_id"].as_str(), Some(session.as_str()));
+    // and a token is for views there are
+    let (status, _) = embed_token(&state, &json!(["~nope"])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // a made-up token is no token
+    let attempt = tokio_tungstenite::connect_async(format!("{url}?token=embed_nope")).await;
+    assert!(attempt.is_err(), "a made-up token opened the socket");
+}
+
+#[tokio::test]
+async fn a_session_cookie_opens_the_socket_from_this_servers_pages_only() {
+    let (state, url, _) = guarded_view().await;
+    let reply = send(
+        Arc::clone(&state),
+        request(
+            Method::POST,
+            "/v1/auth/session",
+            &[("authorization", "Bearer read-secret")],
+            "",
+        ),
+    )
+    .await;
+    let Some(cookie) = reply
+        .header("set-cookie")
+        .and_then(|c| c.split(';').next().map(str::to_string))
+    else {
+        panic!("a session cookie: {}", reply.text())
+    };
+    let host = url
+        .trim_start_matches("ws://")
+        .trim_end_matches("/v1/ws")
+        .to_string();
+    let open = |origin: String| {
+        let url = url.clone();
+        let cookie = cookie.clone();
+        async move {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let mut request = match url.into_client_request() {
+                Ok(request) => request,
+                Err(err) => panic!("{err}"),
+            };
+            let headers = request.headers_mut();
+            for (name, value) in [("cookie", cookie), ("origin", origin)] {
+                match value.parse() {
+                    Ok(value) => {
+                        headers.insert(name, value);
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            }
+            tokio_tungstenite::connect_async(request).await
+        }
+    };
+    assert!(open(format!("http://{host}")).await.is_ok(), "its own page");
+    match open("https://evil.example.com".into()).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 403);
+        }
+        other => panic!(
+            "another site's page got the socket: {:?}",
+            other.map(|_| ())
+        ),
+    }
+}

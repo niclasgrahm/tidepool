@@ -1,0 +1,7 @@
+---
+source: crates/tidepool-model/tests/plans.rs
+expression: "plan_for(&\n[Replace(\"tidepool.yaml\", \"durability: fsync\\n\",\n\"durability: fsync\\npublic_url: https://tidepool.example.com\\n\")])"
+---
+1 change (0 safe, 0 rebuild, 0 destructive, 1 security)
+
+  ~ setting      public_url  default → https://tidepool.example.com  security

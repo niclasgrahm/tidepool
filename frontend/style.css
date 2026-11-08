@@ -1003,3 +1003,30 @@ th.num button { text-align: right; }
   .page.designer { flex-direction: column; }
   .side { width: auto; position: static; }
 }
+
+/* a view alone: framed by another page, or inside an AI app (an MCP App) */
+.embedded {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--paper);
+}
+.embedded .page {
+  flex: 1;
+}
+#tidepool-fallback {
+  padding: 12px;
+  font: 13px var(--sans, system-ui);
+}
+#tidepool-fallback table {
+  border-collapse: collapse;
+  margin: 8px 0 16px;
+}
+#tidepool-fallback caption {
+  text-align: left;
+  font-weight: 600;
+}
+#tidepool-fallback td {
+  border-bottom: 1px solid var(--line);
+  padding: 2px 10px 2px 0;
+}

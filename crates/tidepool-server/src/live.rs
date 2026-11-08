@@ -32,8 +32,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
+use axum::Extension;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use serde_json::Value as Json;
 use tidepool_config::dashboard::{FilterWidget, VisualType};
@@ -48,6 +50,7 @@ use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
 use tokio::sync::mpsc;
 
+use crate::auth::{ByCookie, Scope};
 use crate::filters::{self, Window, token};
 use crate::query::{
     DEFAULT_ROWS, Stamp, field, json, resolve, result, rows_result, scalar, window_condition,
@@ -136,6 +139,27 @@ struct SessionState {
     /// What was last sent per visual or filter (a hash of it).
     sent: HashMap<String, u64>,
     out: Option<mpsc::Sender<ServerMessage>>,
+    /// The views it may open, when it came with an embed token; `None`:
+    /// anything.
+    allowed: Option<Arc<HashSet<String>>>,
+    /// When its connection went: it can be resumed for [`RESUMABLE`].
+    gone: Option<std::time::Instant>,
+}
+
+/// How long a session without a connection can be resumed.
+const RESUMABLE: Duration = Duration::from_hours(1);
+
+/// A session id nobody can guess: `s` and 128 random bits (a counter, on
+/// an operating system without a random source).
+fn session_id(fallback: u64) -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        return format!("s{fallback}");
+    }
+    bytes.iter().fold(String::from("s"), |mut id, b| {
+        let _ = std::fmt::Write::write_fmt(&mut id, format_args!("{b:02x}"));
+        id
+    })
 }
 
 impl SessionState {
@@ -202,15 +226,22 @@ impl Hub {
         state: &AppState,
         id: Option<String>,
         out: mpsc::Sender<ServerMessage>,
+        scope: Option<&Scope>,
     ) -> Arc<Session> {
+        let allowed = scope.map(|s| Arc::clone(&s.0));
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-        let known = id.and_then(|id| sessions.get(&id).cloned());
+        sessions.retain(|_, s| s.lock().gone.is_none_or(|g| g.elapsed() < RESUMABLE));
+        // resumed only by a connection allowed what it was
+        let known = id
+            .and_then(|id| sessions.get(&id).cloned())
+            .filter(|s| s.lock().allowed == allowed);
         let session = known.unwrap_or_else(|| {
-            let id = format!("s{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
+            let id = session_id(self.next.fetch_add(1, Ordering::Relaxed) + 1);
             let session = Arc::new(Session {
                 id: id.clone(),
                 state: Mutex::new(SessionState {
                     history: vec![Chosen::default()],
+                    allowed,
                     ..SessionState::default()
                 }),
             });
@@ -221,6 +252,7 @@ impl Hub {
         {
             let mut inner = session.lock();
             inner.out = Some(out);
+            inner.gone = None;
             // a new connection has seen nothing
             inner.sent.clear();
         }
@@ -355,7 +387,9 @@ impl Hub {
     /// Drop a session's connection (it can resume with its id).
     #[allow(clippy::unused_self)]
     pub(crate) fn disconnect(&self, session: &Session) {
-        session.lock().out = None;
+        let mut inner = session.lock();
+        inner.out = None;
+        inner.gone = Some(std::time::Instant::now());
     }
 }
 
@@ -450,6 +484,11 @@ fn apply(
     Ok(match message {
         ClientMessage::Hello { .. } => Changed::default(),
         ClientMessage::OpenDashboard { id } => {
+            if inner.allowed.as_ref().is_some_and(|a| !a.contains(&id)) {
+                return Err(format!(
+                    "this connection opens only the views it was given, not `{id}`"
+                ));
+            }
             let Some(dashboard) = lookup(&id) else {
                 return Err(format!("no dashboard `{id}`"));
             };
@@ -1172,11 +1211,40 @@ fn start(state: &Arc<AppState>) {
 }
 
 /// The live WebSocket. See `Operation::Live` in the endpoint table.
-pub async fn socket(State(state): State<Arc<AppState>>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| serve(state, socket))
+pub async fn socket(
+    State(state): State<Arc<AppState>>,
+    scope: Option<Extension<Scope>>,
+    by_cookie: Option<Extension<ByCookie>>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    // a cookie rides along from any site's page: only this server's own
+    // pages may use it for the socket (a token says who sent it)
+    if by_cookie.is_some() && !same_origin(&headers) {
+        return crate::handlers::api_error(
+            StatusCode::FORBIDDEN,
+            "a session cookie opens the live socket from this server's pages only",
+        );
+    }
+    let scope = scope.map(|Extension(s)| s);
+    upgrade.on_upgrade(move |socket| serve(state, socket, scope))
 }
 
-async fn serve(state: Arc<AppState>, mut socket: WebSocket) {
+/// Whether a request's `Origin` (if it has one) is the host it was sent to.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    origin
+        .split_once("://")
+        .is_some_and(|(_, rest)| !host.is_empty() && rest == host)
+}
+
+async fn serve(state: Arc<AppState>, mut socket: WebSocket, scope: Option<Scope>) {
     start(&state);
     let (out, mut outgoing) = mpsc::channel::<ServerMessage>(BACKLOG);
     let mut session: Option<Arc<Session>> = None;
@@ -1203,11 +1271,12 @@ async fn serve(state: Arc<AppState>, mut socket: WebSocket) {
                 };
                 let (state, queue) = (Arc::clone(&state), out.clone());
                 let current = session.clone();
+                let scope = scope.clone();
                 // queries are CPU work: off the async workers
                 let joined = tokio::task::spawn_blocking(move || match (current, message) {
-                    (None, ClientMessage::Hello { session_id }) => state.hub.connect(&state, session_id, queue),
+                    (None, ClientMessage::Hello { session_id }) => state.hub.connect(&state, session_id, queue, scope.as_ref()),
                     (None, message) => {
-                        let session = state.hub.connect(&state, None, queue);
+                        let session = state.hub.connect(&state, None, queue, scope.as_ref());
                         state.hub.handle(&state, &session, message);
                         session
                     }

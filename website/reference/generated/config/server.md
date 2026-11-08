@@ -10,6 +10,7 @@
 | `epoch_interval` | [`Duration`](#server-duration) | `200ms` | How often new data becomes visible, at most. |
 | `listen` | [`Listen`](#server-listen) |  | Where to listen: one address for everything, or one per surface (`public`, `ingest`, `admin`). `tidepool serve --listen` overrides it with one address. |
 | `memory_budget` | [`MemorySize`](#server-memorysize) | `75%` | Memory for data and caches together. |
+| `public_url` | string |  | The address people reach the server at, such as `https://tidepool.example.com`: where a view shown inside an AI app (an MCP App) loads the UI from and connects to. When left out, the address the MCP request came to. |
 
 
 ## `Agents` {#server-agents}
