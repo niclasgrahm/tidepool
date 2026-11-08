@@ -203,6 +203,49 @@ pub fn tools() -> Value {
             "annotations": { "destructiveHint": true },
         },
         {
+            "name": "get_selection",
+            "title": "What the person selected",
+            "description": "A live session's selection: what a person looking at a view or \
+                            dashboard has selected, by the session id the view's app tells \
+                            you with every selection. The body of \
+                            GET /v1/sessions/{id}/selection.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "session": { "type": "string" } },
+                "required": ["session"],
+            },
+            "outputSchema": output_schema("SessionSelection"),
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "set_selection",
+            "title": "Point the person at something",
+            "description": "Replaces a live session's selection with these conditions \
+                            (filters as in query_metrics), and the person's view follows \
+                            at once. One step of their history: Back undoes it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string" },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": { "type": "string" },
+                                "in": { "type": "array" },
+                                "from": {}, "to": {},
+                                "contains": { "type": "string" },
+                            },
+                            "required": ["field"],
+                        },
+                    },
+                },
+                "required": ["session", "fields"],
+            },
+            "outputSchema": output_schema("SessionSelection"),
+        },
+        {
             "name": "get_config",
             "title": "Get the config",
             "description": "Every config file of the current version, and the version: the \
@@ -458,6 +501,17 @@ async fn call(
         }
         "apply_change" => apply_change(state, caller, args).await,
         "show_view" => show_view(state, caller, args).await,
+        "get_selection" => {
+            let session = text("session")?;
+            let path = format!("/v1/sessions/{session}/selection");
+            ok(api(state, caller, Method::GET, &path, None).await)
+        }
+        "set_selection" => {
+            let session = text("session")?;
+            let path = format!("/v1/sessions/{session}/selection");
+            let body = json!({ "fields": args["fields"] });
+            ok(api(state, caller, Method::PUT, &path, Some(&body)).await)
+        }
         "save_view" => save_view(state, caller, args).await,
         "ingest_rows" => {
             let table = text("table")?;

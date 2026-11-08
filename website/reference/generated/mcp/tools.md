@@ -74,6 +74,29 @@ Writes a view as dashboards/&lt;id&gt;.yaml, through the same policy as apply_ch
 | `view` | string | **required** | The view's id, from show_view. |
 
 
+## `get_selection` {#tool-get-selection}
+
+**What the person selected** · read only
+
+A live session's selection: what a person looking at a view or dashboard has selected, by the session id the view's app tells you with every selection. The body of GET /v1/sessions/{id}/selection.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `session` | string | **required** |  |
+
+
+## `set_selection` {#tool-set-selection}
+
+**Point the person at something**
+
+Replaces a live session's selection with these conditions (filters as in query_metrics), and the person's view follows at once. One step of their history: Back undoes it.
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `fields` | list of object with `contains`, `field`, `from`, `in`, `to` | **required** |  |
+| `session` | string | **required** |  |
+
+
 ## `get_config` {#tool-get-config}
 
 **Get the config** · read only

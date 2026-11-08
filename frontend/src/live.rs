@@ -18,6 +18,20 @@ pub fn now() -> f64 {
         .map_or(0.0, |p| p.now())
 }
 
+/// How long after a connection closes the page tries again.
+const RECONNECT_MS: i32 = 2000;
+
+/// The first message on a connection: resuming `session` when there is
+/// one, so a dropped connection keeps its selection.
+#[must_use]
+pub fn hello(session: &str) -> Value {
+    if session.is_empty() {
+        json!({"type": "hello"})
+    } else {
+        json!({"type": "hello", "session_id": session})
+    }
+}
+
 /// What the server says about itself and this page's session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pulse {
@@ -229,11 +243,23 @@ impl Live {
             250,
         );
         tick.forget(); // lives as long as the page
-        let Ok(socket) = web_sys::WebSocket::new(url) else {
+        self.open_socket(url.to_string());
+    }
+
+    /// Open the socket at `url`; when it closes, open it again, resuming
+    /// the session (its selection, its dashboard) the server kept.
+    fn open_socket(self, url: String) {
+        let Ok(socket) = web_sys::WebSocket::new(&url) else {
             self.problem.set(Some(format!("Can't open {url}.")));
             return;
         };
-        let on_open = Closure::<dyn Fn()>::new(move || self.send(&json!({"type": "hello"})));
+        let on_open = Closure::<dyn Fn()>::new(move || {
+            let session = self.server.with_untracked(|s| s.session.clone());
+            self.send(&hello(&session));
+            if self.connected.get_untracked() || !session.is_empty() {
+                self.problem.set(None);
+            }
+        });
         socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
         on_open.forget();
         let on_message =
@@ -251,12 +277,30 @@ impl Live {
         let on_close = Closure::<dyn Fn()>::new(move || {
             self.connected.set(false);
             self.in_flight.update(InFlight::reset);
-            self.problem.set(Some(
-                "Disconnected from the server. Reload to reconnect.".into(),
-            ));
+            self.problem
+                .set(Some("Disconnected from the server: reconnecting…".into()));
+            let url = url.clone();
+            let again = Closure::once_into_js(move || self.open_socket(url));
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    again.unchecked_ref(),
+                    RECONNECT_MS,
+                );
+            }
         });
         socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
         on_close.forget();
         self.socket.set_value(Some(socket));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reconnect_resumes_the_session_it_had() {
+        assert_eq!(hello(""), json!({"type": "hello"}));
+        assert_eq!(hello("s1f"), json!({"type": "hello", "session_id": "s1f"}));
     }
 }

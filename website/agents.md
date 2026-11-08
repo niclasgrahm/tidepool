@@ -23,6 +23,8 @@ Omit the header when the server has no tokens.
 | `read_rows` | the newest rows of a table that pass filters. A `contains` filter finds text, for example in log lines. | read |
 | `show_view` | shows an answer as a live view: a dashboard in memory, never written to the config. The answer has its id, its path in the UI and the numbers of each visual. | read |
 | `save_view` | writes a view to `dashboards/<id>.yaml`, with the same policy as `apply_change` | admin |
+| `get_selection` | what a person who looks at a view or dashboard has selected, by the id of their session | read |
+| `set_selection` | replaces the selection of a session, and the view of the person follows. Back undoes it. | read |
 | `get_config` | every config file, and the current version | admin |
 | `plan_change` | what a change does: problems, and each part with its class | admin |
 | `apply_change` | applies a change if the policy allows it, or puts it in the queue | admin |
@@ -115,6 +117,14 @@ public_url: https://tidepool.example.com
 ```
 
 A change to `public_url` is a `security` change: a person approves it.
+
+### what the person looks at
+
+Each time the person selects something in the view, the AI app gets the
+selection and the id of the live session. With `get_selection`, an agent
+reads the selection of a session again. With `set_selection`, it shows the
+person something, for example "the north region in March". The view changes
+at once. The person can go back.
 
 ## a good loop
 

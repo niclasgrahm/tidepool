@@ -1602,6 +1602,63 @@
         "title": "RowsRequest",
         "type": "object"
       },
+      "SelectedField": {
+        "description": "One field's selection.",
+        "properties": {
+          "contains": {
+            "description": "The text searched for.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "field": {
+            "type": "string"
+          },
+          "from": true,
+          "relative": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelativeWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A window relative to now; `from` and `to` are where it is now."
+          },
+          "to": true,
+          "values": {
+            "description": "The values selected, for a value selection.",
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "type": "object"
+      },
+      "SelectionChange": {
+        "additionalProperties": false,
+        "description": "A session's new selection, whole: one condition per field, as a query's\nfilters are written. One step in its history, so Back undoes it.",
+        "properties": {
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/QueryFilter"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "title": "SelectionChange",
+        "type": "object"
+      },
       "ServerInfo": {
         "description": "What `GET /v1/info` answers: which server this is.\n\nThe UI shows it in its footer, and a client can check `api_version` before\nit relies on anything else.",
         "properties": {
@@ -1647,6 +1704,41 @@
           "admin"
         ],
         "title": "SessionInfo",
+        "type": "object"
+      },
+      "SessionSelection": {
+        "description": "A live session's selection (`GET` and `PUT /v1/sessions/{id}/selection`).",
+        "properties": {
+          "can_back": {
+            "type": "boolean"
+          },
+          "can_forward": {
+            "type": "boolean"
+          },
+          "dashboard": {
+            "description": "The dashboard or view it shows, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/SelectedField"
+            },
+            "type": "array"
+          },
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "fields",
+          "can_back",
+          "can_forward"
+        ],
+        "title": "SessionSelection",
         "type": "object"
       },
       "StatusInfo": {
@@ -3035,6 +3127,145 @@
           "reference"
         ],
         "x-tidepool-access": "public"
+      }
+    },
+    "/v1/sessions/{id}/selection": {
+      "get": {
+        "description": "What a person looking at a dashboard or view has selected, by the session id `welcome` gave their connection (an MCP App tells the host's model the id with every selection): an agent reads what the person is looking at.",
+        "operationId": "getSelection",
+        "parameters": [
+          {
+            "description": "The session's id.",
+            "example": "s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSelection"
+                }
+              }
+            },
+            "description": "The selection."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such session."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "A live session's selection",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
+      },
+      "put": {
+        "description": "Replaces a session's selection, whole, with these conditions (written as a query's filters): an agent points the person at something. It is one step in the session's history, so Back undoes it, and the session's dashboard is refreshed at once.",
+        "operationId": "setSelection",
+        "parameters": [
+          {
+            "description": "The session's id.",
+            "example": "s3f9c2a7d41b0e85c6d2f1a9b7e4c3d20",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectionChange"
+              }
+            }
+          },
+          "description": "The new selection.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSelection"
+                }
+              }
+            },
+            "description": "The selection now."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "A field or value that isn't the model's."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No token, or the wrong one, for this endpoint's access level."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No such session."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Set a live session's selection",
+        "tags": [
+          "queries"
+        ],
+        "x-tidepool-access": "read"
       }
     },
     "/v1/status": {

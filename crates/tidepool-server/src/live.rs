@@ -36,7 +36,7 @@ use axum::Extension;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde_json::Value as Json;
 use tidepool_config::dashboard::{FilterWidget, VisualType};
 use tidepool_engine::{Condition, Query, Selection};
@@ -44,7 +44,8 @@ use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
 use tidepool_protocol::live::{
     ClientMessage, DashboardInfo, FilterFrame, FilterInfo, GridAt, RelativeUnit, RelativeWindow,
-    SelectMode, SelectedField, ServerMessage, VisualFrame, VisualInfo,
+    SelectMode, SelectedField, SelectionChange, ServerMessage, SessionSelection, VisualFrame,
+    VisualInfo,
 };
 use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
@@ -374,6 +375,70 @@ impl Hub {
                 refresh(state, &session, &snapshot);
             }
         }
+    }
+
+    fn session(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    /// Session `id`'s selection, as of now.
+    pub(crate) fn selection_of(&self, state: &AppState, id: &str) -> Option<SessionSelection> {
+        let session = self.session(id)?;
+        let snapshot = state.writer.snapshot();
+        let inner = session.lock();
+        Some(session_selection(
+            &session.id,
+            &inner,
+            selection_message(&snapshot.model, &inner, state.clock.now()),
+        ))
+    }
+
+    /// Replace session `id`'s selection with `change`, as one step of its
+    /// history, and refresh it. `Ok(None)`: no such session.
+    pub(crate) fn set_selection(
+        &self,
+        state: &AppState,
+        id: &str,
+        change: &SelectionChange,
+    ) -> Result<Option<SessionSelection>, String> {
+        let Some(session) = self.session(id) else {
+            return Ok(None);
+        };
+        let snapshot = state.writer.snapshot();
+        let model = &snapshot.model;
+        let now = state.clock.now();
+        let mut next = Chosen::default();
+        for filter in &change.fields {
+            let (at, ty) = field(model, &filter.field)?;
+            if next.has(&at) {
+                return Err(format!("`{}` is in the selection twice", filter.field));
+            }
+            match filter.relative {
+                Some(window)
+                    if filter.values.is_none()
+                        && filter.from.is_none()
+                        && filter.to.is_none()
+                        && filter.contains.is_none() =>
+                {
+                    // checked now, kept as a window that moves with the clock
+                    window_condition(&filter.field, window, ty, now)?;
+                    next.set_window(at, window);
+                }
+                _ => next.set(at, crate::query::condition(filter, ty, now)?),
+            }
+        }
+        let message = {
+            let mut inner = session.lock();
+            inner.push(next);
+            selection_message(model, &inner, now)
+        };
+        session.send(message);
+        refresh(state, &session, &snapshot);
+        Ok(self.selection_of(state, id))
     }
 
     /// Sessions with a connection.
@@ -816,6 +881,60 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
         fields: fields.into_iter().map(|(_, f)| f).collect(),
         can_back: inner.at > 0,
         can_forward: inner.at + 1 < inner.history.len(),
+    }
+}
+
+/// A session's selection as the API shows it, from its selection message.
+fn session_selection(id: &str, inner: &SessionState, message: ServerMessage) -> SessionSelection {
+    let (fields, can_back, can_forward) = match message {
+        ServerMessage::Selection {
+            fields,
+            can_back,
+            can_forward,
+        } => (fields, can_back, can_forward),
+        _ => (Vec::new(), false, false),
+    };
+    SessionSelection {
+        session: id.to_string(),
+        dashboard: inner.dashboard.clone(),
+        fields,
+        can_back,
+        can_forward,
+    }
+}
+
+/// `GET /v1/sessions/{id}/selection`. See `Operation::GetSelection`.
+pub async fn get_selection(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.hub.selection_of(&state, &id) {
+        Some(selection) => axum::Json(selection).into_response(),
+        None => crate::handlers::api_error(StatusCode::NOT_FOUND, format!("no session `{id}`")),
+    }
+}
+
+/// `PUT /v1/sessions/{id}/selection`. See `Operation::SetSelection`.
+pub async fn set_selection(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(change): axum::Json<SelectionChange>,
+) -> Response {
+    let worker = Arc::clone(&state);
+    let lookup = id.clone();
+    let done =
+        tokio::task::spawn_blocking(move || worker.hub.set_selection(&worker, &lookup, &change))
+            .await;
+    match done {
+        Ok(Ok(Some(selection))) => axum::Json(selection).into_response(),
+        Ok(Ok(None)) => {
+            crate::handlers::api_error(StatusCode::NOT_FOUND, format!("no session `{id}`"))
+        }
+        Ok(Err(message)) => crate::handlers::api_error(StatusCode::BAD_REQUEST, message),
+        Err(_) => crate::handlers::api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the selection couldn't be set",
+        ),
     }
 }
 

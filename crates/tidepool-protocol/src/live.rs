@@ -244,6 +244,26 @@ pub enum ServerMessage {
     Done,
 }
 
+/// A live session's selection (`GET` and `PUT /v1/sessions/{id}/selection`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSelection {
+    pub session: String,
+    /// The dashboard or view it shows, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<String>,
+    pub fields: Vec<SelectedField>,
+    pub can_back: bool,
+    pub can_forward: bool,
+}
+
+/// A session's new selection, whole: one condition per field, as a query's
+/// filters are written. One step in its history, so Back undoes it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionChange {
+    pub fields: Vec<crate::QueryFilter>,
+}
+
 /// A view (`POST /v1/views`): a dashboard that lives only in memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ViewInfo {
