@@ -1,0 +1,17 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `region_by_category`: only pivot tables have `across`: the dimensions along their top
+  --> dashboards/sales.yaml:62:5
+   |
+62 |     across: [orders.status]
+   |     ^^^^^^
+
+error: visual `region_by_category`: only pivot tables have `totals`
+  --> dashboards/sales.yaml:63:5
+   |
+63 |     totals: true
+   |     ^^^^^^
+
+2 errors, 0 warnings

@@ -793,6 +793,7 @@ mod tests {
                 result: None,
                 error: Some(format!("at {epoch}")),
                 compare: None,
+                totals: None,
             }],
             filters: vec![FilterFrame {
                 field: "customers.region".into(),
@@ -876,6 +877,7 @@ mod tests {
                 result: Some(result(rows)),
                 error: None,
                 compare: None,
+                totals: None,
             }],
             filters: Vec::new(),
         };
@@ -1053,6 +1055,8 @@ mod tests {
                 grain: None,
                 level: None,
             }],
+            across: Vec::new(),
+            totals: false,
             metrics: vec!["revenue".into()],
             compare: None,
             on_click: true,
@@ -1249,6 +1253,8 @@ mod tests {
                 grain: None,
                 level: None,
             }],
+            across: Vec::new(),
+            totals: false,
             metrics: Vec::new(),
             compare: None,
             on_click: false,

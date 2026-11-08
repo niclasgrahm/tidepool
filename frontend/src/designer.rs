@@ -31,8 +31,8 @@ use crate::board::{display, formatted};
 use crate::charts::Data;
 use crate::configui::{SignIn, error_of, sleep};
 use crate::design::{
-    Reach, TYPES, default_type, fits, format_of, formats_of, retype, set_fields, set_format, short,
-    size_of, title, type_label, visual_id,
+    Reach, TYPES, default_type, fields, fits, format_of, formats_of, retype, set_fields,
+    set_format, short, size_of, title, type_label, visual_id,
 };
 use crate::layout::{cells, depth, free, moved, nudge, place, resized};
 use crate::plot::{BarChart, HeatChart, LineChart, PieChart, ScatterChart};
@@ -380,6 +380,8 @@ fn Editor(
                     title: None,
                     description: None,
                     dimensions: Vec::new(),
+                    across: Vec::new(),
+                    totals: false,
                     metrics: Vec::new(),
                     compare: None,
                     sort: None,
@@ -657,7 +659,7 @@ fn open_fields(draft: RwSignal<DashboardFile>, picking: RwSignal<Option<Pick>>, 
     if let Some(v) = draft.with_untracked(|d| d.visuals.get(index).cloned()) {
         picking.set(Some(Pick {
             target: Some(index),
-            dimensions: v.dimensions,
+            dimensions: fields(&v),
             metrics: v.metrics,
         }));
     }
@@ -679,7 +681,7 @@ fn Properties(
         .iter()
         .map(|t| {
             let t = *t;
-            let ok = fits(t, &visual.dimensions, visual.metrics.len());
+            let ok = fits(t, &fields(&visual), visual.metrics.len());
             let current = visual.visual_type == t;
             view! {
                 <button
@@ -697,14 +699,16 @@ fn Properties(
             }
         })
         .collect_view();
-    let dims: Vec<String> = visual
-        .dimensions
-        .iter()
-        .map(|d| match d.grain() {
-            Some(g) => format!("{} by {}", d.field(), format!("{g:?}").to_lowercase()),
-            None => d.field().to_string(),
-        })
-        .collect();
+    let named = |dims: &[DimensionRef]| -> Vec<String> {
+        dims.iter()
+            .map(|d| match d.grain() {
+                Some(g) => format!("{} by {}", d.field(), format!("{g:?}").to_lowercase()),
+                None => d.field().to_string(),
+            })
+            .collect()
+    };
+    let dims = named(&visual.dimensions);
+    let across = named(&visual.across);
     let at = visual.at;
     view! {
         <div class="properties">
@@ -716,6 +720,10 @@ fn Properties(
             <dl class="shows">
                 <dt>"Dimensions"</dt>
                 <dd>{if dims.is_empty() { "none".to_string() } else { dims.join(", ") }}</dd>
+                {(!across.is_empty()).then(|| view! {
+                    <dt>"Across"</dt>
+                    <dd>{across.join(", ")}</dd>
+                })}
                 <dt>"Metrics"</dt>
                 <dd>{if visual.metrics.is_empty() { "none".to_string() } else { visual.metrics.join(", ") }}</dd>
             </dl>
@@ -907,6 +915,7 @@ fn why_not(t: VisualType) -> String {
         VisualType::Pie => "A pie shows one metric by one dimension",
         VisualType::Scatter => "A scatter shows two or three metrics by one dimension",
         VisualType::Heatmap => "A heatmap shows one metric by two dimensions",
+        VisualType::Pivot => "A pivot shows metrics by one to five dimensions",
     }
     .to_string()
 }
@@ -1190,7 +1199,7 @@ fn Preview(
                     }).collect_view())}
                 </ul>
             }.into_any(),
-            Some(VisualType::Table | VisualType::Rows) => view! {
+            Some(VisualType::Table | VisualType::Rows | VisualType::Pivot) => view! {
                 <div class="table-wrap preview">
                     <table>
                         <thead><tr>
@@ -1205,7 +1214,7 @@ fn Preview(
                         </tr></thead>
                         <tbody>
                             {move || {
-                                let dims = visual.with(|v| v.as_ref().map_or(0, |v| v.dimensions.len()));
+                                let dims = visual.with(|v| v.as_ref().map_or(0, |v| fields(v).len()));
                                 let names = metrics.get();
                                 rows.with(|r| r.iter().take(50).map(|row| view! {
                                     <tr>{row.iter().enumerate().map(|(c, v)| {

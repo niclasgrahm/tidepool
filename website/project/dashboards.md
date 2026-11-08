@@ -69,6 +69,7 @@ pointer is on it, and `describe_model` gives both to agents. Without a
 | `pie` | one metric by one dimension, as slices of a ring: the largest `limit` (8, at most 12). For a sum or a count, the rest is one more slice. | selects the slice (`on_click: select`) |
 | `scatter` | the values of one dimension as points: the first metric across, the second up, a third as the size of each point. Up to `limit` points (1000, at most 5000). | selects the point. A drag selects the points in its rectangle. |
 | `heatmap` | one metric by two dimensions, as a grid of cells: the first dimension across, the second up, the colour from low to high. Up to `limit` cells (2000, at most 10000). | selects the two values of the cell, as one step. A drag selects the values its rectangle covers. |
+| `pivot` | metrics by one to three dimensions down the side and none to two `across` the top, every metric in each cell. With `totals: true`, a total row and a total column. Up to `limit` combinations (2000, at most 10000), and 50 columns. | selects the values of the cell's row and column, as one step. A header selects its own values. |
 | `filter` | the values of one dimension, as a list (a tree for a hierarchy). It has no metrics. | selects the value |
 | `rows` | the newest rows of one table that the selection allows, the newest first. Its dimensions are the columns. It has no metrics. | |
 
@@ -76,6 +77,34 @@ A table without metrics reads the rows of one table: the table that reaches
 all its dimensions and is nearest to the one side. For `customers.region`
 and `products.category`, that table is `orders`. The table then shows each
 pair of a region and a category that some order in the selection has.
+
+### pivot
+
+A pivot puts its `dimensions` down the side and its `across` dimensions
+along the top. Each cell has every metric for its row and its column. A
+field goes in one of the two, not in both.
+
+```yaml
+# fragment: a visual of dashboards/sales.yaml
+  - id: region_category_pivot
+    type: pivot
+    dimensions: [customers.region]
+    across: [products.category]
+    metrics: [revenue, median_order_value]
+    totals: true
+    on_click: select
+    at: { x: 6, y: 12, w: 6, h: 4 }
+```
+
+The totals are not sums of the cells. The server computes each metric
+again, without the dimensions across (for each row), without the dimensions
+down the side (for each column), and without dimensions (for the whole). So
+a total is correct for every aggregate: a distinct count, an average and a
+median too. In the example, a region's median is the median of all its
+orders, not a sum or an average of the medians of its categories.
+
+A `sort` sorts the rows. The columns are in the order of their values. The
+CSV export is the query as a flat table: one row for each cell.
 
 A `filter` visual shows the same list as a filter on the rail. Its states
 are the same: selected, possible and excluded. Use it to put a filter next

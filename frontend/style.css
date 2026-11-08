@@ -624,6 +624,32 @@ td .cell { position: relative; }
 .num { text-align: right; }
 th.num button { text-align: right; }
 
+/* a pivot: headers down the side and along the top, the totals set off;
+   what's selected in the selection's colour. Only the corner and the top
+   stick: the side's headers span rows */
+.visual.pivot tbody tr { cursor: default; }
+.visual.pivot tbody tr:hover td { background: transparent; }
+.pivot tbody th, .pivot tfoot th {
+  position: static; vertical-align: top;
+  background: var(--surface); border-top: 0; border-bottom: 1px solid var(--gray-3);
+  border-right: 1px solid var(--gray-4);
+}
+.pivot thead th { text-align: center; border-left: 1px solid var(--gray-4); }
+.pivot thead th.corner { text-align: left; vertical-align: bottom; border-left: 0; }
+.pivot thead th.num { text-align: right; }
+.pivot .pick {
+  height: auto; border: 0; border-radius: 3px; padding: 0 3px; margin: 0 -3px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.pivot .pick:hover { background: var(--gray-3); color: var(--ink); }
+.pivot .pick:focus-visible { outline: 2px solid var(--tide); outline-offset: 1px; }
+.pivot td.empty { background: var(--gray-1); }
+.pivot .total { font-weight: 500; background: var(--gray-2); }
+.pivot tfoot td, .pivot tfoot th { border-top: 1px solid var(--kelp); }
+.pivot td.all { color: var(--ink); }
+.pivot .chosen { background: var(--anemone-soft); color: var(--anemone-text); }
+.pivot th.chosen { box-shadow: inset 2px 0 0 var(--anemone); }
+
 /* a value that changed with the last update */
 @media (prefers-reduced-motion: no-preference) {
   .fresh { animation: fresh 1.2s ease-out; }

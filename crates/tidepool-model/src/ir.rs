@@ -449,6 +449,13 @@ pub struct Visual {
     #[serde(default)]
     pub description: Option<String>,
     pub dimensions: Vec<Dimension>,
+    /// A pivot's dimensions along the top; its `dimensions` are down the
+    /// side.
+    #[serde(default)]
+    pub across: Vec<Dimension>,
+    /// A pivot's total row and column.
+    #[serde(default)]
+    pub totals: bool,
     pub metrics: Vec<MetricId>,
     pub compare: Option<MetricId>,
     pub sort: Option<VisualSort>,

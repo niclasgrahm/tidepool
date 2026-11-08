@@ -210,6 +210,8 @@ mod tests {
                 title: None,
                 description: None,
                 dimensions: vec![],
+                across: Vec::new(),
+                totals: false,
                 metrics: vec!["revenue".into()],
                 compare: None,
                 on_click: true,

@@ -7,7 +7,7 @@
 use leptos::ev;
 use leptos::prelude::*;
 use serde_json::{Value, json};
-use tidepool_protocol::live::{FilterFrame, FilterInfo, VisualFrame, VisualInfo};
+use tidepool_protocol::live::{FilterFrame, FilterInfo, PivotTotals, VisualFrame, VisualInfo};
 
 use crate::api::{post_text, save_file};
 use crate::board::{
@@ -618,8 +618,8 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
                 Some(VisualFrame { error: Some(error), .. }) => {
                     view! { <p class="problem">{format!("Can't show this: {error}")}</p> }.into_any()
                 }
-                Some(VisualFrame { result: Some(result), compare, .. }) => {
-                    body(live, &info, result.rows, compare.as_ref())
+                Some(VisualFrame { result: Some(result), compare, totals, .. }) => {
+                    body(live, &info, result.rows, compare.as_ref(), totals)
                 }
                 Some(_) => view! { <p class="quiet">"No result"</p> }.into_any(),
             }}
@@ -709,8 +709,15 @@ fn export_button(live: Live, info: &VisualInfo) -> impl IntoView + use<> {
 }
 
 /// A visual's content, by type.
-fn body(live: Live, info: &VisualInfo, rows: Vec<Vec<Value>>, compare: Option<&Value>) -> AnyView {
+fn body(
+    live: Live,
+    info: &VisualInfo,
+    rows: Vec<Vec<Value>>,
+    compare: Option<&Value>,
+    totals: Option<PivotTotals>,
+) -> AnyView {
     match info.visual_type.as_str() {
+        "pivot" => view! { <PivotTable info=info.clone() rows=rows totals=totals /> }.into_any(),
         "kpi" => kpi(live, info, &rows, compare),
         "rows" => view! { <RowsTable info=info.clone() rows=rows /> }.into_any(),
         "table" | "bar" | "line" => view! { <Table info=info.clone() rows=rows /> }.into_any(),
@@ -1110,6 +1117,201 @@ fn Table(info: VisualInfo, rows: Vec<Vec<Value>>) -> impl IntoView {
                     }).collect_view()}
                 </tbody>
             </table>
+        </div>
+    }
+}
+
+/// Whether every one of `fields` (with its value) is selected.
+fn all_chosen(live: Live, fields: &[(String, Value)]) -> bool {
+    !fields.is_empty()
+        && live.selection.with_untracked(|s| {
+            fields.iter().all(|(field, value)| {
+                let shown = display(value);
+                s.iter().any(|f| {
+                    f.field == *field
+                        && f.values
+                            .as_ref()
+                            .is_some_and(|v| v.iter().any(|v| display(v) == shown))
+                })
+            })
+        })
+}
+
+/// Select `fields`' values as one step (Ctrl or ⌘ adds them).
+fn pick(live: Live, fields: &[(String, Value)], add: bool) {
+    let fields: Vec<Value> = fields
+        .iter()
+        .map(|(field, value)| json!({"field": field, "values": [value]}))
+        .collect();
+    live.send(&json!({
+        "type": "select_many",
+        "mode": if add { "add" } else { "replace" },
+        "fields": fields,
+    }));
+}
+
+/// A pivot table: its dimensions down the side as nested row headers, the
+/// ones across as column headers, every metric in each cell, and the
+/// totals the server computed. A cell selects its row's and column's
+/// values; a header, its own.
+#[component]
+#[allow(clippy::too_many_lines)] // one table, drawn in order
+fn PivotTable(
+    info: VisualInfo,
+    rows: Vec<Vec<Value>>,
+    totals: Option<PivotTotals>,
+) -> impl IntoView {
+    use crate::pivot::Pivot;
+    let live = expect_context::<Live>();
+    let (down, across) = (info.dimensions.len(), info.across.len());
+    let grid = Pivot::new(&rows, down, across, totals.as_ref());
+    let metrics = info.metrics.clone();
+    let m = metrics.len().max(1);
+    let formats: Vec<Option<String>> = metrics
+        .iter()
+        .map(|n| info.formats.get(n).cloned())
+        .collect();
+    let down_fields: Vec<String> = info.dimensions.iter().map(|d| d.field.clone()).collect();
+    let across_fields: Vec<String> = info.across.iter().map(|d| d.field.clone()).collect();
+    let clicks = info.on_click;
+    let named = |fields: &[String], values: &[Value]| -> Vec<(String, Value)> {
+        fields.iter().cloned().zip(values.iter().cloned()).collect()
+    };
+    // a clickable label: a button when clicks select
+    let label = move |text: String, chosen: Vec<(String, Value)>| -> AnyView {
+        if clicks {
+            view! {
+                <button class="pick" on:click=move |ev| pick(live, &chosen, ev.ctrl_key() || ev.meta_key())>{text}</button>
+            }
+            .into_any()
+        } else {
+            view! { <span>{text}</span> }.into_any()
+        }
+    };
+    let values = |cell: Option<&Vec<Value>>| -> Vec<String> {
+        (0..m)
+            .map(|i| {
+                cell.and_then(|c| c.get(i))
+                    .map(|v| formatted(v, formats.get(i).cloned().flatten().as_deref()))
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    let total_column = grid.row_totals.is_some();
+    let metric_row = m > 1 || across == 0;
+    let header_rows = across + usize::from(metric_row);
+    let mut head: Vec<Vec<AnyView>> = (0..header_rows).map(|_| Vec::new()).collect();
+    // the corner: the names of the dimensions down the side
+    for field in &down_fields {
+        head[0].push(
+            view! { <th class="corner" scope="col" rowspan=header_rows>{short(field)}</th> }
+                .into_any(),
+        );
+    }
+    let column_spans = grid.column_spans();
+    for level in 0..across {
+        for (c, spans) in column_spans.iter().enumerate() {
+            let Some(span) = spans[level] else { continue };
+            let value = grid.columns[c][level].clone();
+            let chosen = named(&across_fields[..=level], &grid.columns[c][..=level]);
+            let selected = all_chosen(live, &chosen);
+            head[level].push(view! {
+                <th scope="colgroup" colspan=span * m class:chosen=selected>{label(display(&value), chosen)}</th>
+            }.into_any());
+        }
+        if level == 0 && total_column {
+            head[0].push(
+                view! { <th class="total" scope="colgroup" rowspan=across colspan=m>"Total"</th> }
+                    .into_any(),
+            );
+        }
+    }
+    if metric_row {
+        let names = || {
+            metrics
+                .iter()
+                .map(|n| view! { <th class="num" scope="col">{n.clone()}</th> }.into_any())
+        };
+        let row = head.last_mut();
+        if let Some(row) = row {
+            for _ in &grid.columns {
+                row.extend(names());
+            }
+            if total_column {
+                row.extend(names());
+            }
+        }
+    }
+    let row_spans = grid.row_spans();
+    let body = grid.rows.iter().enumerate().map(|(r, key)| {
+        let mut cells: Vec<AnyView> = Vec::new();
+        for (level, span) in row_spans[r].iter().enumerate() {
+            let Some(span) = *span else { continue };
+            let chosen = named(&down_fields[..=level], &key[..=level]);
+            let selected = all_chosen(live, &chosen);
+            cells.push(view! {
+                <th scope="rowgroup" rowspan=span class:chosen=selected>{label(display(&key[level]), chosen)}</th>
+            }.into_any());
+        }
+        for (c, column) in grid.columns.iter().enumerate() {
+            let cell = grid.cells[r][c].as_ref();
+            let mut chosen = named(&down_fields, key);
+            chosen.extend(named(&across_fields, column));
+            let selected = all_chosen(live, &chosen);
+            for (i, text) in values(cell).into_iter().enumerate() {
+                let chosen = chosen.clone();
+                let empty = cell.is_none();
+                cells.push(view! {
+                    <td class="num" class:chosen=selected class:empty=empty data-row=r data-column=c data-metric=i>
+                        {if empty { ().into_any() } else { label(text, chosen) }}
+                    </td>
+                }.into_any());
+            }
+        }
+        if let Some(totals) = &grid.row_totals {
+            for text in values(totals[r].as_ref()) {
+                cells.push(view! { <td class="num total">{text}</td> }.into_any());
+            }
+        }
+        view! { <tr>{cells}</tr> }
+    }).collect_view();
+    // the total row: each column's, and the whole in the corner
+    let foot = (grid.column_totals.is_some() || grid.all.is_some()).then(|| {
+        let mut cells: Vec<AnyView> =
+            vec![view! { <th class="total" scope="row" colspan=down>"Total"</th> }.into_any()];
+        match &grid.column_totals {
+            Some(totals) => {
+                for total in totals {
+                    for text in values(total.as_ref()) {
+                        cells.push(view! { <td class="num total">{text}</td> }.into_any());
+                    }
+                }
+                if total_column {
+                    for text in values(grid.all.as_ref()) {
+                        cells.push(view! { <td class="num total all">{text}</td> }.into_any());
+                    }
+                }
+            }
+            // without across, the whole is the one column's total
+            None => {
+                for text in values(grid.all.as_ref()) {
+                    cells.push(view! { <td class="num total all">{text}</td> }.into_any());
+                }
+            }
+        }
+        view! { <tfoot><tr>{cells}</tr></tfoot> }
+    });
+    let hidden = grid.hidden;
+    view! {
+        <div class="table-wrap pivot-wrap">
+            <table class="pivot">
+                <thead>{head.into_iter().map(|row| view! { <tr>{row}</tr> }).collect_view()}</thead>
+                <tbody>{body}</tbody>
+                {foot}
+            </table>
+            {(hidden > 0).then(|| view! {
+                <p class="quiet">{format!("{hidden} more columns not shown: select some to narrow it")}</p>
+            })}
         </div>
     }
 }

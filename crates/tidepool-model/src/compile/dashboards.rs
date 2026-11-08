@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use tidepool_config::dashboard::{
-    DashboardFile, FilterWidget, Visual as VisualSpec, VisualType, WindowUnit,
+    DashboardFile, DimensionRef, FilterWidget, Visual as VisualSpec, VisualType, WindowUnit,
 };
 use tidepool_config::diag::{Diagnostic, suggest};
 use tidepool_config::format::NumberFormat;
@@ -208,6 +208,9 @@ struct Site<'a> {
     file: &'a Path,
     path: &'a YamlPath,
     what: String,
+    /// The key its dimensions are under: `dimensions`, or a pivot's
+    /// `across`.
+    dims: &'static str,
 }
 
 fn visual(
@@ -222,25 +225,41 @@ fn visual(
         file,
         path,
         what: format!("visual `{}`", spec.id),
+        dims: "dimensions",
+    };
+    let across_site = Site {
+        what: site.what.clone(),
+        dims: "across",
+        ..site
     };
     let (metric_ids, compare, metrics_ok) = visual_metrics(cx, &site, spec, metrics);
-    let (dimensions, dimension_index, dimensions_ok) = visual_dimensions(cx, &site, spec, semantic);
+    let (dimensions, dimension_index, dimensions_ok) =
+        visual_dimensions(cx, &site, &spec.dimensions, semantic);
+    let (across, across_index, across_ok) =
+        visual_dimensions(cx, &across_site, &spec.across, semantic);
     let shape_ok = visual_shape(cx, &site, spec, semantic, &dimensions);
     let combinations_ok = dimensions.len() < spec.dimensions.len()
         || combinations_reach(cx, &site, spec, semantic, &dimensions);
+    let shown: Vec<MetricId> = metric_ids.iter().chain(compare.iter()).copied().collect();
     let reach_ok = visual_reach(
         cx,
         &site,
-        spec,
+        &spec.dimensions,
         semantic,
         metrics,
-        &metric_ids
-            .iter()
-            .chain(compare.iter())
-            .copied()
-            .collect::<Vec<_>>(),
+        &shown,
         &dimensions,
         &dimension_index,
+    );
+    let across_reach_ok = visual_reach(
+        cx,
+        &across_site,
+        &spec.across,
+        semantic,
+        metrics,
+        &shown,
+        &across,
+        &across_index,
     );
     // a sort is only checkable when everything it could name resolved
     let all_resolved =
@@ -255,6 +274,8 @@ fn visual(
 
     let ok = metrics_ok
         && dimensions_ok
+        && across_ok
+        && across_reach_ok
         && shape_ok
         && combinations_ok
         && reach_ok
@@ -274,13 +295,16 @@ fn visual(
         .limit
         .or(pie.then_some(PIE_DEFAULT))
         .or((spec.visual_type == VisualType::Scatter).then_some(SCATTER_DEFAULT))
-        .or((spec.visual_type == VisualType::Heatmap).then_some(HEAT_DEFAULT));
+        .or((spec.visual_type == VisualType::Heatmap).then_some(HEAT_DEFAULT))
+        .or((spec.visual_type == VisualType::Pivot).then_some(PIVOT_DEFAULT));
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
         title: spec.title.clone(),
         description: spec.description.clone(),
         dimensions,
+        across,
+        totals: spec.totals,
         metrics: metric_ids,
         compare,
         sort,
@@ -380,14 +404,14 @@ fn visual_metrics(
 fn visual_dimensions(
     cx: &mut Cx,
     site: &Site,
-    spec: &VisualSpec,
+    refs: &[DimensionRef],
     semantic: &Semantic,
 ) -> (Vec<Dimension>, Vec<usize>, bool) {
     let mut ok = true;
     let mut dimensions = Vec::new();
     let mut index = Vec::new();
-    for (i, dimension) in spec.dimensions.iter().enumerate() {
-        let at = site.path.key("dimensions").index(i);
+    for (i, dimension) in refs.iter().enumerate() {
+        let at = site.path.key(site.dims).index(i);
         let (table, field) = match semantic.resolve_qualified(dimension.field()) {
             Ok(found) => found,
             Err(message) => {
@@ -452,6 +476,10 @@ const SCATTER_DEFAULT: u32 = 1000;
 pub(crate) const HEAT_CELLS: u32 = 10_000;
 const HEAT_DEFAULT: u32 = 2000;
 
+/// The most combinations a pivot reads, and how many when it doesn't say.
+pub(crate) const PIVOT_CELLS: u32 = 10_000;
+const PIVOT_DEFAULT: u32 = 2000;
+
 /// Why a visual without metrics has nothing to show, and what to do.
 fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
     let dims = spec.dimensions.len();
@@ -460,6 +488,10 @@ fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
         VisualType::Kpi => Some((
             "a KPI shows metrics, and it has none",
             "give it `metrics: [...]`",
+        )),
+        VisualType::Pivot => Some((
+            "a pivot shows metrics in its cells, and it has none",
+            "give it `metrics: [...]`, or make it a `table` to list its dimensions' values",
         )),
         VisualType::Bar
         | VisualType::Line
@@ -518,6 +550,18 @@ fn counts(spec: &VisualSpec, problems: &mut Vec<(&str, &str)>) {
         VisualType::Heatmap if spec.limit.is_some_and(|l| l > HEAT_CELLS) => {
             problems.push(("limit", "a heatmap draws up to 10000 cells"));
         }
+        VisualType::Pivot if !(1..=3).contains(&dims) => {
+            problems.push((
+                "dimensions",
+                "a pivot has one to three dimensions down the side",
+            ));
+        }
+        VisualType::Pivot if spec.across.len() > 2 => {
+            problems.push(("across", "a pivot has up to two dimensions across"));
+        }
+        VisualType::Pivot if spec.limit.is_some_and(|l| l > PIVOT_CELLS) => {
+            problems.push(("limit", "a pivot reads up to 10000 combinations"));
+        }
         VisualType::Bar | VisualType::Line if dims != 1 => {
             problems.push((
                 "dimensions",
@@ -562,6 +606,17 @@ fn visual_shape(
     if spec.visual_type == VisualType::Filter && !spec.metrics.is_empty() {
         problems.push(("metrics", "a filter lists values, so it has no metrics"));
     }
+    let pivot = spec.visual_type == VisualType::Pivot;
+    if !spec.across.is_empty() && !pivot {
+        problems.push((
+            "across",
+            "only pivot tables have `across`: the dimensions along their top",
+        ));
+    }
+    if spec.totals && !pivot {
+        problems.push(("totals", "only pivot tables have `totals`"));
+    }
+    let twice = pivot && pivot_twice(cx, site, spec);
     if spec.compare.is_some() && spec.visual_type != VisualType::Kpi {
         problems.push(("compare", "only KPI tiles have a `compare`"));
     }
@@ -573,6 +628,7 @@ fn visual_shape(
                 | VisualType::Pie
                 | VisualType::Scatter
                 | VisualType::Heatmap
+                | VisualType::Pivot
         )
     {
         problems.push((
@@ -612,7 +668,29 @@ fn visual_shape(
                 .at_key(site.file, site.path.key(*key)),
         );
     }
-    problems.is_empty() && empty.is_none() && !grained && !grained_rows
+    problems.is_empty() && empty.is_none() && !grained && !grained_rows && !twice
+}
+
+/// A pivot field both down the side and across (reported; `true`): its
+/// cells would only fill the diagonal.
+fn pivot_twice(cx: &mut Cx, site: &Site, spec: &VisualSpec) -> bool {
+    let Some((at, field)) = spec.across.iter().enumerate().find_map(|(i, a)| {
+        spec.dimensions
+            .iter()
+            .any(|d| d.field() == a.field())
+            .then(|| (i, a.field()))
+    }) else {
+        return false;
+    };
+    cx.push(
+        Diagnostic::error(format!(
+            "{}: `{field}` is both down the side and across",
+            site.what
+        ))
+        .at(site.file, site.path.key("across").index(at))
+        .help("a field goes in `dimensions` or in `across`, not both: its cells would only fill the diagonal"),
+    );
+    true
 }
 
 /// What only a `rows` visual can get wrong: a limit past [`ROWS_LIMIT`],
@@ -701,7 +779,7 @@ fn combinations_reach(
 fn visual_reach(
     cx: &mut Cx,
     site: &Site,
-    spec: &VisualSpec,
+    refs: &[DimensionRef],
     semantic: &Semantic,
     metrics: &Metrics,
     metric_ids: &[MetricId],
@@ -735,9 +813,9 @@ fn visual_reach(
                 Diagnostic::error(format!(
                     "{}: {subject} rows of `{anchor_name}`, which can't be grouped by `{}`",
                     site.what,
-                    spec.dimensions[*i].field()
+                    refs[*i].field()
                 ))
-                .at(site.file, site.path.key("dimensions").index(*i))
+                .at(site.file, site.path.key(site.dims).index(*i))
                 .help(format!(
                     "no relationship path leads from `{anchor_name}` to `{}`",
                     semantic.dataset_name(dimension.field.table)

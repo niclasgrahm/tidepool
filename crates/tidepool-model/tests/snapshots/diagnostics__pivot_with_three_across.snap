@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `region_category_pivot`: a pivot has up to two dimensions across
+  --> dashboards/sales.yaml:69:5
+   |
+69 |     across: [products.category, orders.status, customers.coast]
+   |     ^^^^^^
+
+1 error, 0 warnings
