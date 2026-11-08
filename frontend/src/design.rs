@@ -11,7 +11,7 @@ use tidepool_config::format::NumberFormat;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
-pub const TYPES: [VisualType; 8] = [
+pub const TYPES: [VisualType; 9] = [
     VisualType::Table,
     VisualType::Rows,
     VisualType::Filter,
@@ -19,6 +19,7 @@ pub const TYPES: [VisualType; 8] = [
     VisualType::Line,
     VisualType::Pie,
     VisualType::Scatter,
+    VisualType::Heatmap,
     VisualType::Kpi,
 ];
 
@@ -34,6 +35,7 @@ pub fn type_label(t: VisualType) -> &'static str {
         VisualType::Rows => "Rows",
         VisualType::Pie => "Pie",
         VisualType::Scatter => "Scatter",
+        VisualType::Heatmap => "Heatmap",
     }
 }
 
@@ -50,6 +52,7 @@ pub fn fits(t: VisualType, dimensions: &[DimensionRef], metrics: usize) -> bool 
         VisualType::Bar | VisualType::Line => dims == 1 && metrics > 0,
         VisualType::Pie => dims == 1 && metrics == 1,
         VisualType::Scatter => dims == 1 && (2..=3).contains(&metrics),
+        VisualType::Heatmap => dims == 2 && metrics == 1,
         VisualType::Kpi => dims == 0 && metrics > 0,
         VisualType::Rows => {
             dims > 0 && metrics == 0 && dimensions.iter().all(|d| d.grain().is_none())
@@ -76,7 +79,7 @@ pub fn size_of(t: VisualType) -> (u16, u16) {
         VisualType::Filter => (3, 4),
         VisualType::Rows => (12, 5),
         VisualType::Pie => (4, 4),
-        VisualType::Scatter => (6, 5),
+        VisualType::Scatter | VisualType::Heatmap => (6, 5),
         VisualType::Table | VisualType::Bar | VisualType::Line => (6, 4),
     }
 }
@@ -175,7 +178,11 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
     visual.visual_type = t;
     visual.on_click = matches!(
         t,
-        VisualType::Bar | VisualType::Table | VisualType::Pie | VisualType::Scatter
+        VisualType::Bar
+            | VisualType::Table
+            | VisualType::Pie
+            | VisualType::Scatter
+            | VisualType::Heatmap
     )
     .then_some(ClickAction::Select)
     .filter(|_| !visual.dimensions.is_empty());
@@ -469,7 +476,10 @@ mod tests {
         assert_eq!(allowed(&one, 2), ["Table", "Bar", "Line", "Scatter"]);
         assert_eq!(allowed(&one, 4), ["Table", "Bar", "Line"]);
         assert_eq!(allowed(&[], 1), ["Table", "KPI"]);
-        assert_eq!(allowed(&[field("a.b"), field("c.d")], 1), ["Table"]);
+        assert_eq!(
+            allowed(&[field("a.b"), field("c.d")], 1),
+            ["Table", "Heatmap"]
+        );
         assert_eq!(allowed(&[field("a.b"), field("c.d")], 0), ["Table", "Rows"]);
         // rows show each row's own values: no grain
         let grained = [DimensionRef::Grained {

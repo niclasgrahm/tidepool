@@ -17,7 +17,7 @@ use crate::board::{
 use crate::charts::Data;
 use crate::datepick::DateRange;
 use crate::live::Live;
-use crate::plot::{BarChart, LineChart, PieChart, ScatterChart};
+use crate::plot::{BarChart, HeatChart, LineChart, PieChart, ScatterChart};
 
 /// Whether the page is in dark mode (charts can't read CSS).
 /// The part of `dataset.field` people read.
@@ -562,10 +562,11 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
     };
     let class = format!("visual {}", info.visual_type);
     let dims = info.dimensions.len();
-    let chart = matches!(
+    let chart = (matches!(
         info.visual_type.as_str(),
         "bar" | "line" | "pie" | "scatter"
-    ) && dims == 1;
+    ) && dims == 1)
+        || (info.visual_type == "heatmap" && dims == 2);
     if chart {
         // one chart for the visual's whole life, fed new options: re-made
         // per frame, it would replay its intro and lose clicks
@@ -589,6 +590,7 @@ fn Visual(info: VisualInfo, row_height: u16, maximized: RwSignal<Option<String>>
         let content = match info.visual_type.as_str() {
             "bar" => bar_chart(live, &info, rows, title.clone()),
             "scatter" => scatter_chart(live, &info, rows, title.clone()),
+            "heatmap" => heat_chart(live, &info, rows, title.clone()),
             "pie" => {
                 let whole = Signal::derive(move || {
                     frame.with(|f| f.as_ref().and_then(|f| f.compare.as_ref()).and_then(number))
@@ -785,6 +787,55 @@ fn bar_chart(live: Live, info: &VisualInfo, rows: Memo<Vec<Vec<Value>>>, title: 
     view! {
         <div class="chart">
             <BarChart data=data selected=selected on_select=on_select label=title />
+        </div>
+    }
+    .into_any()
+}
+
+fn heat_chart(
+    live: Live,
+    info: &VisualInfo,
+    rows: Memo<Vec<Vec<Value>>>,
+    title: String,
+) -> AnyView {
+    let (x_field, y_field) = (
+        info.dimensions[0].field.clone(),
+        info.dimensions[1].field.clone(),
+    );
+    let metric = info.metrics.first().cloned().unwrap_or_default();
+    let format = info.formats.get(&metric).cloned();
+    let picked = |field: String| {
+        move || {
+            live.selection.with(|s| {
+                s.iter()
+                    .find(|f| f.field == field)
+                    .and_then(|f| f.values.as_ref())
+                    .map(|v| v.iter().map(display).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+        }
+    };
+    let (sx, sy) = (picked(x_field.clone()), picked(y_field.clone()));
+    let selected = Signal::derive(move || (sx(), sy()));
+    let on_select = info.on_click.then(|| {
+        Callback::new(move |(xs, ys, additive): (Vec<usize>, Vec<usize>, bool)| {
+            let data = rows.with_untracked(|r| crate::charts::HeatData::new(r, "", None));
+            let pick = |values: &[Value], at: &[usize]| -> Vec<Value> {
+                at.iter().filter_map(|i| values.get(*i).cloned()).collect()
+            };
+            live.send(&json!({
+                "type": "select_many",
+                "mode": if additive { "add" } else { "replace" },
+                "fields": [
+                    {"field": x_field, "values": pick(&data.x_values, &xs)},
+                    {"field": y_field, "values": pick(&data.y_values, &ys)},
+                ],
+            }));
+        })
+    });
+    view! {
+        <div class="chart">
+            <HeatChart rows=rows metric=metric format=format selected=selected on_select=on_select label=title />
         </div>
     }
     .into_any()

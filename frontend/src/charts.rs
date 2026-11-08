@@ -1089,6 +1089,248 @@ impl ScatterLayout {
     }
 }
 
+/// Colour steps a heatmap's cells take (`.h0` … `.h9` in `style.css`).
+pub const HEAT_STEPS: usize = 10;
+
+/// A heatmap's rows (two dimensions, one metric) by axis: each axis's
+/// values in order, and every cell's value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeatData {
+    pub xs: Vec<String>,
+    pub ys: Vec<String>,
+    /// The values as the query answered them, for selecting.
+    pub x_values: Vec<Value>,
+    pub y_values: Vec<Value>,
+    /// (x, y, value, the value as shown).
+    pub cells: Vec<(usize, usize, Option<f64>, String)>,
+    pub metric: String,
+}
+
+/// An axis's values in order: by number when they all are, else as text.
+fn axis(values: &mut [(String, Value)]) {
+    if values.iter().all(|(_, v)| number(v).is_some()) {
+        values.sort_by(|a, b| {
+            number(&a.1)
+                .unwrap_or(0.0)
+                .total_cmp(&number(&b.1).unwrap_or(0.0))
+        });
+    } else {
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+}
+
+impl HeatData {
+    #[must_use]
+    pub fn new(rows: &[Vec<Value>], metric: &str, format: Option<&str>) -> Self {
+        let mut xs: Vec<(String, Value)> = Vec::new();
+        let mut ys: Vec<(String, Value)> = Vec::new();
+        for row in rows {
+            for (axis, column) in [(&mut xs, 0), (&mut ys, 1)] {
+                let value = row.get(column).cloned().unwrap_or(Value::Null);
+                let shown = display(&value);
+                if !axis.iter().any(|(s, _)| *s == shown) {
+                    axis.push((shown, value));
+                }
+            }
+        }
+        axis(&mut xs);
+        axis(&mut ys);
+        let find = |axis: &[(String, Value)], v: &Value| {
+            let shown = display(v);
+            axis.iter().position(|(s, _)| *s == shown)
+        };
+        let cells = rows
+            .iter()
+            .filter_map(|row| {
+                let value = row.get(2).cloned().unwrap_or(Value::Null);
+                Some((
+                    find(&xs, row.first()?)?,
+                    find(&ys, row.get(1)?)?,
+                    number(&value),
+                    formatted(&value, format),
+                ))
+            })
+            .collect();
+        Self {
+            x_values: xs.iter().map(|(_, v)| v.clone()).collect(),
+            y_values: ys.iter().map(|(_, v)| v.clone()).collect(),
+            xs: xs.into_iter().map(|(s, _)| s).collect(),
+            ys: ys.into_iter().map(|(s, _)| s).collect(),
+            cells,
+            metric: metric.to_string(),
+        }
+    }
+}
+
+/// One cell of a heatmap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeatCell {
+    pub x: usize,
+    pub y: usize,
+    pub rect: Rect,
+    /// Its colour step, 0 (lowest) to `HEAT_STEPS - 1`; `None` for no value.
+    pub level: Option<usize>,
+    pub text: String,
+    pub selected: bool,
+}
+
+/// A heatmap laid out for a size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeatLayout {
+    pub width: f64,
+    pub height: f64,
+    pub plot: Rect,
+    pub x_labels: Vec<Label>,
+    pub y_labels: Vec<Label>,
+    pub cells: Vec<HeatCell>,
+    /// The values at the scale's two ends, as shown.
+    pub low: String,
+    pub high: String,
+}
+
+impl HeatLayout {
+    /// `selected`: the values (as shown) the selection holds on each axis.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn new(
+        data: &HeatData,
+        (width, height): (f64, f64),
+        (sel_x, sel_y): (&[String], &[String]),
+        measure: Measure,
+    ) -> Self {
+        let left = widest(data.ys.iter(), measure).min(width * 0.3) + 10.0;
+        let plot = Rect {
+            x: left,
+            y: 6.0,
+            w: (width - left - 6.0).max(1.0),
+            h: (height - 40.0).max(1.0),
+        };
+        let (nx, ny) = (data.xs.len().max(1), data.ys.len().max(1));
+        let (cw, ch) = (plot.w / nx as f64, plot.h / ny as f64);
+        let values: Vec<f64> = data
+            .cells
+            .iter()
+            .filter_map(|c| c.2)
+            .filter(|v| v.is_finite())
+            .collect();
+        let (lo, hi) = values
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(*v), hi.max(*v))
+            });
+        let level = |v: Option<f64>| {
+            let v = v.filter(|v| v.is_finite())?;
+            if (hi - lo).abs() < f64::EPSILON {
+                return Some(HEAT_STEPS / 2);
+            }
+            Some((((v - lo) / (hi - lo)) * (HEAT_STEPS - 1) as f64).round() as usize)
+        };
+        let any = !sel_x.is_empty() || !sel_y.is_empty();
+        let cells = data
+            .cells
+            .iter()
+            .map(|(x, y, v, text)| HeatCell {
+                x: *x,
+                y: *y,
+                rect: Rect {
+                    x: plot.x + *x as f64 * cw + 1.0,
+                    // the first value at the bottom, as on an axis going up
+                    y: plot.y + (ny - 1 - *y) as f64 * ch + 1.0,
+                    w: (cw - 2.0).max(1.0),
+                    h: (ch - 2.0).max(1.0),
+                },
+                level: level(*v),
+                text: text.clone(),
+                selected: any
+                    && (sel_x.is_empty() || sel_x.contains(&data.xs[*x]))
+                    && (sel_y.is_empty() || sel_y.contains(&data.ys[*y])),
+            })
+            .collect();
+        let x_labels = data
+            .xs
+            .iter()
+            .enumerate()
+            .map(|(i, key)| Label {
+                x: plot.x + (i as f64 + 0.5) * cw,
+                y: plot.bottom() + 14.0,
+                text: fit(key, cw - 2.0, measure),
+                full: key.clone(),
+                anchor: "middle",
+            })
+            .collect();
+        let y_labels = data
+            .ys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| Label {
+                x: plot.x - 6.0,
+                y: plot.y + (ny - 1 - i) as f64 * ch + ch / 2.0,
+                text: fit(key, left - 12.0, measure),
+                full: key.clone(),
+                anchor: "end",
+            })
+            .collect();
+        Self {
+            width,
+            height,
+            plot,
+            x_labels,
+            y_labels,
+            cells,
+            low: if lo.is_finite() {
+                compact(lo)
+            } else {
+                String::new()
+            },
+            high: if hi.is_finite() {
+                compact(hi)
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// The cell (x, y) at a position, if any.
+    #[must_use]
+    pub fn hit(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        self.cells
+            .iter()
+            .find(|c| {
+                x >= c.rect.x - 1.0
+                    && x <= c.rect.right() + 1.0
+                    && y >= c.rect.y - 1.0
+                    && y <= c.rect.bottom() + 1.0
+            })
+            .map(|c| (c.x, c.y))
+    }
+
+    /// The values of each axis a rectangle (a drag) covers cells of.
+    #[must_use]
+    pub fn span(&self, area: Rect) -> (Vec<usize>, Vec<usize>) {
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for c in &self.cells {
+            let centre = (c.rect.x + c.rect.w / 2.0, c.rect.y + c.rect.h / 2.0);
+            if centre.0 >= area.x
+                && centre.0 <= area.right()
+                && centre.1 >= area.y
+                && centre.1 <= area.bottom()
+            {
+                if !xs.contains(&c.x) {
+                    xs.push(c.x);
+                }
+                if !ys.contains(&c.y) {
+                    ys.push(c.y);
+                }
+            }
+        }
+        (xs, ys)
+    }
+}
+
 /// Where a key moves the keyboard's place among `n` categories.
 #[must_use]
 pub fn step_key(key: &str, at: Option<usize>, n: usize) -> Option<usize> {
@@ -1550,5 +1792,52 @@ mod tests {
         );
         let grown = ScatterLayout::default().blend(&s, 0.5);
         assert!(grown.points[0].r < s.points[0].r);
+    }
+
+    #[test]
+    fn a_heatmap_lays_out_its_cells_by_both_axes_and_colours_them_by_value() {
+        let rows = vec![
+            vec![json!("mon"), json!(9), json!(10)],
+            vec![json!("mon"), json!(10), json!(30)],
+            vec![json!("tue"), json!(9), Value::Null],
+            vec![json!("tue"), json!(10), json!(20)],
+        ];
+        let data = HeatData::new(&rows, "revenue", None);
+        assert_eq!(data.xs, ["mon", "tue"]);
+        // numbers in numeric order: 9 before 10
+        assert_eq!(data.ys, ["9", "10"]);
+        let heat = HeatLayout::new(&data, (300.0, 200.0), (&["tue".into()], &[]), &chars);
+        let level = |x, y| {
+            heat.cells
+                .iter()
+                .find(|c| (c.x, c.y) == (x, y))
+                .and_then(|c| c.level)
+        };
+        assert_eq!(level(0, 0), Some(0));
+        assert_eq!(level(0, 1), Some(HEAT_STEPS - 1));
+        assert_eq!(level(1, 0), None, "no value, no colour");
+        // the first y value is the bottom row
+        let at = |x, y| {
+            heat.cells
+                .iter()
+                .find(|c| (c.x, c.y) == (x, y))
+                .map(|c| c.rect)
+                .unwrap_or_default()
+        };
+        assert!(at(0, 0).y > at(0, 1).y);
+        let middle = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (mx, my) = middle(at(1, 1));
+        assert_eq!(heat.hit(mx, my), Some((1, 1)));
+        // a selection on one axis is its whole column
+        assert!(heat.cells.iter().filter(|c| c.x == 1).all(|c| c.selected));
+        assert!(heat.cells.iter().filter(|c| c.x == 0).all(|c| !c.selected));
+        // a drag over the top row: both columns, one row
+        let top = Rect {
+            x: 0.0,
+            y: at(0, 1).y,
+            w: 300.0,
+            h: at(0, 1).h,
+        };
+        assert_eq!(heat.span(top), (vec![0, 1], vec![1]));
     }
 }

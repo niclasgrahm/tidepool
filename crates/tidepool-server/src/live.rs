@@ -664,32 +664,16 @@ fn apply(
             values,
             mode,
         } => {
-            let (at, ty) = field(model, &name)?;
-            let values = values
-                .iter()
-                .map(|v| scalar(v, ty).ok_or_else(|| format!("`{v}` isn't a value of `{name}`")))
-                .collect::<Result<Vec<_>, _>>()?;
             let mut next = inner.selection();
-            let current = match next.fixed.0.get(&at) {
-                Some(Condition::In(values)) => values.clone(),
-                _ => Vec::new(),
-            };
-            let chosen = match mode {
-                SelectMode::Replace => values,
-                SelectMode::Add => union(current, values),
-                SelectMode::Toggle => {
-                    let (on, off): (Vec<Scalar>, Vec<Scalar>) =
-                        values.into_iter().partition(|v| !contains(&current, v));
-                    union(
-                        current.into_iter().filter(|c| !contains(&off, c)).collect(),
-                        on,
-                    )
-                }
-            };
-            if chosen.is_empty() {
-                next.remove(&at);
-            } else {
-                next.set(at, Condition::In(chosen));
+            choose(model, &mut next, &name, &values, mode)?;
+            let before = inner.selection();
+            inner.push(next);
+            selected(inner.selection() != before)
+        }
+        ClientMessage::SelectMany { fields, mode } => {
+            let mut next = inner.selection();
+            for one in &fields {
+                choose(model, &mut next, &one.field, &one.values, mode)?;
             }
             let before = inner.selection();
             inner.push(next);
@@ -958,6 +942,44 @@ fn selection_message(model: &Model, inner: &SessionState, now: i64) -> ServerMes
         can_back: inner.at > 0,
         can_forward: inner.at + 1 < inner.history.len(),
     }
+}
+
+/// Choose `values` of field `name` in `next`, as `mode` says: in place of
+/// what it had, added to it, or toggled.
+fn choose(
+    model: &Model,
+    next: &mut Chosen,
+    name: &str,
+    values: &[serde_json::Value],
+    mode: SelectMode,
+) -> Result<(), String> {
+    let (at, ty) = field(model, name)?;
+    let values = values
+        .iter()
+        .map(|v| scalar(v, ty).ok_or_else(|| format!("`{v}` isn't a value of `{name}`")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let current = match next.fixed.0.get(&at) {
+        Some(Condition::In(values)) => values.clone(),
+        _ => Vec::new(),
+    };
+    let chosen = match mode {
+        SelectMode::Replace => values,
+        SelectMode::Add => union(current, values),
+        SelectMode::Toggle => {
+            let (on, off): (Vec<Scalar>, Vec<Scalar>) =
+                values.into_iter().partition(|v| !contains(&current, v));
+            union(
+                current.into_iter().filter(|c| !contains(&off, c)).collect(),
+                on,
+            )
+        }
+    };
+    if chosen.is_empty() {
+        next.remove(&at);
+    } else {
+        next.set(at, Condition::In(chosen));
+    }
+    Ok(())
 }
 
 /// A session's selection as the API shows it, from its selection message.

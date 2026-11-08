@@ -273,7 +273,8 @@ fn visual(
     let limit = spec
         .limit
         .or(pie.then_some(PIE_DEFAULT))
-        .or((spec.visual_type == VisualType::Scatter).then_some(SCATTER_DEFAULT));
+        .or((spec.visual_type == VisualType::Scatter).then_some(SCATTER_DEFAULT))
+        .or((spec.visual_type == VisualType::Heatmap).then_some(HEAT_DEFAULT));
     ok.then(|| Visual {
         id: spec.id.clone(),
         visual_type: spec.visual_type,
@@ -447,6 +448,10 @@ const PIE_DEFAULT: u32 = 8;
 pub(crate) const SCATTER_POINTS: u32 = 5000;
 const SCATTER_DEFAULT: u32 = 1000;
 
+/// The most cells a heatmap draws, and how many when it doesn't say.
+pub(crate) const HEAT_CELLS: u32 = 10_000;
+const HEAT_DEFAULT: u32 = 2000;
+
 /// Why a visual without metrics has nothing to show, and what to do.
 fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
     let dims = spec.dimensions.len();
@@ -456,7 +461,11 @@ fn nothing_to_show(spec: &VisualSpec) -> Option<(&'static str, &'static str)> {
             "a KPI shows metrics, and it has none",
             "give it `metrics: [...]`",
         )),
-        VisualType::Bar | VisualType::Line | VisualType::Pie | VisualType::Scatter => Some((
+        VisualType::Bar
+        | VisualType::Line
+        | VisualType::Pie
+        | VisualType::Scatter
+        | VisualType::Heatmap => Some((
             "a chart shows metrics, and it has none",
             "give it `metrics: [...]`, or make it a `filter` or a `table` to list its dimension's values",
         )),
@@ -499,6 +508,15 @@ fn counts(spec: &VisualSpec, problems: &mut Vec<(&str, &str)>) {
         }
         VisualType::Scatter if spec.limit.is_some_and(|l| l > SCATTER_POINTS) => {
             problems.push(("limit", "a scatter draws up to 5000 points"));
+        }
+        VisualType::Heatmap if dims != 2 || spec.metrics.len() > 1 => {
+            problems.push((
+                if dims == 2 { "metrics" } else { "dimensions" },
+                "a heatmap colours one metric by exactly two dimensions",
+            ));
+        }
+        VisualType::Heatmap if spec.limit.is_some_and(|l| l > HEAT_CELLS) => {
+            problems.push(("limit", "a heatmap draws up to 10000 cells"));
         }
         VisualType::Bar | VisualType::Line if dims != 1 => {
             problems.push((
@@ -550,12 +568,16 @@ fn visual_shape(
     if spec.on_click.is_some()
         && !matches!(
             spec.visual_type,
-            VisualType::Bar | VisualType::Table | VisualType::Pie | VisualType::Scatter
+            VisualType::Bar
+                | VisualType::Table
+                | VisualType::Pie
+                | VisualType::Scatter
+                | VisualType::Heatmap
         )
     {
         problems.push((
             "on_click",
-            "only bars, pies, scatters and tables select on click",
+            "only bars, pies, scatters, heatmaps and tables select on click",
         ));
     }
     // only checkable when the dimension resolved; otherwise that's the error

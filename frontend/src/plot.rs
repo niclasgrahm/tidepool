@@ -15,8 +15,8 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::charts::{
-    BarLayout, Data, LineLayout, PieLayout, Rect, ScatterLayout, TWEEN_MS, area_path, ease,
-    line_path, step_key,
+    BarLayout, Data, HeatData, HeatLayout, LineLayout, PieLayout, Rect, ScatterLayout, TWEEN_MS,
+    area_path, ease, line_path, step_key,
 };
 
 /// The charts' text, as `style.css` sets it on `.plot`.
@@ -747,6 +747,210 @@ pub fn ScatterChart(
                     {interactive.then(|| view! { <g class="a11y">{options}</g> })}
                 </svg>
                 {move || tip(data, if press.get().is_some() { None } else { pointed() }, shown.with(|l| l.width))}
+            </div>
+        </div>
+    }
+}
+
+/// What a heatmap's pointer or keyboard picked: the values on each axis
+/// (by position), and whether to add them.
+pub type CellPick = (Vec<usize>, Vec<usize>, bool);
+
+/// A heatmap: one metric by two dimensions, as a grid of cells coloured
+/// from low to high.
+///
+/// `on_select` makes cells selectable: a click gives the cell's two axis
+/// values, a drag the values on each axis its rectangle covers, Enter the
+/// keyboard's cell; with whether Ctrl/Cmd was held.
+#[allow(clippy::too_many_lines)] // one chart: its state, its handlers, its drawing
+#[component]
+pub fn HeatChart(
+    #[prop(into)] rows: Memo<Vec<Vec<serde_json::Value>>>,
+    #[prop(into, optional)] metric: String,
+    #[prop(optional_no_strip)] format: Option<String>,
+    #[prop(into, optional)] selected: Signal<(Vec<String>, Vec<String>)>,
+    #[prop(into, optional_no_strip)] on_select: Option<Callback<CellPick>>,
+    #[prop(into, optional)] label: String,
+) -> impl IntoView {
+    let node = NodeRef::<Div>::new();
+    let size = observe_size(node);
+    let data = Memo::new(move |_| rows.with(|r| HeatData::new(r, &metric, format.as_deref())));
+    let shown = Memo::new(move |_| {
+        let (w, h) = size.get();
+        if w <= 0.0 || h <= 0.0 {
+            return HeatLayout::default();
+        }
+        data.with(|d| selected.with(|(x, y)| HeatLayout::new(d, (w, h), (x, y), &measure)))
+    });
+    let hover = RwSignal::new(None::<(usize, usize)>);
+    let active = RwSignal::new(None::<(usize, usize)>);
+    let press = RwSignal::new(None::<(f64, f64)>);
+    let drag = RwSignal::new(None::<Rect>);
+    let interactive = on_select.is_some();
+    let select = move |xs: Vec<usize>, ys: Vec<usize>, add: bool| {
+        if let Some(on_select) = on_select
+            && !xs.is_empty()
+        {
+            on_select.run((xs, ys, add));
+        }
+    };
+    let area = |(x0, y0): (f64, f64), (x1, y1): (f64, f64)| Rect {
+        x: x0.min(x1),
+        y: y0.min(y1),
+        w: (x1 - x0).abs(),
+        h: (y1 - y0).abs(),
+    };
+    let down = move |ev: web_sys::PointerEvent| {
+        if !interactive || ev.button() != 0 {
+            return;
+        }
+        if let Some(at) = local(node, &ev) {
+            press.set(Some(at));
+            capture(node, &ev);
+        }
+    };
+    let moved = move |ev: web_sys::PointerEvent| {
+        let Some((x, y)) = local(node, &ev) else {
+            return;
+        };
+        if let Some(from) = press.get_untracked() {
+            let rect = area(from, (x, y));
+            if rect.w > 3.0 || rect.h > 3.0 {
+                drag.set(Some(rect));
+            }
+            return;
+        }
+        hover.set(shown.with_untracked(|l| l.hit(x, y)));
+    };
+    let up = move |ev: web_sys::PointerEvent| {
+        let Some(from) = press.get_untracked() else {
+            return;
+        };
+        press.set(None);
+        match drag.get_untracked() {
+            Some(rect) => {
+                let (xs, ys) = shown.with_untracked(|l| l.span(rect));
+                select(xs, ys, additive(&ev));
+            }
+            None => {
+                if let Some((x, y)) = shown.with_untracked(|l| l.hit(from.0, from.1)) {
+                    select(vec![x], vec![y], additive(&ev));
+                }
+            }
+        }
+        drag.set(None);
+    };
+    let cancel = move |_| {
+        press.set(None);
+        drag.set(None);
+    };
+    let key = move |ev: web_sys::KeyboardEvent| {
+        let (nx, ny) = data.with_untracked(|d| (d.xs.len(), d.ys.len()));
+        if nx == 0 || ny == 0 {
+            return;
+        }
+        let (x, y) = active.get_untracked().unwrap_or((0, 0));
+        let moved = match ev.key().as_str() {
+            "ArrowRight" => Some(((x + 1).min(nx - 1), y)),
+            "ArrowLeft" => Some((x.saturating_sub(1), y)),
+            "ArrowUp" => Some((x, (y + 1).min(ny - 1))),
+            "ArrowDown" => Some((x, y.saturating_sub(1))),
+            "Home" => Some((0, 0)),
+            "End" => Some((nx - 1, ny - 1)),
+            "Enter" | " " => {
+                if let Some((x, y)) = active.get_untracked() {
+                    ev.prevent_default();
+                    select(vec![x], vec![y], ev.ctrl_key() || ev.meta_key());
+                }
+                None
+            }
+            "Escape" => {
+                active.set(None);
+                None
+            }
+            _ => None,
+        };
+        if let Some(at) = moved {
+            ev.prevent_default();
+            active.set(Some(at));
+        }
+    };
+    let pointed = move || active.get().or_else(|| hover.get());
+    let tip = move || {
+        let (x, y) = pointed()?;
+        let (title, value) = data.with(|d| {
+            let value = d
+                .cells
+                .iter()
+                .find(|c| (c.0, c.1) == (x, y))
+                .map(|c| c.3.clone())
+                .unwrap_or_default();
+            (
+                format!("{} · {}", d.xs[x], d.ys[y]),
+                (d.metric.clone(), value),
+            )
+        });
+        let (left, top) = shown.with(|l| {
+            l.cells
+                .iter()
+                .find(|c| (c.x, c.y) == (x, y))
+                .map_or((0.0, 0.0), |c| (c.rect.x + c.rect.w / 2.0, c.rect.y))
+        });
+        let flip = left > shown.with(|l| l.width) * 0.6;
+        Some(view! {
+            <div class="tip" class:flip=flip style:left=format!("{left}px") style:top=format!("{top}px")>
+                <strong>{title}</strong>
+                <div class="tip-row"><span>{value.0}</span><b>{value.1}</b></div>
+            </div>
+        })
+    };
+    let described = move || {
+        pointed().map(|(x, y)| {
+            data.with(|d| {
+                let value = d
+                    .cells
+                    .iter()
+                    .find(|c| (c.0, c.1) == (x, y))
+                    .map(|c| c.3.clone())
+                    .unwrap_or_default();
+                format!("{}, {}: {} {value}", d.xs[x], d.ys[y], d.metric)
+            })
+        })
+    };
+    view! {
+        <div class="plot-wrap">
+            <div class="plot-area" node_ref=node class:interactive=interactive
+                on:pointerdown=down on:pointermove=moved on:pointerup=up
+                on:pointercancel=cancel on:pointerleave=move |_| hover.set(None)>
+                <svg class="plot heatmap" class:has-selection=move || selected.with(|(x, y)| !x.is_empty() || !y.is_empty())
+                    width=move || shown.with(|l| l.width) height=move || shown.with(|l| l.height)
+                    role=if interactive { "grid" } else { "img" } aria-label=label
+                    tabindex=interactive.then_some("0")
+                    on:keydown=key on:blur=move |_| active.set(None)>
+                    {move || shown.with(|l| {
+                        let on = pointed();
+                        view! {
+                            <g class="cells">
+                                {l.cells.iter().map(|c| view! {
+                                    <rect class=c.level.map_or_else(|| "cell empty".to_string(), |s| format!("cell h{s}"))
+                                        class:selected=c.selected class:pointed=on == Some((c.x, c.y))
+                                        x=c.rect.x y=c.rect.y width=c.rect.w height=c.rect.h />
+                                }).collect_view()}
+                            </g>
+                            {brush_rect(drag.get())}
+                            <g class="labels">
+                                {l.x_labels.iter().chain(&l.y_labels).map(|t| view! {
+                                    <text x=t.x y=t.y + 4.0 text-anchor=t.anchor>{t.text.clone()}</text>
+                                }).collect_view()}
+                            </g>
+                            <g class="scale">
+                                <text x=l.plot.x y=l.height - 4.0 text-anchor="start">{format!("{} – {}", l.low, l.high)}</text>
+                            </g>
+                        }
+                    })}
+                </svg>
+                <p class="sr-only" aria-live="polite">{described}</p>
+                {tip}
             </div>
         </div>
     }

@@ -479,6 +479,14 @@ case!(
     )]
 );
 case!(
+    heatmap_of_one_dimension,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [customers.region, products.category]\n    metrics: [revenue]\n    on_click: select\n    at: { x: 0, y: 12",
+        "    dimensions: [customers.region]\n    metrics: [revenue]\n    on_click: select\n    at: { x: 0, y: 12"
+    )]
+);
+case!(
     total_of_an_unknown_field,
     [Replace(
         "model.ossie.yaml",

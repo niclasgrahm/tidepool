@@ -62,6 +62,7 @@ the epoch loop:
 | message | what it does |
 | --- | --- |
 | `select` | selects values of a field |
+| `select_many` | selects values of several fields as one step: `{"fields": [{"field": …, "values": [...]}, …]}`. Back undoes all of it. |
 | `select_range` | selects a range of a time field |
 | `select_relative` | selects a window relative to now: `{"field": …, "window": {"unit": "day", "last": 7}}` |
 | `clear` | clears the selection of a field, or all of it |

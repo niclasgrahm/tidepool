@@ -1062,3 +1062,21 @@ th.num button { text-align: right; }
 .plot.scatter.has-selection .point:not(.selected) { fill-opacity: 0.25; }
 .plot .point.selected { fill: var(--anemone); fill-opacity: 0.9; }
 .plot .point.pointed { stroke: var(--ink); stroke-width: 1.5; }
+/* a heatmap's steps: from the paper to the tide colour */
+.plot .cell { stroke: none; }
+.plot .cell.empty { fill: var(--surface); }
+.plot .cell.h0 { fill: color-mix(in srgb, var(--tide) 8%, var(--paper)); }
+.plot .cell.h1 { fill: color-mix(in srgb, var(--tide) 18%, var(--paper)); }
+.plot .cell.h2 { fill: color-mix(in srgb, var(--tide) 28%, var(--paper)); }
+.plot .cell.h3 { fill: color-mix(in srgb, var(--tide) 38%, var(--paper)); }
+.plot .cell.h4 { fill: color-mix(in srgb, var(--tide) 48%, var(--paper)); }
+.plot .cell.h5 { fill: color-mix(in srgb, var(--tide) 58%, var(--paper)); }
+.plot .cell.h6 { fill: color-mix(in srgb, var(--tide) 68%, var(--paper)); }
+.plot .cell.h7 { fill: color-mix(in srgb, var(--tide) 78%, var(--paper)); }
+.plot .cell.h8 { fill: color-mix(in srgb, var(--tide) 89%, var(--paper)); }
+.plot .cell.h9 { fill: var(--tide); }
+.plot.heatmap.has-selection .cell:not(.selected) { opacity: 0.35; }
+.plot .cell.selected { stroke: var(--anemone); stroke-width: 2; }
+.plot .cell.pointed { stroke: var(--ink); stroke-width: 1.5; }
+.plot .scale text { fill: var(--ink-soft); font-size: 10px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
