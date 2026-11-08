@@ -20,7 +20,8 @@ use super::semantic::{Semantic, expression, extension};
 use super::tables::Tables;
 use super::{Cx, IDENTIFIER_HELP, is_identifier};
 use crate::ir::{
-    FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, OffsetUnit, TableId, TimeOffset, Type,
+    FieldRef, IgnoreSelection, Metric, MetricBody, MetricId, OffsetUnit, TableId, TimeOffset,
+    Total, Type,
 };
 
 pub(super) struct Metrics {
@@ -187,6 +188,39 @@ fn metric(
         }
     };
 
+    let total = match ext.total.as_slice() {
+        [] => Total::None,
+        _ if matches!(body, MetricBody::Derived { .. }) => {
+            cx.push(
+                Diagnostic::error(format!(
+                    "{what}: total goes on a base metric: a derived one is computed from the \
+                     answers of others"
+                ))
+                .at(file, ext_path.clone())
+                .help("put total on a base metric (revenue_total), and derive the share from it: revenue / revenue_total"),
+            );
+            Total::None
+        }
+        [all] if all == "*" => Total::All,
+        fields => {
+            let mut refs = Vec::new();
+            for field in fields {
+                match semantic.resolve_qualified(field) {
+                    Ok((table, f)) => refs.push(FieldRef {
+                        table,
+                        field: f.name.clone(),
+                    }),
+                    Err(None) => {}
+                    Err(Some(message)) => cx.push(
+                        Diagnostic::error(format!("{what}: total: {message}"))
+                            .at(file, ext_path.clone()),
+                    ),
+                }
+            }
+            Total::Fields(refs)
+        }
+    };
+
     let time_offset = match (&ext.time_offset, &ext.time_field) {
         (None, None) => None,
         (Some(_), None) | (None, Some(_)) => {
@@ -219,6 +253,7 @@ fn metric(
         body,
         ignore_selection,
         time_offset,
+        total,
         ai_context: spec.ai_context.clone(),
     })
 }

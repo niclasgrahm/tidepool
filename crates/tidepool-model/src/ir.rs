@@ -281,6 +281,10 @@ pub struct Metric {
     /// none, `Some(empty)`… is never produced: `IgnoreSelection::All` is `*`.
     pub ignore_selection: IgnoreSelection,
     pub time_offset: Option<TimeOffset>,
+    /// The visual's dimensions it is computed without, its value repeated
+    /// across them: the denominator of a share of total.
+    #[serde(default)]
+    pub total: Total,
     /// The metric's Ossie `ai_context`, as written.
     #[serde(default)]
     pub ai_context: Option<serde_json::Value>,
@@ -307,6 +311,18 @@ pub enum IgnoreSelection {
     #[default]
     None,
     Fields(Vec<FieldRef>),
+    All,
+}
+
+/// The dimensions a `total` metric leaves out of its grouping.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Total {
+    /// Not a total: grouped by every dimension, as a metric is.
+    #[default]
+    None,
+    /// These fields, at whatever grain or level the visual groups them.
+    Fields(Vec<FieldRef>),
+    /// Every dimension: one value for the whole visual.
     All,
 }
 

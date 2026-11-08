@@ -89,6 +89,19 @@ metrics:
     custom_extensions:
       - vendor_name: TIDEPOOL
         data: '{"time_offset": "-1y", "time_field": "orders.ordered_at"}'
+  - name: revenue_total                  # the same sum without the visual's dimensions
+    description: Revenue of everything a visual shows, whatever its dimensions
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"total": ["*"]}'
+  - name: revenue_share                  # each group's share of it
+    description: A group's share of the revenue the visual shows
+    ai_context: { synonyms: [share, percent of revenue, mix] }
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / revenue_total" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent decimals:1"}'
 
 custom_extensions:
   - vendor_name: TIDEPOOL

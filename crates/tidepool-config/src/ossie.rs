@@ -251,6 +251,13 @@ pub struct MetricExtension {
     /// selection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_selection: Vec<String>,
+    /// Compute it without these of a visual's dimensions (`dataset.field`,
+    /// or `*` for all of them), its value repeated across them: the
+    /// denominator of a share of total (`revenue / revenue_total`). The
+    /// selection still applies; a field the visual doesn't group by does
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub total: Vec<String>,
     /// Evaluate with the time selection on `time_field` shifted, e.g. `-1y`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_offset: Option<String>,

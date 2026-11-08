@@ -15,7 +15,7 @@ use tidepool_expr::temporal::{Part, Shift};
 use tidepool_expr::{AggCall, Expr, Scope, Type, check_aggregation, check_row};
 use tidepool_model::ir::{
     FieldRef, FieldSource, Hierarchy, IgnoreSelection, MetricBody, MetricId, Model, OffsetUnit,
-    TableId, type_of,
+    TableId, Total, type_of,
 };
 
 use crate::query::{Condition, Query, QueryError, Selection};
@@ -94,8 +94,11 @@ pub(crate) struct AnchorPlan {
     pub shift: Option<(ShiftOn, Shift)>,
     pub accesses: Vec<Access>,
     pub conditions: Vec<(usize, Condition)>,
-    /// (access, truncation) per query dimension.
+    /// (access, truncation) per query dimension it groups by.
     pub dims: Vec<(usize, Option<Part>)>,
+    /// The query dimensions it groups by, by position: all of them, but
+    /// for `total` metrics, whose value repeats across the others.
+    pub keep: Vec<usize>,
     pub aggs: Vec<AggPlan>,
     pub metrics: Vec<MetricPlan>,
 }
@@ -395,7 +398,19 @@ pub(crate) fn plan(
             selection: selection_for(*anchor, &visible)?,
             ..Query::default()
         };
-        let fresh = anchor_plan(model, *anchor, &seen, &|_| false, shift)?;
+        let mut fresh = anchor_plan(model, *anchor, &seen, &|_| false, shift)?;
+        // the dimensions it groups by: a total's leaves its fields out
+        fresh.keep = query
+            .dimensions
+            .iter()
+            .enumerate()
+            .filter(|(_, dim)| match &metric.total {
+                Total::None => true,
+                Total::All => false,
+                Total::Fields(fields) => !fields.contains(&dim.field),
+            })
+            .map(|(i, _)| i)
+            .collect();
         let signature = |plan: &AnchorPlan| -> Vec<String> {
             plan.conditions
                 .iter()
@@ -403,7 +418,10 @@ pub(crate) fn plan(
                 .collect()
         };
         let index = if let Some(index) = anchors.iter().position(|a| {
-            a.table == *anchor && a.shift == fresh.shift && signature(a) == signature(&fresh)
+            a.table == *anchor
+                && a.shift == fresh.shift
+                && a.keep == fresh.keep
+                && signature(a) == signature(&fresh)
         }) {
             index
         } else {
@@ -443,8 +461,11 @@ pub(crate) fn plan(
 
     // no metrics, only dimensions: the combinations there are, counted on
     // the table nearest the one side that reaches every dimension, so a
-    // group with no rows under the selection isn't one
-    if query.metrics.is_empty() && !query.dimensions.is_empty() {
+    // group with no rows under the selection isn't one. So too when every
+    // metric is a total: something must say which groups there are.
+    let every = (0..query.dimensions.len()).collect::<Vec<_>>();
+    let grouped = anchors.iter().any(|a| a.keep == every);
+    if !query.dimensions.is_empty() && (query.metrics.is_empty() || !grouped) {
         let tables: Vec<TableId> = query.dimensions.iter().map(|d| d.field.table).collect();
         let anchor = rows_anchor(model, &tables)?;
         let seen = Query {
@@ -452,9 +473,12 @@ pub(crate) fn plan(
             ..Query::default()
         };
         let mut plan = anchor_plan(model, anchor, &seen, &|_| false, None)?;
+        plan.keep = every;
         count_rows(&mut plan);
         anchors.push(plan);
-        base_order.push(ROWS);
+        if query.metrics.is_empty() {
+            base_order.push(ROWS);
+        }
     }
 
     // derived metrics, each after its inputs
@@ -529,7 +553,13 @@ pub(crate) fn plan(
             model,
             plan: std::mem::replace(anchor, empty(TableId(0))),
         };
-        for dim in &query.dimensions {
+        for dim in builder
+            .plan
+            .keep
+            .clone()
+            .into_iter()
+            .filter_map(|i| query.dimensions.get(i))
+        {
             let access = builder.access_at(&dim.field, dim.level)?.ok_or_else(|| {
                 let table = model
                     .dataset(builder.plan.table)
@@ -576,6 +606,7 @@ pub(crate) fn values(
         .access(field)?
         .ok_or_else(|| error(format!("unknown field `{}`", label(model, field))))?;
     builder.plan.dims.push((access, None));
+    builder.plan.keep = vec![0];
     count_rows(&mut builder.plan);
     let ty = builder.plan.accesses[access].ty;
     Ok(Plan {
@@ -759,6 +790,7 @@ fn empty(table: TableId) -> AnchorPlan {
         accesses: Vec::new(),
         conditions: Vec::new(),
         dims: Vec::new(),
+        keep: Vec::new(),
         aggs: Vec::new(),
         metrics: Vec::new(),
     }

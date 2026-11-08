@@ -10,7 +10,7 @@ use tidepool_config::ossie::TimeGrain;
 use tidepool_config::server::Durability;
 use tidepool_expr::Type;
 use tidepool_model::ir::{
-    Direction, FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId,
+    Direction, FieldSource, Hierarchy, IgnoreSelection, MetricBody, Model, TableId, Total,
 };
 use tidepool_protocol::{
     DatasetInfo, DurabilityStatus, FieldInfo, HierarchyInfo, MetricInfo, ModelInfo,
@@ -170,6 +170,14 @@ fn metric_info(model: &Model, m: &tidepool_model::ir::Metric) -> MetricInfo {
             IgnoreSelection::None => Vec::new(),
             IgnoreSelection::All => vec!["*".into()],
             IgnoreSelection::Fields(fields) => fields
+                .iter()
+                .map(|f| label(model, f.table, &f.field))
+                .collect(),
+        },
+        totals: match &m.total {
+            Total::None => Vec::new(),
+            Total::All => vec!["*".into()],
+            Total::Fields(fields) => fields
                 .iter()
                 .map(|f| label(model, f.table, &f.field))
                 .collect(),

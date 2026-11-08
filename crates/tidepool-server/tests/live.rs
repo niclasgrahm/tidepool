@@ -899,7 +899,7 @@ async fn a_filter_visual_is_a_list_and_a_table_without_metrics_shows_what_there_
         "  - id: top_products
     type: table
     dimensions: [products.name, products.category]
-    metrics: [revenue, order_count, avg_order_value]
+    metrics: [revenue, revenue_share, order_count, avg_order_value]
     sort: { by: revenue, desc: true }
     limit: 50
     at: { x: 8, y: 0, w: 4, h: 4 }",
@@ -1070,7 +1070,10 @@ async fn a_visual_says_how_its_metrics_read() {
     // the visual's own format wins over the metric's
     assert_eq!(formats("kpi_revenue"), json!({"revenue": "compact"}));
     // elsewhere the metric's own; metrics without one aren't listed
-    assert_eq!(formats("top_products"), json!({"revenue": "currency:EUR"}));
+    assert_eq!(
+        formats("top_products"),
+        json!({"revenue": "currency:EUR", "revenue_share": "percent decimals:1"})
+    );
     // a filter's measure reads by the metric's format
     let Some(region) = sales["filters"]
         .as_array()

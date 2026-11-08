@@ -57,7 +57,7 @@ A division by zero gives NULL.
 ## ignore a selection
 
 `ignore_selection` calculates a metric as if some fields had no selection.
-Use it for a share of a total:
+Use it to compare a selected region with all regions:
 
 ```yaml
 # fragment
@@ -69,6 +69,35 @@ Use it for a share of a total:
 ```
 
 Use `"*"` to ignore every selection.
+
+## share of a total
+
+`total` calculates a metric without some of the dimensions of the visual.
+Its value is the same in each group of those dimensions: the total of the
+groups. Divide by it for each group's share:
+
+```yaml
+# fragment
+  - name: revenue_total
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"total": ["*"]}'
+  - name: revenue_share
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: "revenue / revenue_total" }] }
+    custom_extensions:
+      - vendor_name: TIDEPOOL
+        data: '{"kind": "derived", "format": "percent"}'
+```
+
+`"*"` leaves out every dimension. A list of fields leaves out only those:
+`["products.category"]` in a table by region and category gives each
+category's share of its region. A field that the visual does not group by
+changes nothing.
+
+The selection still applies: a share of what is selected. To get a share of
+everything, also ignore the selection (`"ignore_selection": ["*"]`). A total
+goes on a base metric, not on a derived one.
 
 ## compare with a period before
 
@@ -94,6 +123,7 @@ The units are `d`, `w`, `m`, `q` and `y`.
 | `"table": "orders"` | sets the anchor, for an expression that names no table |
 | `"kind": "derived"` | the expression combines other metrics, after the aggregation |
 | `"ignore_selection": [...]` | calculates as if these fields (or `"*"`) had no selection |
+| `"total": [...]` | calculates without these dimensions of the visual (or `"*"`), the same value in each of their groups |
 | `"time_offset": "-1y"`, `"time_field": "orders.ordered_at"` | calculates with the time field moved |
 | `"format": "currency:EUR"` | how the value shows: `int`, `decimal`, `percent` or `currency:XXX`, with `compact` and `decimals:N`. A visual can change it. See [number formats](/project/dashboards#number-formats). |
 

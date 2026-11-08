@@ -691,6 +691,7 @@ mod tests {
             kind: if anchor.is_some() { "base" } else { "derived" }.into(),
             anchor: anchor.map(str::to_string),
             ignores: Vec::new(),
+            totals: Vec::new(),
             time_offset: None,
             ai_context: None,
             dashboards: Vec::new(),

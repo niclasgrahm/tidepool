@@ -127,6 +127,9 @@ pub enum MetricKind {
         /// by the interval (`table`, `column`, the interval as DuckDB
         /// writes it, whether the column is a date).
         shift: Option<Shifted>,
+        /// A `total`: the query's dimensions it is computed without
+        /// (`table.field`), its value repeated across them.
+        total: Ignore,
     },
     /// `sql` combines other metrics, written `{name}`.
     Derived { inputs: Vec<String>, sql: String },
@@ -271,6 +274,7 @@ fn base(
             sql: sql.to_string(),
             ignore,
             shift: None,
+            total: Ignore::None,
         },
     }
 }
@@ -684,6 +688,56 @@ pub fn schema(rng: &mut Rng) -> Schema {
             }
             metric
         },
+        {
+            // a total over some of the dimensions a query may group by,
+            // and the share of it each group is
+            let (fields, total) = rng
+                .pick(&[
+                    (r#"["*"]"#, Ignore::All),
+                    (r#"["d0.name"]"#, Ignore::Fields(vec!["d0.name".into()])),
+                    (r#"["f0.status"]"#, Ignore::Fields(vec!["f0.status".into()])),
+                    (r#"["f0.day"]"#, Ignore::Fields(vec!["f0.day".into()])),
+                    (
+                        r#"["d0.name", "f0.day"]"#,
+                        Ignore::Fields(vec!["d0.name".into(), "f0.day".into()]),
+                    ),
+                ])
+                .clone();
+            let mut metric = base(
+                "f0_amount_total",
+                "SUM(f0.amount)",
+                "SUM(f0.amount)",
+                "f0",
+                Some(format!(r#"{{"total": {fields}}}"#)),
+                Ignore::None,
+            );
+            if let MetricKind::Base { total: t, .. } = &mut metric.kind {
+                *t = total;
+            }
+            metric
+        },
+        {
+            // every row's count, whatever the dimensions, under a selection
+            // it ignores in part: totals compose with the other settings
+            let mut metric = base(
+                "f0_rows_total",
+                "COUNT(*)",
+                "COUNT(*)",
+                "f0",
+                Some(r#"{"table": "f0", "total": ["*"], "ignore_selection": ["d0.name"]}"#.into()),
+                Ignore::Fields(vec!["d0.name".into()]),
+            );
+            if let MetricKind::Base { total, .. } = &mut metric.kind {
+                *total = Ignore::All;
+            }
+            metric
+        },
+        derived(
+            "f0_share",
+            &["f0_amount", "f0_amount_total"],
+            "f0_amount / f0_amount_total",
+            "{f0_amount} / NULLIF({f0_amount_total}, 0)",
+        ),
         derived(
             "f0_change",
             &["f0_amount", "f0_amount_before"],

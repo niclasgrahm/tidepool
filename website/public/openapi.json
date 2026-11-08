@@ -810,6 +810,13 @@
               "string",
               "null"
             ]
+          },
+          "totals": {
+            "description": "The dimensions it is computed without (`*` for all): a total.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [

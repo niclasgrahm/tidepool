@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `revenue_share`: total goes on a base metric: a derived one is computed from the answers of others
+   --> model.ossie.yaml:104:15
+    |
+104 |         data: '{"kind": "derived", "total": ["*"]}'
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: put total on a base metric (revenue_total), and derive the share from it: revenue / revenue_total
+
+1 error, 0 warnings
