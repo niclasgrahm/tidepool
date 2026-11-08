@@ -487,6 +487,46 @@ case!(
     )]
 );
 case!(
+    pivot_with_three_across,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    across: [products.category]",
+        "    across: [products.category, orders.status, customers.coast]"
+    )]
+);
+case!(
+    pivot_without_metrics,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    metrics: [revenue, median_order_value]\n    totals: true",
+        "    totals: true"
+    )]
+);
+case!(
+    pivot_field_down_the_side_and_across,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    across: [products.category]",
+        "    across: [customers.region]"
+    )]
+);
+case!(
+    pivot_across_an_unknown_field,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    across: [products.category]",
+        "    across: [products.categroy]"
+    )]
+);
+case!(
+    across_on_a_heatmap,
+    [Replace(
+        "dashboards/sales.yaml",
+        "    dimensions: [customers.region, products.category]\n    metrics: [revenue]\n",
+        "    dimensions: [customers.region, products.category]\n    across: [orders.status]\n    totals: true\n    metrics: [revenue]\n"
+    )]
+);
+case!(
     total_of_an_unknown_field,
     [Replace(
         "model.ossie.yaml",
@@ -588,8 +628,8 @@ case!(
     dashboard_bar_with_two_dimensions,
     [Replace(
         "dashboards/sales.yaml",
-        "dimensions: [customers.region]",
-        "dimensions: [customers.region, customers.segment]"
+        "dimensions: [customers.region]\n    metrics: [revenue]\n    sort",
+        "dimensions: [customers.region, customers.segment]\n    metrics: [revenue]\n    sort"
     )]
 );
 case!(
@@ -628,8 +668,8 @@ case!(
     dashboard_grain_on_non_time_field,
     [Replace(
         "dashboards/sales.yaml",
-        "dimensions: [customers.region]",
-        "dimensions: [{ field: customers.region, grain: month }]"
+        "dimensions: [customers.region]\n    metrics: [revenue]\n    sort",
+        "dimensions: [{ field: customers.region, grain: month }]\n    metrics: [revenue]\n    sort"
     )]
 );
 case!(

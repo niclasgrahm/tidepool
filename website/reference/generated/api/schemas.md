@@ -605,6 +605,7 @@ A window of whole periods relative to now: `last` periods of `unit`, ending with
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `across` | list of [`QueryDimension`](#schema-querydimension) |  | A pivot's dimensions along the top; its `dimensions` are down the side. Its frames' rows are grouped by both, `dimensions` first. |
 | `at` | [`GridAt`](#schema-gridat) | **required** |  |
 | `compare` | string |  | A KPI's comparison metric. |
 | `description` | string |  |  |
@@ -615,7 +616,8 @@ A window of whole periods relative to now: `last` periods of `unit`, ending with
 | `on_brush` | boolean | **required** | Brushing a range selects it. |
 | `on_click` | boolean | **required** | Clicking a value selects it. |
 | `title` | string |  | What its header says, when the file gives it. |
-| `type` | string | **required** | `kpi`, `bar`, `line`, `table`, `filter` or `rows`. |
+| `totals` | boolean |  | A pivot's total row and column come in its frames' `totals`. |
+| `type` | string | **required** | `kpi`, `bar`, `line`, `table`, `pie`, `scatter`, `heatmap`, `pivot`, `filter` or `rows`. |
 | `widget` | string |  | A `filter` visual's list: `list` or `tree`. Its frames are the filter frames of its dimension's field. |
 
 

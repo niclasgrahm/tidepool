@@ -97,10 +97,12 @@ async fn say(socket: &mut Socket, message: Value) {
     }
 }
 
-/// The next message of type `kind`, skipping others (status ticks).
+/// The next message of type `kind`, skipping others (status ticks), within
+/// a few seconds: the ticks never stop, so the wait has a deadline of its own.
 async fn next(socket: &mut Socket, kind: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let message = match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+        let message = match tokio::time::timeout_at(deadline, socket.next()).await {
             Ok(Some(Ok(message))) => message,
             other => panic!("waiting for `{kind}`: {other:?}"),
         };
@@ -1854,5 +1856,90 @@ async fn a_cell_selects_both_its_values_as_one_step() {
             .as_str()
             .is_some_and(|m| m.contains("region")),
         "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_pivot_comes_with_totals_computed_not_summed() {
+    let (state, url) = server().await;
+    post(
+        &state,
+        "/v1/tables/products/rows?wait=visible",
+        &json!([{"product_id": "p2", "name": "Tent", "category": "camping", "list_price": "90.00"}]),
+    )
+    .await;
+    // the south's customer buys a tent too
+    let mut tent = order("o3", "c2", "paid", "2.50");
+    tent["product_id"] = json!("p2");
+    post(
+        &state,
+        "/v1/tables/orders/rows?wait=visible",
+        &json!([tent]),
+    )
+    .await;
+    let mut socket = connect(&url).await;
+    say(&mut socket, json!({"type": "hello"})).await;
+    say(
+        &mut socket,
+        json!({"type": "open_dashboard", "id": "sales"}),
+    )
+    .await;
+    let model = next(&mut socket, "model").await;
+    let info = model["dashboards"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["id"] == "sales"))
+        .and_then(|d| d["visuals"].as_array())
+        .and_then(|v| v.iter().find(|v| v["id"] == "region_category_pivot"))
+        .cloned();
+    let Some(info) = info else {
+        panic!("no pivot in {model}");
+    };
+    assert_eq!(info["type"], "pivot");
+    assert_eq!(info["dimensions"], json!([{"field": "customers.region"}]));
+    assert_eq!(info["across"], json!([{"field": "products.category"}]));
+    assert_eq!(info["totals"], true);
+    let frame = next(&mut socket, "frame").await;
+    let pivot = visual(&frame, "region_category_pivot");
+    // the cells: grouped by both, down the side first
+    assert_eq!(
+        pivot["result"]["rows"],
+        json!([
+            ["north", "boats", "10.00", 10.0],
+            ["south", "boats", "5.00", 5.0],
+            ["south", "camping", "2.50", 2.5],
+        ]),
+        "{pivot}"
+    );
+    let totals = &pivot["totals"];
+    // per row: the south's median is of its two orders
+    assert_eq!(
+        totals["rows"]["rows"],
+        json!([["north", "10.00", 10.0], ["south", "7.50", 3.75]]),
+        "{totals}"
+    );
+    assert_eq!(
+        totals["columns"]["rows"],
+        json!([["boats", "15.00", 7.5], ["camping", "2.50", 2.5]]),
+        "{totals}"
+    );
+    // the whole: the median of all three orders, not of the medians
+    // (6.875) and not their sum
+    assert_eq!(totals["all"]["rows"], json!([["17.50", 5.0]]), "{totals}");
+    // a cell selects its row's and its column's values, and the totals
+    // follow the selection like the cells do
+    say(
+        &mut socket,
+        json!({"type": "select_many", "fields": [
+            {"field": "customers.region", "values": ["south"]},
+            {"field": "products.category", "values": ["camping"]},
+        ]}),
+    )
+    .await;
+    let frame = next(&mut socket, "frame").await;
+    let pivot = visual(&frame, "region_category_pivot");
+    assert_eq!(
+        pivot["totals"]["all"]["rows"],
+        json!([["2.50", 2.5]]),
+        "{pivot}"
     );
 }

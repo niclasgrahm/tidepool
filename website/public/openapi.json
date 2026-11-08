@@ -2069,6 +2069,13 @@
       },
       "VisualInfo": {
         "properties": {
+          "across": {
+            "description": "A pivot's dimensions along the top; its `dimensions` are down the\nside. Its frames' rows are grouped by both, `dimensions` first.",
+            "items": {
+              "$ref": "#/components/schemas/QueryDimension"
+            },
+            "type": "array"
+          },
           "at": {
             "$ref": "#/components/schemas/GridAt"
           },
@@ -2122,8 +2129,12 @@
               "null"
             ]
           },
+          "totals": {
+            "description": "A pivot's total row and column come in its frames' `totals`.",
+            "type": "boolean"
+          },
           "type": {
-            "description": "`kpi`, `bar`, `line`, `table`, `filter` or `rows`.",
+            "description": "`kpi`, `bar`, `line`, `table`, `pie`, `scatter`, `heatmap`,\n`pivot`, `filter` or `rows`.",
             "type": "string"
           },
           "widget": {

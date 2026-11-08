@@ -1807,3 +1807,49 @@ fn a_heatmap_cell_selects_both_its_values() {
     );
     browser.wait_for(&format!("{CHIPS} === ''"), "both chips gone");
 }
+
+#[test]
+fn a_pivot_cell_selects_its_row_and_column() {
+    if std::env::var_os("TIDEPOOL_E2E").is_none() {
+        eprintln!("skipped: needs a built UI and Chrome; run `just e2e`");
+        return;
+    }
+    let address = free_port();
+    let config = example_copy();
+    let _server = start_server(address, config.path());
+    two_regions(address);
+    let mut browser = Browser::launch();
+    browser.call("Page.enable", &json!({}));
+    browser.call(
+        "Page.navigate",
+        &json!({ "url": format!("http://{address}/#/d/sales") }),
+    );
+    let pivot = "document.querySelector('.visual.pivot table.pivot')";
+    browser.wait_for(
+        &format!("{pivot} && {pivot}.querySelectorAll('tbody tr').length === 2"),
+        "a pivot with two regions",
+    );
+    // the total row: the whole, computed by the server
+    browser.wait_for(
+        &format!("{pivot}.querySelector('tfoot td.all') && {pivot}.querySelector('tfoot td.all').textContent.includes('130')"),
+        "the whole in the corner",
+    );
+    // south's cell under food (its first metric)
+    let cell = format!(
+        "[...{pivot}.querySelectorAll('tbody tr')].find(r => r.querySelector('th').textContent === 'south')?.querySelector('td .pick')"
+    );
+    browser.click_element(&cell);
+    browser.wait_for(
+        &format!("{CHIPS}.includes('south') && {CHIPS}.includes('food')"),
+        "chips for south and food",
+    );
+    // the cell is marked, and one step back undoes both
+    browser.wait_for(
+        &format!("{pivot}.querySelectorAll('td.chosen').length > 0"),
+        "the chosen cell marked",
+    );
+    browser.click_element(
+        "[...document.querySelectorAll('.selection button')].find(b => b.textContent === 'Back')",
+    );
+    browser.wait_for(&format!("{CHIPS} === ''"), "both chips gone");
+}

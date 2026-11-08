@@ -11,7 +11,7 @@ use tidepool_config::format::NumberFormat;
 use tidepool_protocol::{ModelInfo, QueryDimension, QueryRequest, QuerySort};
 
 /// Every type, in the order the editor offers them.
-pub const TYPES: [VisualType; 9] = [
+pub const TYPES: [VisualType; 10] = [
     VisualType::Table,
     VisualType::Rows,
     VisualType::Filter,
@@ -20,6 +20,7 @@ pub const TYPES: [VisualType; 9] = [
     VisualType::Pie,
     VisualType::Scatter,
     VisualType::Heatmap,
+    VisualType::Pivot,
     VisualType::Kpi,
 ];
 
@@ -36,6 +37,7 @@ pub fn type_label(t: VisualType) -> &'static str {
         VisualType::Pie => "Pie",
         VisualType::Scatter => "Scatter",
         VisualType::Heatmap => "Heatmap",
+        VisualType::Pivot => "Pivot",
     }
 }
 
@@ -53,6 +55,7 @@ pub fn fits(t: VisualType, dimensions: &[DimensionRef], metrics: usize) -> bool 
         VisualType::Pie => dims == 1 && metrics == 1,
         VisualType::Scatter => dims == 1 && (2..=3).contains(&metrics),
         VisualType::Heatmap => dims == 2 && metrics == 1,
+        VisualType::Pivot => (1..=5).contains(&dims) && metrics > 0,
         VisualType::Kpi => dims == 0 && metrics > 0,
         VisualType::Rows => {
             dims > 0 && metrics == 0 && dimensions.iter().all(|d| d.grain().is_none())
@@ -79,7 +82,7 @@ pub fn size_of(t: VisualType) -> (u16, u16) {
         VisualType::Filter => (3, 4),
         VisualType::Rows => (12, 5),
         VisualType::Pie => (4, 4),
-        VisualType::Scatter | VisualType::Heatmap => (6, 5),
+        VisualType::Scatter | VisualType::Heatmap | VisualType::Pivot => (6, 5),
         VisualType::Table | VisualType::Bar | VisualType::Line => (6, 4),
     }
 }
@@ -161,6 +164,7 @@ pub fn set_fields(
     is_time: &dyn Fn(&str) -> bool,
 ) {
     visual.dimensions = dimensions;
+    visual.across.clear();
     visual.metrics = metrics;
     let keep = fits(visual.visual_type, &visual.dimensions, visual.metrics.len());
     let t = if keep {
@@ -171,11 +175,40 @@ pub fn set_fields(
     retype(visual, t, is_time);
 }
 
+/// The fields a visual shows, as the editor picks them: one list, a
+/// pivot's dimensions down the side and then across.
+#[must_use]
+pub fn fields(visual: &Visual) -> Vec<DimensionRef> {
+    visual
+        .dimensions
+        .iter()
+        .chain(&visual.across)
+        .cloned()
+        .collect()
+}
+
+/// A pivot's fields split: the last one across (the last two, of five),
+/// the rest down the side. Any other type has them all as `dimensions`.
+fn arrange(visual: &mut Visual) {
+    let mut all = fields(visual);
+    let across = match all.len() {
+        _ if visual.visual_type != VisualType::Pivot => 0,
+        0 | 1 => 0,
+        2..=4 => 1,
+        _ => 2,
+    };
+    visual.across = all.split_off(all.len() - across);
+    visual.dimensions = all;
+}
+
 /// Make `visual` a `t`: a click selects on bars and tables, brushing a
 /// line over time selects a range, a comparison only stays on a KPI, and a
 /// sort only by something it still shows.
 pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool) {
+    // a new pivot gets its totals
+    visual.totals = t == VisualType::Pivot && (visual.visual_type != t || visual.totals);
     visual.visual_type = t;
+    arrange(visual);
     visual.on_click = matches!(
         t,
         VisualType::Bar
@@ -183,6 +216,7 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
             | VisualType::Pie
             | VisualType::Scatter
             | VisualType::Heatmap
+            | VisualType::Pivot
     )
     .then_some(ClickAction::Select)
     .filter(|_| !visual.dimensions.is_empty());
@@ -203,6 +237,7 @@ pub fn retype(visual: &mut Visual, t: VisualType, is_time: &dyn Fn(&str) -> bool
     if t == VisualType::Rows {
         visual.sort = None;
     }
+    // a pivot sorts its rows: by a metric or a dimension down the side
     let shown = |by: &str| {
         visual.metrics.iter().any(|m| m == by) || visual.dimensions.iter().any(|d| d.field() == by)
     };
@@ -265,8 +300,7 @@ pub fn set_format(visual: &mut Visual, metric: &str, format: &NumberFormat, own:
 /// The query a visual runs, without a selection: what the editor previews.
 #[must_use]
 pub fn request(visual: &Visual) -> QueryRequest {
-    let dimensions: Vec<QueryDimension> = visual
-        .dimensions
+    let dimensions: Vec<QueryDimension> = fields(visual)
         .iter()
         .map(|d| QueryDimension {
             field: d.field().to_string(),
@@ -419,6 +453,8 @@ mod tests {
             title: None,
             description: None,
             dimensions: dims,
+            across: Vec::new(),
+            totals: false,
             metrics: metrics.iter().map(|m| (*m).to_string()).collect(),
             compare: None,
             sort: None,
@@ -462,6 +498,30 @@ mod tests {
     }
 
     #[test]
+    fn a_pivot_puts_its_last_field_across_and_gives_it_back() {
+        let none = |_: &str| false;
+        let mut v = visual(
+            VisualType::Table,
+            vec![field("customers.region"), field("products.category")],
+            &["revenue"],
+        );
+        retype(&mut v, VisualType::Pivot, &none);
+        assert_eq!(v.dimensions, [field("customers.region")]);
+        assert_eq!(v.across, [field("products.category")]);
+        assert!(v.totals, "a new pivot has its totals");
+        assert_eq!(fields(&v).len(), 2);
+        // five fields: three down the side, two across
+        let five: Vec<DimensionRef> = (0..5).map(|i| field(&format!("t.f{i}"))).collect();
+        set_fields(&mut v, five, vec!["revenue".into()], &none);
+        assert_eq!((v.dimensions.len(), v.across.len()), (3, 2));
+        assert_eq!(request(&v).dimensions.len(), 5);
+        // another type has them all as dimensions again
+        retype(&mut v, VisualType::Table, &none);
+        assert_eq!((v.dimensions.len(), v.across.len()), (5, 0));
+        assert!(!v.totals);
+    }
+
+    #[test]
     fn each_type_takes_what_the_compiler_allows() {
         let one = [field("customers.region")];
         let allowed = |dims: &[DimensionRef], metrics| {
@@ -472,14 +532,20 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(allowed(&one, 0), ["Table", "Rows", "Filter"]);
-        assert_eq!(allowed(&one, 1), ["Table", "Bar", "Line", "Pie"]);
-        assert_eq!(allowed(&one, 2), ["Table", "Bar", "Line", "Scatter"]);
-        assert_eq!(allowed(&one, 4), ["Table", "Bar", "Line"]);
+        assert_eq!(allowed(&one, 1), ["Table", "Bar", "Line", "Pie", "Pivot"]);
+        assert_eq!(
+            allowed(&one, 2),
+            ["Table", "Bar", "Line", "Scatter", "Pivot"]
+        );
+        assert_eq!(allowed(&one, 4), ["Table", "Bar", "Line", "Pivot"]);
         assert_eq!(allowed(&[], 1), ["Table", "KPI"]);
         assert_eq!(
             allowed(&[field("a.b"), field("c.d")], 1),
-            ["Table", "Heatmap"]
+            ["Table", "Heatmap", "Pivot"]
         );
+        let six: Vec<DimensionRef> = (0..6).map(|i| field(&format!("t.f{i}"))).collect();
+        assert_eq!(allowed(&six[..5], 1), ["Table", "Pivot"]);
+        assert_eq!(allowed(&six, 1), ["Table"]);
         assert_eq!(allowed(&[field("a.b"), field("c.d")], 0), ["Table", "Rows"]);
         // rows show each row's own values: no grain
         let grained = [DimensionRef::Grained {

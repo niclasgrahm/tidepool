@@ -334,7 +334,8 @@ pub struct FilterInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct VisualInfo {
     pub id: String,
-    /// `kpi`, `bar`, `line`, `table`, `filter` or `rows`.
+    /// `kpi`, `bar`, `line`, `table`, `pie`, `scatter`, `heatmap`,
+    /// `pivot`, `filter` or `rows`.
     #[serde(rename = "type")]
     pub visual_type: String,
     /// What its header says, when the file gives it.
@@ -343,6 +344,13 @@ pub struct VisualInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub dimensions: Vec<QueryDimension>,
+    /// A pivot's dimensions along the top; its `dimensions` are down the
+    /// side. Its frames' rows are grouped by both, `dimensions` first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub across: Vec<QueryDimension>,
+    /// A pivot's total row and column come in its frames' `totals`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub totals: bool,
     pub metrics: Vec<String>,
     /// A KPI's comparison metric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,6 +411,25 @@ pub struct VisualFrame {
     /// a slice (a sum or a count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compare: Option<Value>,
+    /// A pivot's totals, when it has them: each metric computed again
+    /// without some dimensions (exact for every aggregate, never summed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<PivotTotals>,
+}
+
+/// A pivot's totals, as query results.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PivotTotals {
+    /// Per row: grouped by the dimensions down the side only. Absent
+    /// without `across`, when each row is its own total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<QueryResult>,
+    /// Per column: grouped by the dimensions across only. Absent without
+    /// `across`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<QueryResult>,
+    /// The whole: no dimensions, one row.
+    pub all: QueryResult,
 }
 
 /// A filter list's window: Qlik's states, per value. A tree filter's

@@ -43,9 +43,9 @@ use tidepool_engine::{Condition, Query, Selection};
 use tidepool_expr::Scalar;
 use tidepool_model::ir::{Dashboard, FieldRef, Model, SortKey};
 use tidepool_protocol::live::{
-    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, GridAt, RelativeUnit, RelativeWindow,
-    SelectMode, SelectedField, SelectionChange, ServerMessage, SessionSelection, VisualFrame,
-    VisualInfo,
+    ClientMessage, DashboardInfo, FilterFrame, FilterInfo, GridAt, PivotTotals, RelativeUnit,
+    RelativeWindow, SelectMode, SelectedField, SelectionChange, ServerMessage, SessionSelection,
+    VisualFrame, VisualInfo,
 };
 use tidepool_protocol::{QueryDimension, QueryRequest, QuerySort};
 use tidepool_store::Snapshot;
@@ -1091,7 +1091,9 @@ pub(crate) fn dashboard_info(model: &Model, dashboard: &Dashboard) -> DashboardI
                 visual_type: name(&serde_json::to_value(v.visual_type).unwrap_or_default()),
                 title: v.title.clone(),
                 description: v.description.clone(),
-                dimensions: request(model, v).dimensions,
+                dimensions: query_dimensions(model, &v.dimensions),
+                across: query_dimensions(model, &v.across),
+                totals: v.totals,
                 metrics: request(model, v).metrics,
                 compare: v
                     .compare
@@ -1139,21 +1141,29 @@ fn formats(
         .collect()
 }
 
+/// Dimensions as a query names them.
+fn query_dimensions<'a>(
+    model: &Model,
+    dimensions: impl IntoIterator<Item = &'a tidepool_model::ir::Dimension>,
+) -> Vec<QueryDimension> {
+    dimensions
+        .into_iter()
+        .map(|d| QueryDimension {
+            field: label(model, &d.field),
+            grain: d.grain.map(|g| format!("{g:?}").to_lowercase()),
+            level: None,
+        })
+        .collect()
+}
+
 pub(crate) fn request(model: &Model, visual: &tidepool_model::ir::Visual) -> QueryRequest {
     let metric_name = |id| {
         model
             .metric(id)
             .map_or_else(String::new, |m| m.name.clone())
     };
-    let dimensions: Vec<QueryDimension> = visual
-        .dimensions
-        .iter()
-        .map(|d| QueryDimension {
-            field: label(model, &d.field),
-            grain: d.grain.map(|g| format!("{g:?}").to_lowercase()),
-            level: None,
-        })
-        .collect();
+    // a pivot's rows are grouped by both: down the side, then across
+    let dimensions = query_dimensions(model, visual.dimensions.iter().chain(visual.across.iter()));
     let sort = visual
         .sort
         .iter()
@@ -1324,12 +1334,14 @@ fn rows_frame(
             result: Some(rows_result(&fields, &answer, Stamp::of(snapshot))),
             error: None,
             compare: None,
+            totals: None,
         },
         Err(error) => VisualFrame {
             id: visual.id.clone(),
             result: None,
             error: Some(error.0),
             compare: None,
+            totals: None,
         },
     }
 }
@@ -1389,18 +1401,47 @@ fn visual_frame(
             .ok()?;
             answer.rows.first()?.first().map(json)
         });
+    // a pivot's totals: the same metrics without some dimensions, so
+    // they're exact for every aggregate
+    let totals = || {
+        let rows = visual.dimensions.len();
+        let without = |keep: std::ops::Range<usize>| {
+            let mut by = QueryRequest {
+                dimensions: request.dimensions[keep.clone()].to_vec(),
+                ..request.clone()
+            };
+            // a sort by a dimension that isn't kept goes
+            by.sort.retain(|s| {
+                by.dimensions.iter().any(|d| match &d.grain {
+                    Some(grain) => s.column == format!("{}:{grain}", d.field),
+                    None => s.column == d.field,
+                }) || request.metrics.contains(&s.column)
+            });
+            run(&by).map(|answer| result(&by, &answer, Stamp::of(snapshot)))
+        };
+        let across = rows < request.dimensions.len();
+        Some(PivotTotals {
+            rows: across.then(|| without(0..rows).ok()).flatten(),
+            columns: across
+                .then(|| without(rows..request.dimensions.len()).ok())
+                .flatten(),
+            all: without(0..0).ok()?,
+        })
+    };
     match run(&request) {
         Ok(answer) => VisualFrame {
             id: visual.id.clone(),
             result: Some(result(&request, &answer, Stamp::of(snapshot))),
             error: None,
             compare,
+            totals: visual.totals.then(totals).flatten(),
         },
         Err(error) => VisualFrame {
             id: visual.id.clone(),
             result: None,
             error: Some(error.0),
             compare: None,
+            totals: None,
         },
     }
 }

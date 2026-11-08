@@ -1051,7 +1051,7 @@ Binary WS messages with a framed format: `u32 header_len | header (JSON) | paylo
 | `model { version, dashboards… }` | sent on connect and whenever the config version changes |
 | `view { dashboard }` | a view the session opened (views aren't in `model`); again when a config change changes it |
 | `selection { state, can_back, can_forward }` | authoritative selection state after each change |
-| `frame { epoch, visuals: [{ id, payload_idx \| error }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit |
+| `frame { epoch, visuals: [{ id, payload_idx \| error, compare?, totals? }], filters: [{ id, counts, window }] }` + Arrow payloads | atomic update unit; `compare` is a KPI's comparison or a pie's whole, `totals` a pivot's (per row, per column, the whole) |
 | `status { epoch, ingest_rate, lag_ms }` | for the live indicator, ~1 Hz |
 | `done` | one per client message, after everything it caused: the UI shows a selection as under way until its `done` arrives |
 
@@ -1289,6 +1289,7 @@ A change to `auth`, `listen` or `agents` in `tidepool.yaml` is class **security*
   - pie (2026-11-08): one metric by one dimension, a ring of slices in a categorical palette (`--c0`…`--c7`, Radix step 9s without ruby, which means "selected"); its largest `limit` (8 unless set, 12 at most, by the metric descending unless sorted); for an additive metric (a plain `SUM` or `COUNT`, `Metric::additive`) the rest of its whole as a grey slice, the whole sent in the frame's `compare`. Values that can't be slices (NULL, 0 or less) are left out and counted under the ring. `PieLayout` (angles, label fitting, `hit` by angle and radius, blending by key) has plain tests; a click or Enter selects, selected slices edged in ruby and the rest dimmed
   - scatter (2026-11-08): one dimension's values as points by two metrics (across, up; axes fitted to the values, `Linear::fit`, not from zero) and a third as each point's size (by area); `limit` 1000 unless set, 5000 at most. A click selects a point, a drag the points in its rectangle (`ScatterLayout::within`), the keyboard walks them left to right. Points missing an axis value are left out
   - heatmap (2026-11-08): one metric by two dimensions, cells on two bands (the first value of the second dimension at the bottom), coloured in ten steps from the paper to `--tide` (`color-mix`), empty cells in the surface colour; `limit` 2000 unless set, 10000 at most. A click selects both of a cell's values with `select_many`, so Back undoes them together; a drag the values on each axis its rectangle covers; the arrows move a cell at a time
+  - pivot (2026-11-08; our own, not Perspective: D10 rules out JavaScript libraries): `dimensions` down the side (1–3, nested row headers spanning their runs), `across` along the top (0–2, columns ordered by value as a heatmap's axes are, 50 drawn and the rest counted), every metric in each cell; the query groups by both, `dimensions` first, `limit` 2000 unless set, 10000 at most. `totals: true`: the server runs the same metrics without `across` (per row), without `dimensions` (per column) and without either (the whole), sent as the frame's `totals`, so a total is exact for every aggregate and never summed in the browser. A cell selects its row's and column's values with `select_many`, a header its own; a field can't be both down the side and across. The grid (`pivot.rs`) has plain tests; the editor keeps one field list and puts the last field across (two of five)
   - filter (2026-10-13): one dimension's list on the grid, no metrics, no grain; served from the same filter frames as a rail filter of that field (`Dashboard::lists`), so a field shown in both is one list
 - Filters:
   - list box with selected/possible/excluded styling, search and a virtualized window
@@ -1469,7 +1470,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 8. ~~Drag-and-drop dashboard builder~~ (done 2026-10-13: the dashboard editor, §10.2), visual relationship editor (writing YAML through the pipeline), then editors for the other config objects the same way
 9. Row-level security (mandatory per-user selection applied before everything else)
 10. Kayak `tidepool` **input**: subscribe to a live metric query and turn updates into messages (alerting, webhooks), see §15.3
-11. Perspective-based pivot visual
+11. ~~Perspective-based pivot visual~~ (done 2026-11-08 as our own `pivot`, §10.2)
 12. Engine self-metrics exposed as Tidepool tables (`_system.*`), i.e. a dashboard of Tidepool in Tidepool
 13. The rest of Kayak's auth stack (§9): accounts with passwords, JWT validated against an identity provider's JWKS, and the iframe handshake for embedding
 14. `time_offset` metrics over derived time fields and dictionary-encoded time columns on the fast path (they take the general path today)

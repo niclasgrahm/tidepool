@@ -62,3 +62,12 @@ visuals:
     metrics: [revenue]
     on_click: select
     at: { x: 0, y: 12, w: 6, h: 4 }
+  - id: region_category_pivot          # totals are the metrics computed again, so the
+    type: pivot                        # median's total is the median of every order
+    title: Regions by category
+    dimensions: [customers.region]
+    across: [products.category]
+    metrics: [revenue, median_order_value]
+    totals: true
+    on_click: select
+    at: { x: 6, y: 12, w: 6, h: 4 }

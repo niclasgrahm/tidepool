@@ -137,6 +137,11 @@ pub enum VisualType {
     /// when not given, 10000 at most). A click selects both of a cell's
     /// values, a drag the values in its rectangle.
     Heatmap,
+    /// A pivot table: `dimensions` down the side (one to three), `across`
+    /// along the top (none to two), every metric in each cell. `totals`
+    /// adds a total row and column, computed as the metric over each, not
+    /// summed: right for averages and distinct counts too.
+    Pivot,
     /// The values of one dimension as a list on the grid. A click selects a
     /// value, as in a filter on the rail. It has no metrics.
     Filter,
@@ -148,7 +153,7 @@ pub enum VisualType {
 
 impl VisualType {
     /// Every type, in the order editors offer them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Kpi,
         Self::Bar,
         Self::Line,
@@ -156,6 +161,7 @@ impl VisualType {
         Self::Pie,
         Self::Scatter,
         Self::Heatmap,
+        Self::Pivot,
         Self::Filter,
         Self::Rows,
     ];
@@ -171,6 +177,7 @@ impl VisualType {
             Self::Pie => "pie",
             Self::Scatter => "scatter",
             Self::Heatmap => "heatmap",
+            Self::Pivot => "pivot",
             Self::Filter => "filter",
             Self::Rows => "rows",
         }
@@ -190,6 +197,9 @@ impl VisualType {
             }
             Self::Table => {
                 "any dimensions and metrics, sortable; without metrics, the combinations of the dimensions there are"
+            }
+            Self::Pivot => {
+                "dimensions down the side (1 to 3), `across` along the top (0 to 2), metrics in each cell; `totals: true` adds exact totals; a click selects a cell's values"
             }
             Self::Heatmap => {
                 "exactly two dimensions (across, up) and one metric, as a grid of coloured cells; a click selects a cell's two values"
@@ -226,6 +236,12 @@ pub struct Visual {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionRef>,
+    /// Pivot tables: the dimensions along the top, their values as columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub across: Vec<DimensionRef>,
+    /// Pivot tables: a total row and a total column.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub totals: bool,
     /// Metrics by name. A filter has none. A table without metrics shows
     /// each combination of its dimensions that the data has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -366,17 +382,17 @@ impl DashboardFile {
                 let _ = writeln!(out, "    description: {}", scalar(description));
             }
             if !visual.dimensions.is_empty() {
-                let dimensions: Vec<String> = visual
-                    .dimensions
-                    .iter()
-                    .map(|d| match d {
-                        DimensionRef::Field(field) => scalar(field),
-                        DimensionRef::Grained { field, grain } => {
-                            format!("{{ field: {}, grain: {} }}", scalar(field), word(grain))
-                        }
-                    })
-                    .collect();
-                let _ = writeln!(out, "    dimensions: [{}]", dimensions.join(", "));
+                let _ = writeln!(
+                    out,
+                    "    dimensions: [{}]",
+                    dimension_list(&visual.dimensions)
+                );
+            }
+            if !visual.across.is_empty() {
+                let _ = writeln!(out, "    across: [{}]", dimension_list(&visual.across));
+            }
+            if visual.totals {
+                out += "    totals: true\n";
             }
             if !visual.metrics.is_empty() {
                 let metrics: Vec<String> = visual.metrics.iter().map(|m| scalar(m)).collect();
@@ -447,6 +463,20 @@ fn scalar(text: &str) -> String {
     } else {
         serde_json::to_string(text).unwrap_or_default()
     }
+}
+
+/// Dimensions as a flow list, for [`DashboardFile::to_yaml`].
+fn dimension_list(dimensions: &[DimensionRef]) -> String {
+    let items: Vec<String> = dimensions
+        .iter()
+        .map(|d| match d {
+            DimensionRef::Field(field) => scalar(field),
+            DimensionRef::Grained { field, grain } => {
+                format!("{{ field: {}, grain: {} }}", scalar(field), word(grain))
+            }
+        })
+        .collect();
+    items.join(", ")
 }
 
 #[cfg(test)]
@@ -555,6 +585,8 @@ visuals:
                     title: None,
                     description: None,
                     dimensions: vec![DimensionRef::Field(name.to_string())],
+                    across: vec![DimensionRef::Field(name.to_string())],
+                    totals: true,
                     metrics: vec![name.to_string()],
                     compare: None,
                     sort: Some(Sort {

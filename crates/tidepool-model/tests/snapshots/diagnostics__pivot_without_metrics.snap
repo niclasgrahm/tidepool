@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `region_category_pivot`: a pivot shows metrics in its cells, and it has none
+  --> dashboards/sales.yaml:66:11
+   |
+66 |     type: pivot                        # median's total is the median of every order
+   |           ^^^^^
+   = help: give it `metrics: [...]`, or make it a `table` to list its dimensions' values
+
+1 error, 0 warnings

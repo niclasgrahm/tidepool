@@ -1,0 +1,12 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: visual `region_category_pivot`: `customers.region` is both down the side and across
+  --> dashboards/sales.yaml:69:14
+   |
+69 |     across: [customers.region]
+   |              ^^^^^^^^^^^^^^^^
+   = help: a field goes in `dimensions` or in `across`, not both: its cells would only fill the diagonal
+
+1 error, 0 warnings

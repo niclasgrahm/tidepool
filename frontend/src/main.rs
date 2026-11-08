@@ -23,6 +23,7 @@ mod layout;
 mod live;
 mod pages;
 mod palette;
+mod pivot;
 mod plot;
 mod relationships;
 mod route;

@@ -30,6 +30,7 @@
 
 | key | type | default | description |
 | --- | --- | --- | --- |
+| `across` | list of [`DimensionRef`](#dashboard-dimensionref) |  | Pivot tables: the dimensions along the top, their values as columns. |
 | `at` | [`GridPosition`](#dashboard-gridposition) | **required** |  |
 | `compare` | string |  | KPI tiles: a second metric shown as the comparison. |
 | `description` | string |  | What it shows, in a sentence: under its title, and for agents. |
@@ -42,6 +43,7 @@
 | `on_click` | [`ClickAction`](#dashboard-clickaction) |  | Bars and table rows: what a click does. |
 | `sort` | [`Sort`](#dashboard-sort) |  |  |
 | `title` | string |  | What its header says; made from its metrics and dimensions when left out. |
+| `totals` | boolean |  | Pivot tables: a total row and a total column. |
 | `type` | [`VisualType`](#dashboard-visualtype) | **required** |  |
 
 
@@ -66,16 +68,6 @@ Whole periods relative to now: the `last` ones of `unit`, ending with the curren
 | `search` | A text box, for a string field: the rows whose value contains what is typed are selected, ignoring the case of ASCII letters. |
 
 
-## `GridPosition` {#dashboard-gridposition}
-
-| key | type | default | description |
-| --- | --- | --- | --- |
-| `h` | integer | **required** |  |
-| `w` | integer | **required** |  |
-| `x` | integer | **required** |  |
-| `y` | integer | **required** |  |
-
-
 ## `DimensionRef` {#dashboard-dimensionref}
 
 A dimension: `dataset.field`, or a time field at a grain.
@@ -84,6 +76,16 @@ One of:
 
 - string
 - object with `field`, `grain`
+
+
+## `GridPosition` {#dashboard-gridposition}
+
+| key | type | default | description |
+| --- | --- | --- | --- |
+| `h` | integer | **required** |  |
+| `w` | integer | **required** |  |
+| `x` | integer | **required** |  |
+| `y` | integer | **required** |  |
 
 
 ## `BrushAction` {#dashboard-brushaction}
@@ -115,6 +117,7 @@ Type: `select`.
 | `pie` | Slices of a whole: one dimension, one metric. The largest `limit` slices (8 when not given, 12 at most); for a sum or a count, the rest as one more slice. A click selects a slice. |
 | `scatter` | Points by one dimension: the first metric across, the second up, a third (if any) as each point's size. `limit` points (1000 when not given, 5000 at most). A click selects a point, a drag the points in its rectangle. |
 | `heatmap` | A grid of cells by two dimensions (across, up), each coloured by one metric: weekday by hour, region by category. `limit` cells (2000 when not given, 10000 at most). A click selects both of a cell's values, a drag the values in its rectangle. |
+| `pivot` | A pivot table: `dimensions` down the side (one to three), `across` along the top (none to two), every metric in each cell. `totals` adds a total row and column, computed as the metric over each, not summed: right for averages and distinct counts too. |
 | `filter` | The values of one dimension as a list on the grid. A click selects a value, as in a filter on the rail. It has no metrics. |
 | `rows` | The newest rows of one table that pass the selection, newest first: a log tail. Its dimensions are the columns; `limit` is how many rows (100 when not given, 1000 at most). It has no metrics. |
 
