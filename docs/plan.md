@@ -964,7 +964,7 @@ result(view, selection, epoch) =
 
 ### 6.8 Measure vocabulary (after v0.1)
 
-**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Built: item 1, `total` (2026-11-08).
+**Status: proposed 2026-11-02.** D16 is the decision; this is the design. Built: items 1, `total`, and 3, more aggregates (2026-11-08).
 
 **Where we are.** A metric is one SQL aggregate expression (`SUM`, `COUNT`, `COUNT(DISTINCT …)`, `MIN`, `MAX`, `AVG`, with `FILTER (WHERE …)`), or a `derived` expression over other metrics. Four modifiers change what it sees: `table`, `ignore_selection`, `time_offset` and the model's `filter_direction`. That covers the simple half of what DAX's `CALCULATE` and Qlik's set analysis are used for. These are the gaps users will meet first:
 
@@ -995,7 +995,8 @@ Apache Ossie doesn't limit any of this. Its metric is a name, an expression and 
 
 2. **`set: {field: [values…]}`.** The metric sees these values on these fields *instead of* the session's selection on them. This is shorthand for `ignore_selection` plus a condition, but a condition on a dimension's field (`customers.region`), not only on the anchor's columns, as `FILTER` requires. A `set` field is never in `relevant` (§6.6), so changing it in the session costs nothing.
 
-3. **More aggregates.** `MEDIAN(x)`, `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP`, and `ARG_MAX(x, t)` / `ARG_MIN(x, t)` (the value of `x` on the row with the largest `t`: the latest reading, the closing balance). All exact. States: a code → count histogram for dictionary columns, a value list otherwise (§6.4's t-digest only behind an explicit `APPROX_` name, like `APPROX_COUNT_DISTINCT`). Deletes recompute, as for `MIN` and `MAX`. These take over item 4 of "After v0.1".
+3. ✓ (2026-11-08) As built: `MEDIAN`, `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)` (p a literal, kept in millionths in `AggCall::fraction`), `STDDEV_SAMP`/`STDDEV`, `STDDEV_POP`, `VAR_SAMP`/`VARIANCE`, `VAR_POP`, `ARG_MAX`/`MAX_BY` and `ARG_MIN`/`MIN_BY` (`AggCall::by`; rows where either argument is NULL skipped, ties broken by the value). States in `stats.rs`, shared by both executors: `Counted` (each value's bits → count, hashbrown) for quantiles, `Moments` (Welford, Chan's merge) for spreads. The fast path takes the quantiles and spreads over plain integer, decimal (as scaled integers) and float columns; `ARG_*` take the general path. None subtract, so deletes recompute. `WITHIN GROUP`, a second argument list and `IGNORE NULLS` are refused on every other function (they were ignored). Measured (`just bench-query`, 10M orders, region × category, 120 groups): revenue + median + p90 cold 0.75 s, fresh selections p50 0.23 s, against 24 ms and 8.5 ms with sums. The oracle generates each (with FILTER, over decimal, integer and float columns; DuckDB's `quantile_cont` on DOUBLE, `first(x ORDER BY t DESC, x DESC)` for the tie rule); planted bugs (rank `p·n` for `p·(n−1)`; sample variance over n) fail it.
+   Design: **More aggregates.** `MEDIAN(x)`, `PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x)`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP`, and `ARG_MAX(x, t)` / `ARG_MIN(x, t)` (the value of `x` on the row with the largest `t`: the latest reading, the closing balance). All exact. States: a code → count histogram for dictionary columns, a value list otherwise (§6.4's t-digest only behind an explicit `APPROX_` name, like `APPROX_COUNT_DISTINCT`). Deletes recompute, as for `MIN` and `MAX`. These take over item 4 of "After v0.1".
 
 4. **`per: [field…]` with `then`.** Aggregation in two steps. The expression is aggregated per combination of the visual's dimensions and the `per` fields (inner). Then `then`, a SQL aggregate over the inner value named `value`, aggregates those to the visual's dimensions (outer):
 
@@ -1456,7 +1457,7 @@ Effort is in focused engineer-weeks and is rough. The frontend track can run in 
 1. ~~Bidirectional filtering for filter widgets and selections~~ (done: `filter_direction: both`, §5.4)
 2. ~~Exposure (§9.2, D15): credential-scoped idempotency keys, the `security` change class, scoped ingest credentials, listeners per surface with fail closed, public ingest grants with limits, server-filled columns~~ (done 2026-10-17)
 3. Late binding of dimension attributes (no fact rescans on dimension upserts)
-4. Percentiles/median, approximate distinct (now part of 19, §6.8)
+4. ~~Percentiles/median~~ (done 2026-11-08, §6.8 item 3); approximate distinct (now part of 19, §6.8)
 5. Segment compaction and dictionary compaction
 6. Row-level deltas in frames for large tables
 7. Bookmarks and shareable selection URLs

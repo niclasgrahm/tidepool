@@ -14,6 +14,7 @@ pub mod hierarchy;
 mod plan;
 pub mod query;
 mod rows;
+mod stats;
 mod text;
 
 use std::sync::Arc;

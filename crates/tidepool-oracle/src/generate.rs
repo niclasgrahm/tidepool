@@ -732,6 +732,77 @@ pub fn schema(rng: &mut Rng) -> Schema {
             }
             metric
         },
+        {
+            // exact quantiles: DuckDB's quantile_cont interpolates the same
+            // way; on DOUBLE, so a decimal's middle isn't rounded to cents
+            let (fraction, p) = *rng.pick(&[
+                ("0.5", "0.5"),
+                ("0.1", "0.1"),
+                ("0.25", "0.25"),
+                ("0.9", "0.9"),
+                ("1", "1.0"),
+            ]);
+            let (column, sql) = *rng.pick(&[
+                ("f0.amount", "CAST(f0.amount AS DOUBLE)"),
+                ("f0.qty", "CAST(f0.qty AS DOUBLE)"),
+                ("f0.score", "f0.score"),
+            ]);
+            base(
+                "f0_quantile",
+                &format!("PERCENTILE_CONT({fraction}) WITHIN GROUP (ORDER BY {column})"),
+                &format!("quantile_cont({sql}, {p})"),
+                "f0",
+                None,
+                Ignore::None,
+            )
+        },
+        base(
+            "f0_median",
+            "MEDIAN(f0.amount) FILTER (WHERE f0.qty > 1)",
+            "quantile_cont(CAST(f0.amount AS DOUBLE), 0.5) FILTER (WHERE f0.qty > 1)",
+            "f0",
+            None,
+            Ignore::None,
+        ),
+        {
+            let (func, column, sql) = *rng.pick(&[
+                ("STDDEV_SAMP", "f0.score", "stddev_samp(f0.score)"),
+                (
+                    "STDDEV_POP",
+                    "f0.amount",
+                    "stddev_pop(CAST(f0.amount AS DOUBLE))",
+                ),
+                ("VAR_SAMP", "f0.qty", "var_samp(CAST(f0.qty AS DOUBLE))"),
+                ("VAR_POP", "f0.score", "var_pop(f0.score)"),
+            ]);
+            base(
+                "f0_spread",
+                &format!("{func}({column})"),
+                sql,
+                "f0",
+                None,
+                Ignore::None,
+            )
+        },
+        {
+            // the value on the newest (or oldest) row; ties broken by the
+            // value, so the answer is one
+            let (model, sql) = *rng.pick(&[
+                (
+                    "ARG_MAX(f0.status, f0.seen_at)",
+                    "first(f0.status ORDER BY f0.seen_at DESC, f0.status DESC) FILTER (WHERE f0.status IS NOT NULL AND f0.seen_at IS NOT NULL)",
+                ),
+                (
+                    "ARG_MIN(f0.amount, f0.day)",
+                    "first(f0.amount ORDER BY f0.day ASC, f0.amount ASC) FILTER (WHERE f0.amount IS NOT NULL AND f0.day IS NOT NULL)",
+                ),
+                (
+                    "ARG_MAX(f0.qty, d0.tier)",
+                    "first(f0.qty ORDER BY d0.tier DESC, f0.qty DESC) FILTER (WHERE f0.qty IS NOT NULL AND d0.tier IS NOT NULL)",
+                ),
+            ]);
+            base("f0_latest", model, sql, "f0", None, Ignore::None)
+        },
         derived(
             "f0_share",
             &["f0_amount", "f0_amount_total"],

@@ -423,6 +423,22 @@ case!(
     )]
 );
 case!(
+    median_of_a_string,
+    [Replace(
+        "model.ossie.yaml",
+        "\"MEDIAN(orders.amount)\"",
+        "\"MEDIAN(orders.status)\""
+    )]
+);
+case!(
+    within_group_on_a_sum,
+    [Replace(
+        "model.ossie.yaml",
+        "\"PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY orders.amount)\"",
+        "\"SUM(orders.amount) WITHIN GROUP (ORDER BY orders.amount)\""
+    )]
+);
+case!(
     total_of_an_unknown_field,
     [Replace(
         "model.ossie.yaml",

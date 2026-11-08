@@ -146,6 +146,8 @@ struct Agg {
     /// FILTER over one dictionary-coded read: (read, pass by final code).
     filter: Option<(usize, Vec<bool>)>,
     ty: Type,
+    /// A percentile's fraction, in millionths.
+    fraction: Option<u32>,
 }
 
 /// `value` of `column_type` as a raw stored integer, rounded up: so
@@ -474,6 +476,23 @@ pub(crate) fn prepare<'s>(
             (AggFunc::Sum, false, Some(Kind::Floats)) => call.ty == Type::Float,
             (AggFunc::Avg, false, Some(Kind::Ints | Kind::Floats)) => true,
             (AggFunc::Min | AggFunc::Max, _, Some(_)) => true,
+            // over plain numbers (a decimal is its scaled integer)
+            (
+                AggFunc::Median
+                | AggFunc::Percentile
+                | AggFunc::StddevSamp
+                | AggFunc::StddevPop
+                | AggFunc::VarSamp
+                | AggFunc::VarPop,
+                false,
+                Some(Kind::Ints | Kind::Floats),
+            ) => matches!(
+                reads[arg.unwrap_or(0)].layout.column_type,
+                ColumnType::Int32
+                    | ColumnType::Int64
+                    | ColumnType::Float64
+                    | ColumnType::Decimal { .. }
+            ),
             _ => false,
         };
         if !ok {
@@ -505,6 +524,7 @@ pub(crate) fn prepare<'s>(
             arg,
             filter,
             ty: call.ty,
+            fraction: call.fraction,
         });
     }
 
@@ -1015,6 +1035,11 @@ enum State {
     Max(Vec<Option<Cell>>),
     DistinctCodes(Vec<RoaringBitmap>),
     DistinctNumbers(Vec<HashSet<i64>>),
+    /// `MEDIAN` and `PERCENTILE_CONT`: raw values (scaled integers for
+    /// decimals), counted.
+    Quantile(Vec<crate::stats::Counted>),
+    /// Standard deviations and variances, of raw values.
+    Moments(Vec<crate::stats::Moments>),
 }
 
 impl State {
@@ -1030,6 +1055,17 @@ impl State {
             (AggFunc::Avg, ..) => Self::AvgInt(Vec::new(), Vec::new()),
             (AggFunc::Min, ..) => Self::Min(Vec::new()),
             (AggFunc::Max, ..) => Self::Max(Vec::new()),
+            (AggFunc::Median | AggFunc::Percentile, ..) => Self::Quantile(Vec::new()),
+            // ARG_MAX/ARG_MIN take the general path (`prepare` refuses them)
+            (
+                AggFunc::StddevSamp
+                | AggFunc::StddevPop
+                | AggFunc::VarSamp
+                | AggFunc::VarPop
+                | AggFunc::ArgMax
+                | AggFunc::ArgMin,
+                ..,
+            ) => Self::Moments(Vec::new()),
         }
     }
 
@@ -1055,6 +1091,8 @@ impl State {
             Self::Min(v) | Self::Max(v) => v.resize(groups, None),
             Self::DistinctCodes(v) => v.resize_with(groups, RoaringBitmap::new),
             Self::DistinctNumbers(v) => v.resize_with(groups, HashSet::new),
+            Self::Quantile(v) => v.resize_with(groups, crate::stats::Counted::default),
+            Self::Moments(v) => v.resize_with(groups, crate::stats::Moments::default),
         }
     }
 
@@ -1062,6 +1100,7 @@ impl State {
     /// Feed the rows `sel` (in groups `groups`) of `values`, counted
     /// `weight` times: 1 to add rows, -1 to take deleted ones back out (only
     /// for subtractable aggregates, see [`Agg::subtractable`]).
+    #[allow(clippy::too_many_lines)] // one arm per state, as the others
     fn update(
         &mut self,
         sel: &[u32],
@@ -1162,6 +1201,36 @@ impl State {
                     }
                 }
             }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Quantile(counted), Some(Values::Ints(v, n))) => {
+                for (r, g) in rows {
+                    if !n[r] {
+                        counted[g].add(v[r] as f64);
+                    }
+                }
+            }
+            (Self::Quantile(counted), Some(Values::Floats(v, n))) => {
+                for (r, g) in rows {
+                    if !n[r] {
+                        counted[g].add(v[r]);
+                    }
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Moments(moments), Some(Values::Ints(v, n))) => {
+                for (r, g) in rows {
+                    if !n[r] {
+                        moments[g].add(v[r] as f64);
+                    }
+                }
+            }
+            (Self::Moments(moments), Some(Values::Floats(v, n))) => {
+                for (r, g) in rows {
+                    if !n[r] {
+                        moments[g].add(v[r]);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1203,6 +1272,14 @@ impl State {
                 let taken = std::mem::take(&mut b[from]);
                 a[into].extend(taken);
             }
+            (Self::Quantile(a), Self::Quantile(b)) => {
+                let taken = std::mem::take(&mut b[from]);
+                a[into].merge(taken);
+            }
+            (Self::Moments(a), Self::Moments(b)) => {
+                let taken = std::mem::take(&mut b[from]);
+                a[into].merge(taken);
+            }
             _ => {}
         }
     }
@@ -1237,6 +1314,16 @@ impl State {
             Self::DistinctNumbers(v) => {
                 Scalar::Int(i64::try_from(v[group].len()).unwrap_or(i64::MAX))
             }
+            // raw values: a decimal's scaled integers, divided back here
+            Self::Quantile(v) => v[group]
+                .quantile(agg.fraction.unwrap_or(500_000))
+                .map_or(Scalar::Null, |q| {
+                    Scalar::Float(q / 10f64.powi(i32::from(scale)))
+                }),
+            Self::Moments(v) => v[group]
+                .scaled(10f64.powi(-i32::from(scale)))
+                .finish(agg.func)
+                .map_or(Scalar::Null, Scalar::Float),
         }
     }
 }

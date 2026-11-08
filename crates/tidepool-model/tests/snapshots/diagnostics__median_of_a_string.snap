@@ -1,0 +1,11 @@
+---
+source: crates/tidepool-model/tests/diagnostics.rs
+expression: rendered
+---
+error: metric `median_order_value`: MEDIAN needs a number, not a string
+   --> model.ossie.yaml:107:63
+    |
+107 |     expression: { dialects: [{ dialect: ANSI_SQL, expression: "MEDIAN(orders.status)" }] }
+    |                                                               ^^^^^^^^^^^^^^^^^^^^^^^
+
+1 error, 0 warnings

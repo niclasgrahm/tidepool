@@ -23,7 +23,26 @@ pub use sqlparser::ast::Expr as Ast;
 
 /// Aggregate functions Tidepool computes. Anything else that is called is a
 /// row-level function.
-pub const AGGREGATES: [&str; 5] = ["sum", "count", "avg", "min", "max"];
+pub const AGGREGATES: [&str; 17] = [
+    "sum",
+    "count",
+    "avg",
+    "min",
+    "max",
+    "median",
+    "percentile_cont",
+    "stddev_samp",
+    "stddev_pop",
+    "var_samp",
+    "var_pop",
+    "arg_max",
+    "arg_min",
+    // the other spellings DuckDB and Postgres take
+    "stddev",
+    "variance",
+    "max_by",
+    "min_by",
+];
 
 /// A parse failure, as one line.
 #[derive(Clone, Debug, PartialEq, Eq)]

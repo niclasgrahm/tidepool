@@ -695,3 +695,36 @@ async fn a_share_of_the_total_repeats_the_total_across_the_groups() {
         json!([["north", "21.75"], ["south", "21.75"]])
     );
 }
+
+#[tokio::test]
+async fn medians_percentiles_and_the_latest_value_are_exact() {
+    let state = loaded().await;
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["median_order_value", "order_value_p90", "latest_status"]}),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let row = reply.json()["rows"][0].clone();
+    // 4.00, 7.25, 10.50: the middle one; and 0.8 of the way from 7.25 to 10.50
+    assert_eq!(row[0], json!(7.25), "{row}");
+    assert!(
+        (row[1].as_f64().unwrap_or(0.0) - 9.85).abs() < 1e-9,
+        "{row}"
+    );
+    // the newest order (o3, 20 February) was paid
+    assert_eq!(row[2], "paid", "{row}");
+    // per group, as any metric
+    let reply = post(
+        &state,
+        "/v1/query",
+        &json!({"metrics": ["median_order_value", "latest_status"],
+                "dimensions": [{"field": "customers.region"}]}),
+    )
+    .await;
+    assert_eq!(
+        reply.json()["rows"],
+        json!([["north", 7.25, "returned"], ["south", 7.25, "paid"]])
+    );
+}
